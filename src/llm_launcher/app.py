@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import os
 import platform
 import re
 import shlex
@@ -70,6 +71,79 @@ class BackendBody(BaseModel):
     python: str | None = None
     command_binary: str | None = None
     reset: bool = False
+
+
+def hf_hub_cache_dir() -> Path:
+    """huggingface_hub の既定キャッシュパス解決 (HF_HUB_CACHE > HF_HOME > ~/.cache)。"""
+    env = os.environ.get("HF_HUB_CACHE")
+    if env:
+        return Path(env).expanduser()
+    home = os.environ.get("HF_HOME")
+    base = Path(home).expanduser() if home else Path.home() / ".cache" / "huggingface"
+    return base / "hub"
+
+
+def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, Any]:
+    """HF Hub キャッシュの models--org--name からモデル一覧を構築する。"""
+    base = base or hf_hub_cache_dir()
+    result: dict[str, Any] = {"cache_dir": str(base), "exists": base.is_dir(), "models": []}
+    if not base.is_dir():
+        return result
+    entries: list[tuple[float, dict[str, Any]]] = []
+    for d in base.iterdir():
+        if not d.is_dir() or not d.name.startswith("models--"):
+            continue
+        repo_id = d.name[len("models--"):].replace("--", "/", 1)
+        snaps_dir = d / "snapshots"
+        if not snaps_dir.is_dir():
+            continue
+        refs: dict[str, str] = {}
+        refs_dir = d / "refs"
+        if refs_dir.is_dir():
+            for rf in refs_dir.rglob("*"):        # refs/pr/1 のような入れ子ブランチにも対応
+                try:
+                    if rf.is_file():
+                        refs[str(rf.relative_to(refs_dir))] = rf.read_text().strip()
+                except OSError:
+                    continue
+        snaps = [s for s in snaps_dir.iterdir() if s.is_dir()]
+        if not snaps:
+            continue
+        def snap_mtime(s: Path) -> float:
+            try:
+                return s.stat().st_mtime
+            except OSError:
+                return 0
+        snaps.sort(key=snap_mtime, reverse=True)
+        wanted = refs.get("main") or refs.get("master")
+        chosen = next((s for s in snaps if wanted and s.name.startswith(wanted)), snaps[0])
+        revision = next((k for k, v in refs.items() if chosen.name.startswith(v)), None) or (wanted or "")[:10] or "main"
+        gguf: list[dict[str, Any]] = []
+        has_weights = False
+        try:
+            for f in sorted(chosen.iterdir()):
+                if not f.is_file():
+                    continue
+                size = f.stat().st_size
+                suf = f.suffix.lower()
+                if suf in (".safetensors", ".bin", ".pt", ".gguf") and size > 1 << 20:
+                    has_weights = True
+                if suf == ".gguf":
+                    gguf.append({"name": f.name, "size": size})
+                if len(gguf) >= max_files:
+                    break
+        except OSError:
+            pass
+        entries.append((snap_mtime(chosen), {
+            "repo_id": repo_id,
+            "snapshot": str(chosen),
+            "revision": revision,
+            "has_weights": has_weights,
+            "gguf": gguf,
+        }))
+    entries.sort(key=lambda t: t[0], reverse=True)
+    result["models"] = [m for _, m in entries]
+    return result
 
 
 def lan_ip() -> str:
@@ -390,6 +464,17 @@ def create_app(root: Path) -> FastAPI:
         if bid not in BACKENDS:
             raise HTTPException(404, "バックエンドが見つかりません")
         return await detect(bid, force=True)
+
+    # ------------------------------------------------------- huggingface hub
+
+    hf_cache_state: dict[str, Any] = {"ts": 0.0, "data": None}
+
+    @app.get("/api/hf-models")
+    async def hf_models(refresh: int = 0) -> dict[str, Any]:
+        if refresh or hf_cache_state["data"] is None or time.monotonic() - hf_cache_state["ts"] > 15:
+            hf_cache_state["data"] = await asyncio.to_thread(scan_hf_cache)
+            hf_cache_state["ts"] = time.monotonic()
+        return hf_cache_state["data"]
 
     # -------------------------------------------------------------- static
 

@@ -58,7 +58,8 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 2. 選んだ瞬間に、そのバックエンドの全起動パラメータがセクション別に並ぶ
    (モデル・提供設定 / 並列・分散 / スケジューリング・メモリ / 実行エンジン / サーバー・API / ツール呼び出し・LoRA / サンプリング / ログ)
 3. 各項目には実プロダクトの既定値が入力済み (--tp-size 1、--gpu-memory-utilization 0.9、--ctx-size 4096、--temp 0.80、--port 30000 …)。選択肢付き (dtype, quantization, attention backend, tool-call parser …) とフラグON/OFFもリストから操作
-4. プレビューで最終コマンドを確認しながら編集。空欄にした項目はフラグ自体が付かないので、バックエンド本来の挙動に委ねられます
+4. **モデル欄には HF Hub キャッシュのプルダウンが付く**: `~/.cache/huggingface/hub` (または `HF_HUB_CACHE` / `HF_HOME`) をスキャンし、ダウンロード済みのモデルをパス直書きなしで選択できます (llama.cpp なら snapshot 内の .gguf ファイルまで選択可。「再スキャン」で更新)
+5. プレビューで最終コマンドを確認しながら編集。空欄にした項目はフラグ自体が付かないので、バックエンド本来の挙動に委ねられます
 
 ### コマンド組み立ての仕組み
 
@@ -77,6 +78,8 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 - `GET/POST/PUT/DELETE /api/profiles[/{id}]` — プロファイル CRUD。ボディは `{name, backend, values, extra_args, env, cwd, command, custom_only, note}` (旧 configs ボディは平坦化して互換受理)
 - `POST /api/sessions` `{profile_id, force?}` — 起動 (バックエンドはプロファイルに従う。ポート衝突は 409、`force` で回避可)
 - `POST /api/sessions/{id}/stop` / `restart`、`GET /api/sessions/{id}/log?cursor=` — 停止 / 再起動 / ログ
+- `GET /api/backends/{id}` ... バックエンド設定・再検出
+- `GET /api/hf-models[?refresh=1]` — HF Hub キャッシュスキャン結果 (`{cache_dir, exists, models:[{repo_id, snapshot, revision, has_weights, gguf:[{name,size}]}]}`)
 - `PUT /api/backends/{id}`、`POST /api/backends/{id}/detect` — バックエンド設定・再検出
 - OpenAPI ドキュメント: `GET /api/docs`
 

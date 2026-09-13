@@ -185,6 +185,7 @@ details.adv .inner{padding:0 12px 12px}
 const S = {
   state: null, tab: "launch", filter: "all",
   editing: null,           // ドラフト: {name,backend,values,extra_args,env,cwd,command,custom_only,note}
+  hf: undefined,           // HF Hub キャッシュスキャン結果 (遅延取得)
   openLogs: new Set(), logCursor: {}, autoScroll: {}, busy: {},
 };
 const $ = (q, el=document) => el.querySelector(q);
@@ -524,6 +525,7 @@ function openEditor(pid) {
   S.editing = draft;
   $("#modal").style.display = "flex"; $("#modal-veil").style.display = "block";
   renderEditor();
+  if (!S.hf) loadHf().then(() => { if (S.editing) renderEditor(); });
 }
 function closeEditor() {
   S.editing = null;
@@ -580,6 +582,51 @@ async function showPreview() {
     el.style.color = r.ok ? "#9fd3a8" : "var(--err)";
   } catch (e) { el.textContent = "⚠ " + e.message; el.style.color = "var(--err)"; }
 }
+/* ---- HuggingFace Hub キャッシュからのモデル選択 ------------------------ */
+const fmtSize = b => b > (1<<30) ? (b/(1<<30)).toFixed(1)+"GB" : b > (1<<20) ? Math.round(b/(1<<20))+"MB" : b;
+async function loadHf(force = false) {
+  if (S.hf && !force) return S.hf;
+  try { S.hf = await api("/api/hf-models" + (force ? "?refresh=1" : "")); }
+  catch { S.hf = {cache_dir:"?", exists:false, models:[]}; }
+  return S.hf;
+}
+function hfPickerHtml(f) {
+  const hf = S.hf;
+  if (hf === undefined) return `<div class="muted" style="font-size:11.5px;margin-top:4px">HFキャッシュを確認中…</div>`;
+  const dirNote = `<div class="muted mono" style="font-size:10.5px;margin-top:3px">${esc(hf.cache_dir)} · <a href="#" onclick="hfReload();return false">再スキャン</a></div>`;
+  if (!hf.exists) return `<div class="muted" style="font-size:11.5px;margin-top:4px">HFキャッシュ未作成</div>${dirNote}`;
+  const isGguf = S.editing?.backend === "llamacpp";
+  const opts = [];
+  for (const m of (hf.models || [])) {
+    if (isGguf) {
+      for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
+      if (!(m.gguf || []).length && m.has_weights !== false)
+        opts.push({v: m.snapshot, label: `${m.repo_id} · (ggufなし・ディレクトリ指定)`});
+    } else {
+      opts.push({v: m.snapshot, label: `${m.repo_id}${m.revision ? " · rev " + m.revision : ""}`});
+    }
+  }
+  if (!opts.length) return `<div class="muted" style="font-size:11.5px;margin-top:4px">キャッシュにモデルがありません${isGguf ? " (gguf検出なし)" : ""}</div>${dirNote}`;
+  return `
+    <select style="margin-top:5px" onchange="hfPick('${f.key}', this.value)">
+      <option value="">💾 HFキャッシュから選択 (${opts.length})</option>
+      ${opts.map(o => `<option value="${esc(o.v)}">${esc(o.label)}</option>`).join("")}
+    </select>${dirNote}`;
+}
+function hfPick(key, val) {
+  if (!val) return;
+  const el = $(`#edv-${key}`);
+  if (!el) return;
+  el.value = val;
+  el.dispatchEvent(new Event("input", {bubbles: true}));
+  toast("キャッシュのパスを設定しました");
+}
+async function hfReload() {
+  S.hf = null; renderEditor();          // 「確認中…」表示
+  await loadHf(true);
+  if (S.editing) renderEditor();
+}
+
 function renderEditor() {
   const d = S.editing; if (!d) return;
   const b = backendById(d.backend);
@@ -595,9 +642,10 @@ function renderEditor() {
       <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></label>
       <select id="${id}" data-fkey="${f.key}">${(f.options||[]).map(o => `<option ${o===val?"selected":""} value="${esc(o)}">${o===""?"(指定しない)":esc(o)}</option>`).join("")}</select>${help}</div>`;
     const t = f.type === "int" || f.type === "float" ? "number" : "text";
+    const isModel = f.key === "model" || f.key === "model_path";
     return `
       <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></label>
-      <input type="${t}" ${f.type==="float"?'step="0.01"':""} inputmode="${t==="number"?"decimal":""}" id="${id}" data-fkey="${f.key}" value="${esc(val)}" placeholder="${esc(f.placeholder||"")}">${help}</div>`;
+      <input type="${t}" ${f.type==="float"?'step="0.01"':""} inputmode="${t==="number"?"decimal":""}" id="${id}" data-fkey="${f.key}" value="${esc(val)}" placeholder="${esc(f.placeholder||"")}">${help}${isModel ? hfPickerHtml(f) : ""}</div>`;
   };
   // バックエンドごとにパラメータをセクション別へリスト化 (既定値プリフィル済み)
   const sections = (b?.sections?.length ? b.sections : [{id:"model", label:"モデル"}]);
