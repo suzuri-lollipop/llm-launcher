@@ -507,6 +507,7 @@ async function pumpLogs() {
     try {
       const cur = S.logCursor[sid] || 0;
       const r = await api(`/api/sessions/${sid}/log?cursor=${cur}`);
+      const hadBuf = S.logBuf[sid] != null;
       let buf = S.logBuf[sid];
       if (buf == null || r.cursor < cur) buf = r.text;          // 初回 / リセット
       else if (r.text) buf += r.text;                            // 差分追記
@@ -515,10 +516,11 @@ async function pumpLogs() {
       const el = $(`#logbox-${sid}`);
       if (!el) continue;
       const written = el.dataset.len != null ? +el.dataset.len : -1;
-      if (written >= 0 && written <= buf.length) {
-        if (buf.length > written) el.insertAdjacentText("beforeend", buf.slice(written));  // 差分のみ (選択を壊さない)
-      } else {
-        el.textContent = buf;                                    // 復元 or 不等
+      // 初回填成 / リセット / 復元直後 → 全文を確定。以降は差分のみ追記して選択を壊さない
+      if (!hadBuf || written < 0 || written > buf.length) {
+        el.textContent = buf;
+      } else if (buf.length > written) {
+        el.insertAdjacentText("beforeend", buf.slice(written));
       }
       el.dataset.len = buf.length;
       if (S.autoScroll[sid] !== false &&
