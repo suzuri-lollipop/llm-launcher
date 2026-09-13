@@ -223,12 +223,12 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
     command = (profile.get("command") or "").strip() or backend["default_command"]
     resolved = resolve_command_tokens(root, command, python=python, binary=binary,
                                       values=values)
+    if backend["kind"] == "binary" and not binary:
+        raise ValueError("llama-server が見つかりません。バックエンド設定でパスを指定するか、"
+                         "module/llama.cpp をビルドしてください")
     if not resolved.strip():
         raise ValueError("起動コマンドが空です")
     argv = shlex.split(resolved)
-    if backend["kind"] == "binary" and "{llama_server}" in command and not binary:
-        raise ValueError("llama-server が見つかりません。バックエンド設定でパスを指定するか、"
-                         "module/llama.cpp をビルドしてください")
     for field in ([] if profile.get("custom_only") else backend.get("fields", [])):
         key = field["key"]
         val = values.get(key)
