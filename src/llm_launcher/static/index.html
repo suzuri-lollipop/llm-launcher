@@ -98,6 +98,9 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
 .switch .lab{font-size:13.5px}
 .fgrid{display:grid;gap:0 14px}
 @media(min-width:620px){.fgrid{grid-template-columns:1fr 1fr}}
+.sec-h{grid-column:1/-1;font-size:12px;font-weight:800;color:var(--acc);letter-spacing:.4px;
+  border-top:1px solid var(--line);margin-top:14px;padding-top:10px}
+.sec-h:first-child{border-top:0;margin-top:0;padding-top:0}
 pre.cmdprev{
   background:#0a0d12;border:1px solid var(--line);border-radius:var(--r2);
   padding:10px 12px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:#9fd3a8;
@@ -471,7 +474,7 @@ function renderProfiles() {
       <div class="kvs" style="margin-top:10px">
         <span>モデル</span><span class="v ellip">${esc(v.model || "-")}</span>
         <span>エンドポイント</span><span class="v mono">${v.port ? esc(`${S.state.system.ip}:${v.port}`) : "-"}</span>
-        <span>追加引数</span><span class="v ellip mono">${esc(p.extra_args || "-")}</span>
+        ${p.extra_args ? `<span>追加引数(legacy)</span><span class="v ellip mono">${esc(p.extra_args)}</span>` : ""}
         <span>更新</span><span class="v">${fmtAgo(p.updated_at)}</span>
       </div>
       ${p.note ? `<div class="muted" style="margin-top:8px">${esc(p.note)}</div>` : ""}
@@ -583,7 +586,7 @@ function renderEditor() {
   const d = S.editing; if (!d) return;
   const b = backendById(d.backend);
   const sheet = $("#editor-sheet");
-  const fieldsHtml = (b?.fields || []).map(f => {
+  const fieldHtml = f => {
     const val = d.values[f.key] ?? "";
     const id = `edv-${f.key}`;
     const help = f.help ? `<div class="muted" style="font-size:11px;margin-top:2px">${esc(f.help)}</div>` : "";
@@ -597,7 +600,15 @@ function renderEditor() {
     return `
       <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></label>
       <input type="${t}" ${f.type==="float"?'step="0.01"':""} inputmode="${t==="number"?"decimal":""}" id="${id}" data-fkey="${f.key}" value="${esc(val)}" placeholder="${esc(f.placeholder||"")}">${help}</div>`;
+  };
+  // バックエンドごとにパラメータをセクション別へリスト化 (既定値プリフィル済み)
+  const sections = (b?.sections?.length ? b.sections : [{id:"model", label:"モデル"}]);
+  const fieldsHtml = sections.map(sec => {
+    const fs = (b?.fields || []).filter(f => (f.section || "model") === sec.id);
+    if (!fs.length) return "";
+    return `<div class="sec-h">${esc(sec.label)} <span class="muted" style="font-weight:400">(${fs.length}項目)</span></div>` + fs.map(fieldHtml).join("");
   }).join("");
+  const legacyExtra = String(d.extra_args || "").trim();
   sheet.innerHTML = `
     <h3>${d.id ? "プロファイル編集" : "新規プロファイル"}</h3>
     <label class="f" for="ed-name">プロファイル名</label>
@@ -607,10 +618,15 @@ function renderEditor() {
       ${(S.state?.backends||[]).map(bb => `<option value="${bb.id}" ${bb.id===d.backend?"selected":""}>${esc(bb.name)}</option>`).join("")}
     </select>
     <div class="muted" style="margin-top:6px">${esc(b?.desc || "")}</div>
-    <h2 class="view-title" style="margin:16px 2px 0">起動パラメータ <span class="muted">(${esc(b?.name||"")} 既定値入り・変更する項目だけ触ってください)</span></h2>
+    <h2 class="view-title" style="margin:16px 2px 0">起動パラメータ <span class="muted">(${esc(b?.name||"")} 全項目リスト化・既定値入り。変更する項目だけ編集してください)</span></h2>
     <div class="fgrid" style="margin-top:4px">${fieldsHtml}</div>
-    <label class="f" for="ed-extra">追加引数 (生のCLIフラグ・上級者向け)</label>
-    <textarea id="ed-extra" placeholder="--some-flag 0.5 --another-flag">${esc(d.extra_args)}</textarea>
+    ${legacyExtra ? `
+    <details class="adv" open>
+      <summary>追加引数 (レガシー項目 — 現在の値: ${esc(legacyExtra)})</summary>
+      <div class="inner">
+        <textarea id="ed-extra" placeholder="多くの項目は上のリストから設定できます">${esc(d.extra_args)}</textarea>
+      </div>
+    </details>` : ""}
     <label class="f" for="ed-env">環境変数 (KEY=VALUE を1行ずつ)</label>
     <textarea id="ed-env" placeholder="CUDA_VISIBLE_DEVICES=0">${esc(envToText(d.env))}</textarea>
     <details class="adv" ${d.cwd||d.command||d.custom_only?"open":""}>
@@ -621,7 +637,7 @@ function renderEditor() {
         <label class="f" for="ed-cwd">作業ディレクトリ (空 = プロジェクトルート)</label>
         <input type="text" id="ed-cwd" class="mono" value="${esc(d.cwd)}">
         <label class="switch"><input type="checkbox" id="ed-custom" ${d.custom_only?"checked":""}>
-          <span class="track"></span><span class="lab" style="font-size:12.5px">コマンドのみモード (上のパラメータ自動付与を止める。追加引数は有効)</span></label>
+          <span class="track"></span><span class="lab" style="font-size:12.5px">コマンドのみモード (上のパラメータ自動付与を止める)</span></label>
         <div class="muted" style="font-size:11.5px">トークン: {python} {llama_server} {module} {root} と値変数 {model} {port} 等が使えます</div>
       </div>
     </details>
@@ -643,7 +659,7 @@ function renderEditor() {
   });
   ["ed-extra","ed-env","ed-command","ed-cwd"].forEach(id => {
     const el = $(`#${id}`);
-    el.addEventListener("input", () => { collectDraft(); schedulePreview(); });
+    if (el) el.addEventListener("input", () => { collectDraft(); schedulePreview(); });
   });
   $("#ed-custom").addEventListener("change", () => { collectDraft(); schedulePreview(); });
   ["ed-name","ed-note"].forEach(id => $(`#${id}`).addEventListener("input", collectDraft));

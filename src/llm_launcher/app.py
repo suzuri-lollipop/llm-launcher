@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
-from .backends import BACKENDS, resolve_port
+from .backends import (SECTIONS_JA, BACKENDS, resolve_port, sections_order)
 from .process import ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 
@@ -180,6 +180,7 @@ def create_app(root: Path) -> FastAPI:
             "python_override": st.get("python", ""),
             "binary_override": st.get("command_binary", ""),
             "fields": b["fields"],
+            "sections": [{"id": s, "label": SECTIONS_JA.get(s, s)} for s in sections_order(b)],
             "default_port": b.get("default_port", ""),
             "detection": det,
         }
