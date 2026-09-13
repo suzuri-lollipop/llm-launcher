@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# llm-launcher 実行データ (プロファイル・起動履歴・ログ)
+/data/
+# モジュール内ビルド成果物
+module/*/build/
+module/*/build-*/
+*.egg-info/

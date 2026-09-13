@@ -1,0 +1,730 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<title>LLM Launcher</title>
+<style>
+:root{
+  --bg:#0e1116; --bg2:#151a22; --card:#1a2029; --card2:#20272f;
+  --line:#2a323d; --text:#e6ebf1; --sub:#8b98a9;
+  --acc:#4da3ff; --ok:#3ddc84; --warn:#ffb020; --err:#ff5d5d; --purple:#b58cff;
+  --vllm:#4da3ff; --sglang:#3ddc84; --llamacpp:#ffb020; --freetoken:#b58cff;
+  --r:14px; --r2:10px;
+}
+*{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
+  font-size:15px; line-height:1.55; padding-bottom:calc(72px + env(safe-area-inset-bottom));
+}
+a{color:var(--acc); text-decoration:none}
+header{
+  position:sticky; top:0; z-index:20;
+  background:rgba(14,17,22,.88); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+  padding:calc(10px + env(safe-area-inset-top)) 16px 10px;
+  display:flex; align-items:center; gap:10px;
+}
+header h1{font-size:17px; margin:0; letter-spacing:.3px}
+header .meta{margin-left:auto; font-size:11.5px; color:var(--sub); text-align:right; line-height:1.3}
+#live-dot{width:9px;height:9px;border-radius:50%;background:var(--err);flex:none}
+#live-dot.on{background:var(--ok)}
+main{max-width:1080px;margin:0 auto;padding:14px 14px 20px}
+h2.view-title{font-size:15px;color:var(--sub);margin:6px 2px 12px;font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
+.grid{display:grid;gap:12px}
+@media(min-width:760px){.grid.c2{grid-template-columns:1fr 1fr}}
+.row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.grow{flex:1 1 auto;min-width:0}
+.muted{color:var(--sub);font-size:12.5px}
+.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px}
+.ellip{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+button,.btn{
+  appearance:none;border:1px solid var(--line);background:var(--card2);color:var(--text);
+  border-radius:var(--r2);padding:10px 14px;font-size:14px;min-height:42px;cursor:pointer;
+  display:inline-flex;align-items:center;gap:6px;justify-content:center;font-family:inherit;
+}
+button:active{transform:scale(.97)}
+button.primary{background:var(--acc);border-color:var(--acc);color:#04101f;font-weight:700}
+button.danger{color:var(--err);border-color:#4c2a30}
+button.ghost{background:transparent}
+button:disabled{opacity:.45;cursor:default}
+.badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;
+  padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--sub);background:var(--bg2)}
+.badge .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.badge.ok{color:var(--ok);border-color:#274d38;background:#12251c}
+.badge.warn{color:var(--warn);border-color:#4d3d1f;background:#241d10}
+.badge.err{color:var(--err);border-color:#4d2323;background:#241213}
+.badge.info{color:var(--acc);border-color:#254059;background:#12202e}
+.badge.purple{color:var(--purple);border-color:#3d2f55;background:#1a1626}
+.chip{font-size:11.5px;font-weight:700;padding:2.5px 8px;border-radius:6px;color:#04101f}
+.chip.vllm{background:var(--vllm)} .chip.sglang{background:var(--sglang)}
+.chip.llamacpp{background:var(--llamacpp)} .chip.freetoken{background:var(--purple);color:#1a1626}
+.filters{display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;scrollbar-width:none}
+.filters::-webkit-scrollbar{display:none}
+.fchip{border:1px solid var(--line);background:var(--bg2);color:var(--sub);border-radius:999px;
+  padding:7px 14px;font-size:13px;white-space:nowrap;cursor:pointer;min-height:36px}
+.fchip.on{background:var(--acc);border-color:var(--acc);color:#04101f;font-weight:700}
+nav#tabbar{
+  position:fixed;left:0;right:0;bottom:0;z-index:30;
+  background:rgba(21,26,34,.95);backdrop-filter:blur(12px);
+  border-top:1px solid var(--line);
+  display:flex;padding-bottom:env(safe-area-inset-bottom);
+}
+nav#tabbar button{
+  flex:1;background:transparent;border:0;border-radius:0;min-height:58px;
+  flex-direction:column;gap:2px;font-size:11px;color:var(--sub);position:relative;
+}
+nav#tabbar button .ico{font-size:20px;line-height:1}
+nav#tabbar button.on{color:var(--acc)}
+nav#tabbar button .nbadge{position:absolute;top:8px;right:calc(50% - 26px);
+  background:var(--err);color:#fff;font-size:10px;font-weight:800;border-radius:999px;padding:1px 5px}
+label.f{display:block;font-size:12.5px;color:var(--sub);margin:12px 0 4px;font-weight:600}
+input[type=text],input[type=number],select,textarea{
+  width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r2);
+  color:var(--text);padding:10px 12px;font-size:14px;font-family:inherit;min-height:42px;
+}
+textarea{min-height:64px;resize:vertical;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
+.switch{display:flex;align-items:center;gap:10px;padding:8px 2px;min-height:42px}
+.switch input{display:none}
+.switch .track{width:42px;height:24px;border-radius:999px;background:var(--line);position:relative;flex:none;transition:.15s}
+.switch .track::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#cfd6df;transition:.15s}
+.switch input:checked + .track{background:var(--ok)}
+.switch input:checked + .track::after{left:21px;background:#04101f}
+.switch .lab{font-size:13.5px}
+.fgrid{display:grid;gap:0 14px}
+@media(min-width:620px){.fgrid{grid-template-columns:1fr 1fr}}
+.fgrid .full{grid-column:1/-1}
+pre.cmdprev{
+  background:#0a0d12;border:1px solid var(--line);border-radius:var(--r2);
+  padding:10px 12px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:#9fd3a8;
+  font-family:ui-monospace,Menlo,Consolas,monospace;max-height:120px;overflow:auto;margin:6px 0 0}
+.logbox{
+  background:#0a0d12;border:1px solid var(--line);border-radius:var(--r2);
+  height:320px;overflow:auto;padding:10px 12px;margin-top:10px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:#b8c4d2}
+details.adv{border:1px solid var(--line);border-radius:var(--r2);margin-top:12px;background:var(--bg2)}
+details.adv summary{padding:10px 12px;font-size:13px;color:var(--sub);cursor:pointer;min-height:42px;display:flex;align-items:center}
+details.adv .inner{padding:0 12px 12px}
+#modal-veil{position:fixed;inset:0;background:rgba(4,7,11,.72);z-index:40;display:none}
+#modal{
+  position:fixed;left:0;right:0;bottom:0;top:0;z-index:50;display:none;justify-content:center;align-items:flex-end;
+}
+#modal .sheet{
+  background:var(--card);width:100%;max-width:760px;max-height:92vh;overflow:auto;
+  border-radius:18px 18px 0 0;border:1px solid var(--line);padding:16px 16px calc(20px + env(safe-area-inset-bottom));
+}
+@media(min-width:760px){#modal{align-items:center}#modal .sheet{border-radius:18px;max-height:88vh;margin:0 16px}}
+#modal .sheet h3{margin:2px 0 6px;font-size:16px}
+.sheet-actions{display:flex;gap:10px;margin-top:18px;position:sticky;bottom:-16px;background:var(--card);padding:10px 0 0}
+.sheet-actions .grow{}
+#toast{
+  position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom));
+  background:#252d38;border:1px solid var(--line);color:var(--text);
+  padding:10px 18px;border-radius:999px;font-size:13.5px;z-index:60;display:none;max-width:92vw;
+  box-shadow:0 8px 24px rgba(0,0,0,.5);white-space:pre-wrap;
+}
+.kvs{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px;color:var(--sub)}
+.kvs .v{color:var(--text);overflow-wrap:anywhere}
+.empty{border:1.5px dashed var(--line);border-radius:var(--r);padding:26px 16px;text-align:center;color:var(--sub);font-size:13.5px}
+.section-note{font-size:12px;color:var(--sub);margin:-6px 0 12px}
+.spin{display:inline-block;width:13px;height:13px;border:2px solid var(--sub);border-top-color:transparent;border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.hidden{display:none!important}
+</style>
+</head>
+<body>
+<header>
+  <div id="live-dot"></div>
+  <h1>LLM Launcher</h1>
+  <div class="meta" id="hdr-meta">connecting…</div>
+</header>
+
+<main>
+  <!-- ============ 起動 ============ -->
+  <section id="view-launch" class="view">
+    <div id="running-strip"></div>
+    <h2 class="view-title">起動するサーバーを選ぶ</h2>
+    <div class="filters" id="launch-filters"></div>
+    <div class="grid c2" id="launch-grid"></div>
+  </section>
+
+  <!-- ============ サーバー ============ -->
+  <section id="view-servers" class="view hidden">
+    <h2 class="view-title">起動中・履歴</h2>
+    <div id="servers-list"></div>
+  </section>
+
+  <!-- ============ プロファイル ============ -->
+  <section id="view-profiles" class="view hidden">
+    <div class="row" style="margin-bottom:12px">
+      <h2 class="view-title" style="margin:0">起動プロファイル</h2>
+      <div class="grow"></div>
+      <button class="primary" onclick="openEditor()">＋ 新規</button>
+    </div>
+    <div class="grid c2" id="profiles-grid"></div>
+  </section>
+
+  <!-- ============ バックエンド ============ -->
+  <section id="view-backends" class="view hidden">
+    <h2 class="view-title">バックエンド設定 <span class="muted">(module/ のサブモジュール)</span></h2>
+    <div class="grid c2" id="backends-grid"></div>
+  </section>
+</main>
+
+<nav id="tabbar">
+  <button data-tab="launch" class="on"><span class="ico">🚀</span>起動</button>
+  <button data-tab="servers"><span class="ico">🖥️</span>サーバー<span class="nbadge hidden" id="nb-servers"></span></button>
+  <button data-tab="profiles"><span class="ico">📋</span>プロファイル</button>
+  <button data-tab="backends"><span class="ico">⚙️</span>バックエンド</button>
+</nav>
+
+<div id="modal-veil" onclick="closeEditor()"></div>
+<div id="modal"><div class="sheet" id="editor-sheet"></div></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ============================================================= state */
+const S = {
+  state: null, tab: "launch", filter: "all",
+  editing: null,            // ドラフト プロファイル
+  openLogs: new Set(),      // サーバービューでログ展開中の session id
+  logCursor: {},            // sid -> byte cursor
+  autoScroll: {}, busy: {}, err: {},
+};
+const $ = (q, el=document) => el.querySelector(q);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
+  "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const fmtAgo = ts => {
+  if (!ts) return "-";
+  const d = Math.max(0, Date.now()/1000 - ts);
+  if (d < 60) return "たった今"; if (d < 3600) return Math.floor(d/60)+"分前";
+  if (d < 86400) return Math.floor(d/3600)+"時間前"; return Math.floor(d/86400)+"日前";
+};
+const fmtUp = sec => {
+  if (sec == null) return "-";
+  sec = Math.floor(sec);
+  const h = Math.floor(sec/3600), m = Math.floor(sec%3600/60);
+  return h ? `${h}h${String(m).padStart(2,"0")}m` : m ? `${m}m${String(sec%60).padStart(2,"0")}s` : `${sec}s`;
+};
+
+async function api(path, opts = {}) {
+  const r = await fetch(path, {
+    headers: {"Content-Type": "application/json"},
+    ...opts,
+    body: opts.body ? JSON.stringify(opts.body) : undefined,
+  });
+  let data = null;
+  try { data = await r.json(); } catch { /* ignore */ }
+  if (!r.ok) { const e = new Error((data && data.detail) || `HTTP ${r.status}`); e.status = r.status; e.data = data; throw e; }
+  return data;
+}
+function toast(msg, ms = 3500) {
+  const t = $("#toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(t._h); t._h = setTimeout(() => t.style.display = "none", ms);
+}
+const backendById = id => (S.state?.backends || []).find(b => b.id === id);
+const profileById = id => (S.state?.profiles || []).find(p => p.id === id);
+const liveSessions = () => (S.state?.sessions || []).filter(s => ["running","starting","stopping"].includes(s.status));
+const sessionsOf = pid => (S.state?.sessions || []).filter(s => s.profile_id === pid);
+const liveOf = pid => sessionsOf(pid).find(s => ["running","starting","stopping"].includes(s.status));
+
+function statusBadge(s) {
+  if (!s) return `<span class="badge"><span class="dot"></span>未起動</span>`;
+  const map = {
+    running:  s.ready ? ["ok","稼働中"] : ["warn","起動中"],
+    starting: ["warn","起動中"], stopping: ["info","停止中"],
+    exited:   ["","終了"], failed: ["err","異常終了"], lost: ["purple","切断記録"],
+  };
+  const [cls, label] = map[s.status] || ["", s.status];
+  return `<span class="badge ${cls}"><span class="dot"></span>${label}</span>`;
+}
+
+/* ============================================================= polling */
+let refreshTimer = null, logTimer = null;
+async function refresh(silent = true) {
+  try {
+    S.state = await api("/api/state");
+    $("#live-dot").classList.add("on");
+    const sys = S.state.system;
+    $("#hdr-meta").innerHTML = `${esc(sys.hostname)}<br><span class="mono">${esc(sys.ip)}</span>`;
+    renderAll();
+  } catch (e) {
+    $("#live-dot").classList.remove("on");
+    $("#hdr-meta").textContent = "接続エラー";
+    if (!silent) toast("状態取得に失敗: " + e.message);
+  }
+}
+function startTimers() {
+  clearInterval(refreshTimer); clearInterval(logTimer);
+  refreshTimer = setInterval(refresh, 3000);
+  logTimer = setInterval(pumpLogs, 1500);
+}
+
+/* ============================================================= tabs */
+document.querySelectorAll("nav#tabbar button").forEach(b => {
+  b.addEventListener("click", () => switchTab(b.dataset.tab));
+});
+function switchTab(tab) {
+  S.tab = tab;
+  document.querySelectorAll("nav#tabbar button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  document.querySelectorAll("section.view").forEach(v => v.classList.add("hidden"));
+  $("#view-" + tab).classList.remove("hidden");
+  renderAll();
+}
+
+/* ============================================================= render */
+function renderAll() {
+  if (!S.state) return;
+  renderTabBadges();
+  if (S.tab === "launch") renderLaunch();
+  if (S.tab === "servers") renderServers();
+  if (S.tab === "profiles") renderProfiles();
+  if (S.tab === "backends") renderBackends();
+}
+function renderTabBadges() {
+  const n = liveSessions().length;
+  const nb = $("#nb-servers");
+  nb.classList.toggle("hidden", n === 0); nb.textContent = n;
+}
+
+/* ---------------- launch view ---------------- */
+function renderLaunch() {
+  // 起動中サマリー
+  const strip = $("#running-strip");
+  const live = liveSessions();
+  strip.innerHTML = live.length ? `<div class="card" style="border-color:#274d38">
+    <div class="row"><b style="font-size:14px">▶ 起動中: ${live.length} サーバー</b><span class="grow"></span>
+    <button class="ghost" onclick="switchTab('servers')">管理へ →</button></div>
+    <div class="row" style="margin-top:8px">${live.map(s => `
+      <span class="badge ${s.ready?"ok":"warn"}" style="cursor:pointer" onclick="switchTab('servers')">
+      <span class="dot"></span>${esc(s.profile_name)} · ${esc(s.backend_name)} · :${s.port||"-"}</span>`).join("")}
+    </div></div>` : "";
+  // フィルタ
+  const bks = S.state.backends;
+  const f = $("#launch-filters");
+  f.innerHTML = [{id:"all",name:"すべて"}, ...bks].map(b =>
+    `<button class="fchip ${S.filter===b.id?"on":""}" onclick="S.filter='${b.id}';renderLaunch()">${esc(b.name)}</button>`).join("");
+  // カード
+  const g = $("#launch-grid");
+  const ps = S.state.profiles.filter(p => S.filter === "all" || p.backend === S.filter);
+  if (!ps.length) {
+    g.innerHTML = `<div class="empty" style="grid-column:1/-1">
+      起動プロファイルがありません。<br><br>
+      <button class="primary" onclick="openEditor()">＋ プロファイルを作成</button></div>`;
+    return;
+  }
+  g.innerHTML = ps.map(p => {
+    const b = backendById(p.backend), s = liveOf(p.id);
+    const vals = p.values || {};
+    const model = vals.model || "";
+    return `<div class="card">
+      <div class="row">
+        <span class="chip ${esc(p.backend)}">${esc(b ? b.name : p.backend)}</span>
+        <b class="grow ellip" style="font-size:15.5px">${esc(p.name)}</b>
+        ${statusBadge(s)}
+      </div>
+      <div class="kvs" style="margin-top:10px">
+        <span>モデル</span><span class="v ellip" title="${esc(model)}">${esc(model || "-")}</span>
+        <span>ポート</span><span class="v mono">${esc(vals.port || b?.default_port || "-")}</span>
+        ${p.note ? `<span>備考</span><span class="v">${esc(p.note)}</span>` : ""}
+      </div>
+      <div class="row" style="margin-top:12px">
+        ${s
+          ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹'} 停止</button>
+             <button onclick="switchTab('servers');openLog('${s.id}')">ログ</button>`
+          : `<button class="primary" onclick="startProfile('${p.id}')" ${S.busy[p.id]?"disabled":""}>${S.busy[p.id]?'<span class="spin"></span>':'▶ 起動'}</button>`}
+        <span class="grow"></span>
+        <button class="ghost" onclick="openEditor('${p.id}')">編集</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+/* ---------------- actions ---------------- */
+async function startProfile(pid, force = false) {
+  S.busy[pid] = true; renderAll();
+  try {
+    const s = await api("/api/sessions", {method:"POST", body:{profile_id: pid, force}});
+    toast(`起動しました: ${s.profile_name} (pid ${s.pid})`);
+    S.openLogs.add(s.id);
+    switchTab("servers");
+  } catch (e) {
+    if (e.status === 409 && /force/.test(e.message)) {
+      if (confirm(e.message + "\n\n強制的に起動しますか?")) return startProfile(pid, true);
+    } else toast("起動失敗: " + e.message);
+  } finally { S.busy[pid] = false; renderAll(); }
+}
+async function stopSession(sid) {
+  S.busy[sid] = true; renderAll();
+  try { await api(`/api/sessions/${sid}/stop`, {method:"POST"}); toast("停止しました"); }
+  catch (e) { toast("停止失敗: " + e.message); }
+  finally { S.busy[sid] = false; refresh(false); }
+}
+async function restartSession(sid) {
+  const old = S.state.sessions.find(x => x.id === sid);
+  S.busy[sid] = true; renderAll();
+  try {
+    const s = await api(`/api/sessions/${sid}/restart`, {method:"POST"});
+    toast("再起動しました");
+    if (S.openLogs.has(sid)) { S.openLogs.delete(sid); S.openLogs.add(s.id); delete S.logCursor[s.id]; }
+  } catch (e) { toast("再起動失敗: " + e.message); }
+  finally { S.busy[sid] = false; refresh(false); }
+}
+async function deleteSession(sid) {
+  if (!confirm("履歴とログを削除しますか?")) return;
+  try {
+    await api(`/api/sessions/${sid}`, {method:"DELETE"});
+    S.openLogs.delete(sid); toast("削除しました"); refresh(false);
+  } catch (e) { toast("削除失敗: " + e.message); }
+}
+
+/* ---------------- servers view ---------------- */
+function renderServers() {
+  const list = $("#servers-list");
+  const ss = S.state.sessions || [];
+  if (!ss.length) {
+    list.innerHTML = `<div class="empty">起動中のサーバーはありません。<br>「起動」タブからプロファイルを選んでスタートしてください。</div>`;
+    return;
+  }
+  const live = ss.filter(s => ["running","starting","stopping"].includes(s.status));
+  const dead = ss.filter(s => !["running","starting","stopping"].includes(s.status));
+  const card = s => {
+    const open = S.openLogs.has(s.id);
+    const url = s.port ? `http://${esc(S.state.system.ip)}:${s.port}` : "";
+    return `<div class="card" data-sid="${s.id}">
+      <div class="row">
+        ${statusBadge(s)}
+        <b class="grow ellip" style="font-size:15px">${esc(s.profile_name)}</b>
+        <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
+      </div>
+      <div class="kvs" style="margin-top:8px">
+        <span>PID</span><span class="v mono">${s.pid}${s.detached ? ' <span class="muted">(前マネージャーから引き継ぎ)</span>' : ""}</span>
+        <span>稼働時間</span><span class="v">${s.status==="running"||s.status==="starting" ? fmtUp(s.uptime) : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-")}${s.exit_code != null ? ` (code ${s.exit_code})` : ""}</span>
+        <span>API</span><span class="v mono">${url ? `<a href="${url}" target="_blank" rel="noopener">:${s.port} ↗</a>` : "-"}</span>
+      </div>
+      <pre class="cmdprev" style="max-height:44px">${esc(s.argv.join(" "))}</pre>
+      ${s.error ? `<div class="muted" style="color:var(--err);margin-top:6px">${esc(s.error)}</div>` : ""}
+      <div class="row" style="margin-top:10px">
+        ${["running","starting","stopping"].includes(s.status)
+          ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹ 停止'}</button>
+             <button onclick="restartSession('${s.id}')">↻ 再起動</button>`
+          : `<button onclick="rerunProfile('${s.profile_id}')">▶ 再起動</button>`}
+        <button onclick="toggleLog('${s.id}')" class="${open?'':''}">${open ? "ログ閉じる" : "📜 ログ"}</button>
+        <span class="grow"></span>
+        ${["exited","failed","lost"].includes(s.status) ? `<button class="ghost" onclick="deleteSession('${s.id}')">削除</button>` : ""}
+      </div>
+      <div class="logwrap ${open ? "" : "hidden"}" id="logwrap-${s.id}">
+        <div class="row" style="margin-top:8px">
+          <label class="switch" style="padding:4px 0;min-height:0"><input type="checkbox" ${S.autoScroll[s.id]!==false?"checked":""} onchange="S.autoScroll['${s.id}']=this.checked"><span class="track"></span><span class="lab" style="font-size:12px">自動スクロール</span></label>
+          <span class="grow"></span>
+          <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="clearLogView('${s.id}')">画面クリア</button>
+        </div>
+        <pre class="logbox" id="logbox-${s.id}">読み込み中…</pre>
+      </div>
+    </div>`;
+  };
+  list.innerHTML =
+    (live.length ? `<h2 class="view-title">起動中 (${live.length})</h2>` + live.map(card).join("") : "") +
+    (dead.length ? `<h2 class="view-title" style="margin-top:18px">履歴 (${dead.length})</h2>` + dead.slice(0, 20).map(card).join("") : "");
+}
+async function rerunProfile(pid) {
+  if (profileById(pid)) return startProfile(pid);
+  toast("元のプロファイルは削除されています");
+}
+function toggleLog(sid) {
+  if (S.openLogs.has(sid)) S.openLogs.delete(sid);
+  else { S.openLogs.add(sid); pumpLogs(); }
+  renderServers();
+}
+function clearLogView(sid) { const el = $(`#logbox-${sid}`); if (el) el.textContent = ""; }
+async function pumpLogs() {
+  for (const sid of S.openLogs) {
+    try {
+      const cur = S.logCursor[sid] || 0;
+      const r = await api(`/api/sessions/${sid}/log?cursor=${cur}`);
+      const el = $(`#logbox-${sid}`);
+      if (!el) continue;
+      if (r.cursor < cur) el.textContent = "";         // リセットされたら最初から
+      if (r.text) {
+        if (el.textContent === "読み込み中…") el.textContent = "";
+        el.insertAdjacentText("beforeend", r.text);
+        if (S.autoScroll[sid] !== false &&
+            el.scrollHeight - el.scrollTop - el.clientHeight < 160) {
+          el.scrollTop = el.scrollHeight;
+        }
+      }
+      S.logCursor[sid] = r.cursor;
+    } catch { /* session 削除後など */ }
+  }
+}
+
+/* ---------------- profiles view ---------------- */
+function renderProfiles() {
+  const g = $("#profiles-grid");
+  const ps = S.state.profiles || [];
+  if (!ps.length) {
+    g.innerHTML = `<div class="empty" style="grid-column:1/-1">プロファイルを作成すると、ここに・起動タブに並びます。</div>`;
+    return;
+  }
+  g.innerHTML = ps.map(p => {
+    const b = backendById(p.backend), s = liveOf(p.id);
+    const v = p.values || {};
+    return `<div class="card">
+      <div class="row">
+        <span class="chip ${esc(p.backend)}">${esc(b ? b.name : p.backend)}</span>
+        <b class="grow ellip" style="font-size:15.5px">${esc(p.name)}</b>
+        ${statusBadge(s)}
+      </div>
+      <div class="kvs" style="margin-top:10px">
+        <span>モデル</span><span class="v ellip">${esc(v.model || "-")}</span>
+        <span>エンドポイント</span><span class="v mono">${v.port ? esc(`${(S.state.system.ip)}:${v.port}`) : "-"}</span>
+        <span>追加引数</span><span class="v ellip mono">${esc(p.extra_args || "-")}</span>
+        <span>更新</span><span class="v">${fmtAgo(p.updated_at)}</span>
+      </div>
+      <div class="row" style="margin-top:12px">
+        ${s ? `<button class="danger" onclick="stopSession('${s.id}')">⏹ 停止</button>`
+            : `<button class="primary" onclick="startProfile('${p.id}')">▶ 起動</button>`}
+        <button onclick="openEditor('${p.id}')">編集</button>
+        <button class="ghost" onclick="dupProfile('${p.id}')">複製</button>
+        <span class="grow"></span>
+        ${!s ? `<button class="ghost danger" onclick="delProfile('${p.id}')">削除</button>` : ""}
+      </div>
+    </div>`;
+  }).join("");
+}
+async function dupProfile(pid) {
+  const p = profileById(pid); if (!p) return;
+  try {
+    await api("/api/profiles", {method:"POST", body: {...p, name: p.name + " のコピー"}});
+    toast("複製しました"); refresh(false);
+  } catch (e) { toast("失敗: " + e.message); }
+}
+async function delProfile(pid) {
+  if (!confirm("このプロファイルを削除しますか?")) return;
+  try { await api(`/api/profiles/${pid}`, {method:"DELETE"}); toast("削除しました"); refresh(false); }
+  catch (e) { toast("削除失敗: " + e.message); }
+}
+
+/* ============================================================= editor */
+function blankDraft(backendId) {
+  return {name:"", backend: backendId || "vllm", values:{}, extra_args:"", env:{}, cwd:"", command:"", note:""};
+}
+function defaultsFor(b) {
+  const v = {};
+  (b.fields || []).forEach(f => { if (f.default) v[f.key] = f.default; });
+  return v;
+}
+function openEditor(pid) {
+  let draft;
+  if (pid) {
+    const p = profileById(pid); if (!p) return;
+    draft = JSON.parse(JSON.stringify(p));
+  } else {
+    draft = blankDraft();
+    const b = backendById("vllm"); if (b) draft.values = defaultsFor(b);
+  }
+  S.editing = draft;
+  $("#modal").style.display = "flex"; $("#modal-veil").style.display = "block";
+  renderEditor();
+}
+function closeEditor() {
+  S.editing = null;
+  $("#modal").style.display = "none"; $("#modal-veil").style.display = "none";
+}
+function setBackend(bid) {
+  const d = S.editing; if (!d) return;
+  d.backend = bid;
+  d.values = defaultsFor(backendById(bid) || {fields:[]});
+  renderEditor();
+}
+function inputVal(sel) { const el = $(sel); return el ? el.value : ""; }
+function collectDraft() {
+  const d = S.editing; if (!d) return d;
+  d.name = inputVal("#ed-name");
+  d.extra_args = inputVal("#ed-extra");
+  d.cwd = inputVal("#ed-cwd");
+  d.command = inputVal("#ed-command");
+  d.note = inputVal("#ed-note");
+  d.env = parseEnv(inputVal("#ed-env"));
+  return d;
+}
+function parseEnv(text) {
+  const env = {};
+  (text || "").split("\n").forEach(line => {
+    line = line.trim(); if (!line) return;
+    const i = line.indexOf("="); if (i < 0) return;
+    env[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+  });
+  return env;
+}
+const envToText = env => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join("\n");
+
+let previewTimer = null;
+function renderEditor() {
+  const d = S.editing; if (!d) return;
+  const b = backendById(d.backend);
+  const sheet = $("#editor-sheet");
+  const fieldsHtml = (b?.fields || []).map(f => {
+    const val = d.values[f.key] ?? "";
+    const id = `edv-${f.key}`;
+    const help = f.help ? `<div class="muted" style="font-size:11px;margin-top:2px">${esc(f.help)}</div>` : "";
+    if (f.type === "bool") return `
+      <div><label class="switch"><input type="checkbox" id="${id}" data-fkey="${f.key}" ${val ? "checked" : ""}>
+      <span class="track"></span><span class="lab">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></span></label>${help}</div>`;
+    if (f.type === "select") return `
+      <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span>${f.required?' <span style="color:var(--err)">*</span>':''}</label>
+      <select id="${id}" data-fkey="${f.key}">${(f.options||[]).map(o => `<option ${o===val?"selected":""} value="${esc(o)}">${o===""?"(指定しない)":esc(o)}</option>`).join("")}</select>${help}</div>`;
+    const t = f.type === "int" || f.type === "float" ? "number" : "text";
+    return `
+      <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span>${f.required?' <span style="color:var(--err)">*</span>':''}</label>
+      <input type="${t}" ${f.type==="float"?'step="0.01"':""} inputmode="${t==="number"?"decimal":""}" id="${id}" data-fkey="${f.key}" value="${esc(val)}" placeholder="${esc(f.placeholder||f.default||"")}">${help}</div>`;
+  }).join("");
+  sheet.innerHTML = `
+    <h3>${d.id ? "プロファイル編集" : "新規プロファイル"}</h3>
+    <label class="f" for="ed-name">プロファイル名</label>
+    <input type="text" id="ed-name" value="${esc(d.name)}" placeholder="例: Qwen2.5-7B / vLLM">
+    <label class="f" for="ed-backend">バックエンド</label>
+    <select id="ed-backend" onchange="setBackend(this.value)">
+      ${(S.state?.backends||[]).map(bb => `<option value="${bb.id}" ${bb.id===d.backend?"selected":""}>${esc(bb.name)}</option>`).join("")}
+    </select>
+    <div class="muted" style="margin-top:6px;font-size:12px">${esc(b?.desc || "")}</div>
+    <div class="fgrid" style="margin-top:4px">${fieldsHtml}</div>
+    <label class="f" for="ed-extra">追加引数 (生のCLIフラグ・上級者向け)</label>
+    <textarea id="ed-extra" placeholder="--some-flag 0.5 --another-flag">${esc(d.extra_args)}</textarea>
+    <label class="f" for="ed-env">環境変数 (KEY=VALUE を1行ずつ)</label>
+    <textarea id="ed-env" placeholder="CUDA_VISIBLE_DEVICES=0">${esc(envToText(d.env))}</textarea>
+    <details class="adv" ${d.cwd||d.command?"open":""}>
+      <summary>高度な設定 (コマンド上書き / 作業ディレクトリ)</summary>
+      <div class="inner">
+        <label class="f" for="ed-command">起動コマンド上書き <span class="muted">空=バックエンド既定 (${esc(b?.default_command||"")})</span></label>
+        <input type="text" id="ed-command" class="mono" value="${esc(d.command)}" placeholder="{python} -m vllm.entrypoints.openai.api_server">
+        <label class="f" for="ed-cwd">作業ディレクトリ (空 = プロジェクトルート)</label>
+        <input type="text" id="ed-cwd" class="mono" value="${esc(d.cwd)}">
+      </div>
+    </details>
+    <label class="f" for="ed-note">メモ</label>
+    <input type="text" id="ed-note" value="${esc(d.note)}">
+    <label class="f">起動コマンド プレビュー</label>
+    <pre class="cmdprev" id="ed-preview">…</pre>
+    <div class="sheet-actions">
+      <button class="grow" onclick="closeEditor()">キャンセル</button>
+      <button class="primary grow" id="ed-save" onclick="saveEditor()">保存</button>
+    </div>`;
+  sheet.querySelectorAll("[data-fkey]").forEach(el => {
+    el.addEventListener("input", () => {
+      S.editing.values[el.dataset.fkey] = el.type === "checkbox" ? el.checked : el.value;
+      schedulePreview();
+    });
+    el.addEventListener("change", () => {
+      if (el.type === "checkbox") S.editing.values[el.dataset.fkey] = el.checked;
+    });
+  });
+  ["ed-extra","ed-name"].forEach(id => $(`#${id}`).addEventListener("input", () => { collectDraft(); schedulePreview(); }));
+  schedulePreview();
+}
+function editorBody() {
+  collectDraft();
+  const d = S.editing;
+  return {name:d.name, backend:d.backend, values:d.values, extra_args:d.extra_args,
+          env:d.env, cwd:d.cwd, command:d.command, note:d.note};
+}
+async function schedulePreview() {
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(showPreview, 350);
+}
+async function showPreview() {
+  const el = $("#ed-preview"); if (!el || !S.editing) return;
+  try {
+    const r = await api("/api/preview", {method:"POST", body: editorBody()});
+    el.textContent = r.ok ? r.command : "⚠ " + r.error;
+    el.style.color = r.ok ? "#9fd3a8" : "var(--err)";
+  } catch (e) { el.textContent = "⚠ " + e.message; }
+}
+async function saveEditor() {
+  const body = editorBody();
+  if (!body.name.trim()) return toast("プロファイル名を入力してください");
+  try {
+    if (S.editing.id) await api(`/api/profiles/${S.editing.id}`, {method:"PUT", body});
+    else await api("/api/profiles", {method:"POST", body});
+    toast("保存しました"); closeEditor(); refresh(false);
+  } catch (e) { toast("保存失敗: " + e.message); }
+}
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeEditor(); });
+
+/* ============================================================= backends view */
+function renderBackends() {
+  const g = $("#backends-grid");
+  g.innerHTML = S.state.backends.map(b => {
+    const det = b.detection;
+    const inst = det.installed
+      ? `<span class="badge ok"><span class="dot"></span>インストール済み</span>`
+      : `<span class="badge err"><span class="dot"></span>未検出</span>`;
+    const mod = det.module_exists
+      ? `<span class="badge ok"><span class="dot"></span>submodule ✓</span>`
+      : `<span class="badge warn"><span class="dot"></span>module/ 未取得</span>`;
+    return `<div class="card">
+      <div class="row">
+        <span class="chip ${esc(b.id)}">${esc(b.name)}</span>
+        <b class="grow ellip" style="font-size:15px">${esc(b.name)}</b>
+        <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="redetect('${b.id}')">再検出</button>
+      </div>
+      <div class="row" style="margin-top:8px">${mod} ${inst}
+        <a class="muted" href="${esc(b.repo)}" target="_blank" rel="noopener" style="font-size:12px">${esc(b.repo.replace("https://github.com/",""))}</a>
+      </div>
+      <div class="kvs" style="margin-top:10px">
+        <span>サブモジュール</span><span class="v mono">${esc(b.module_path)}</span>
+        <span>コマンド</span><span class="v mono ellip" title="${esc(b.command)}">${esc(b.command)}</span>
+        <span>検出詳細</span><span class="v muted" style="font-size:11.5px">${esc(det.detail || "-")}</span>
+      </div>
+      <label class="f">コマンド上書き <span class="muted">(空 = 既定)</span></label>
+      <input type="text" class="mono" id="bk-cmd-${b.id}" value="${esc(b.command !== b.default_command ? b.command : "")}" placeholder="${esc(b.default_command)}">
+      <label class="f">${b.kind === "python" ? "Python パス ({python} に展開)" : "バイナリパス ({llama_server} に展開)"}</label>
+      <input type="text" class="mono" id="bk-py-${b.id}" value="${esc(b.kind==="python" ? (b.python_override || det.python || "") : (b.binary_override || ""))}" placeholder="${b.kind==="python" ? "既定: プロジェクト .venv" : "既定: 自動検出 (build/bin or PATH)"}">
+      <div class="row" style="margin-top:12px">
+        <button class="primary" onclick="saveBackend('${b.id}')">保存</button>
+        <button class="ghost" onclick="resetBackend('${b.id}')">リセット</button>
+        <span class="grow"></span>
+        <button class="ghost" onclick="newProfileFor('${b.id}')">このバックエンドで新規プロファイル</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+async function saveBackend(bid) {
+  const b = backendById(bid);
+  const body = {
+    command: inputVal(`#bk-cmd-${bid}`),
+    python: b.kind === "python" ? inputVal(`#bk-py-${bid}`) : null,
+    command_binary: b.kind !== "python" ? inputVal(`#bk-py-${bid}`) : null,
+  };
+  try { await api(`/api/backends/${bid}`, {method:"PUT", body}); toast("保存しました"); refresh(false); }
+  catch (e) { toast("失敗: " + e.message); }
+}
+async function resetBackend(bid) {
+  if (!confirm("このバックエンドの上書き設定を初期化しますか?")) return;
+  try { await api(`/api/backends/${bid}`, {method:"PUT", body:{reset:true}}); toast("初期化しました"); refresh(false); }
+  catch (e) { toast("失敗: " + e.message); }
+}
+async function redetect(bid) {
+  try { await api(`/api/backends/${bid}/detect`, {method:"POST"}); refresh(false); }
+  catch (e) { toast("検出失敗: " + e.message); }
+}
+function newProfileFor(bid) {
+  const d = blankDraft(bid);
+  d.values = defaultsFor(backendById(bid) || {fields:[]});
+  S.editing = d;
+  $("#modal").style.display = "flex"; $("#modal-veil").style.display = "block";
+  renderEditor();
+}
+
+/* ============================================================= boot */
+refresh(false).then(startTimers);
+setInterval(renderTabBadges, 1000);
+</script>
+</body>
+</html>

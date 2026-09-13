@@ -1,0 +1,12 @@
+[submodule "module/vllm"]
+	path = module/vllm
+	url = https://github.com/vllm-project/vllm
+[submodule "module/sglang"]
+	path = module/sglang
+	url = https://github.com/sgl-project/sglang
+[submodule "module/llama.cpp"]
+	path = module/llama.cpp
+	url = https://github.com/ggml-org/llama.cpp
+[submodule "module/freetoken"]
+	path = module/freetoken
+	url = https://github.com/FlashML-org/FreeToken
