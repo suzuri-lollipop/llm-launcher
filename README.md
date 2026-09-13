@@ -49,7 +49,7 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 | --- | --- |
 | 🚀 起動 | 起動サーバーの選択画面。プロファイルカードをタップでスタート / 停止。バックエンド別フィルタ、稼働中サマリー付き |
 | 🖥️ サーバー | 起動中 + 履歴の一覧。ステータス (起動中 / 稼働中 / 停止 / 異常終了)、PID・稼働時間・API URL、停止 / 再起動、ライブログ表示 (追従・自動スクロール) |
-| 📋 プロファイル | **1プロファイル = 1バックエンド**。編集画面で LLM バックエンドをプルダウンで選ぶと、そのプロジェクトの**起動パラメータが全項目リスト化されて表示され、既定値もプリフィル済み**(vLLM 41項目 / SGLang 53項目 / llama.cpp 33項目 / FreeToken 46項目、セクション別グループ)。素の CLI 引数を書かずに、変更する項目だけ選ぶだけで設定が完成 |
+| 📋 プロファイル | **1プロファイル = 1バックエンド**。編集画面で LLM バックエンドをプルダウンで選ぶと、そのプロジェクトの**起動パラメータが全項目リスト化されて表示され、既定値もプリフィル済み**(vLLM 44項目 / SGLang 62項目 / llama.cpp 40項目 / FreeToken 45項目、セクション別グループ)。素の CLI 引数を書かずに、変更する項目だけ選ぶだけで設定が完成 |
 | ⚙️ バックエンド | 各 submodule の状態 (取得済み / インストール検出)、起動コマンドテンプレートや python / バイナリパスの上書き設定、再検出 |
 
 ### プロファイル作成画面の流れ
@@ -66,10 +66,11 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 最終 argv = コマンドテンプレート (プロファイル上書き > バックエンド設定 > 既定)
 + リスト項目 (フォーム値) から生成した `--flag 群` (+ 古いプロファイルに残った追加引数)
 
+- 各フラグの **型・選択肢・既定値は `src/llm_launcher/fields/<backend>.json` 正表が権威**で、これは `python -m llm_launcher.gen_fields --root .` で submodule の実ソース (vllm の tool_parsers/reasoning レジストリ・config dataclass の Literal、sglang の arg_groups/fields AST、freetoken の argparse、llama.cpp の common/arg.cpp) から生成されます。**submodule を `git submodule update` したら再生成してください**
+- 生成器が追いきれない箇所 (llama.cpp の一部、sglang の動的 choices 等) は `backends.py` の補完表にソース照合済み値を持っています
 - テンプレート内トークン: `{python}` `{llama_server}` `{module}` `{root}`、および `{model}` `{port}` などプロファイル変数
 - 「追加引数」textarea は廃止しました。既存プロファイルに値が入っていた場合のみ、編集画面の「レガシー項目」として自動表示され保持されます
 - 「コマンドのみモード」(高度な設定): ON にするとリスト項目のフラグ自動付与を止めます (カスタム起動の最終手段)
-- バックエンドの flag 体系は submodule のソースから抽出・照合済みです (vLLM の `vllm serve` 新入口、SGLang の `--tp-size` 系リネーム、llama.cpp の `--load-mode` 統合、FreeToken のポート既定 1919 など)
 - 旧 v2 (1プロファイルに複数バックエンド) の `data/profiles.json` は、起動時に**バックエンドごとの別プロファイルへ自動分離**されます
 
 ## API (スクリプト等からも操作可能)

@@ -1,0 +1,2395 @@
+{
+ "--abort-on-priority-when-disabled": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--admin-api-key": {
+  "default": "None",
+  "type": "str"
+ },
+ "--allow-auto-truncate": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--allowed-media-domains": {
+  "default": "msgspec.field(default_factory=list)",
+  "type": "str"
+ },
+ "--api-key": {
+  "default": "None",
+  "type": "str"
+ },
+ "--asr-max-buffer-seconds": {
+  "default": 60,
+  "type": "int"
+ },
+ "--asr-max-concurrent-sessions": {
+  "default": 32,
+  "type": "int"
+ },
+ "--attention-backend": {
+  "choices": [
+   "triton",
+   "torch_native",
+   "flex_attention",
+   "dsa",
+   "nsa",
+   "qsa",
+   "dsv4",
+   "compressed",
+   "fa3",
+   "fa4",
+   "flashinfer",
+   "flashmla",
+   "trtllm_mla",
+   "cutedsl_mla",
+   "tokenspeed_mla",
+   "trtllm_mha",
+   "hpc_ops",
+   "minicpm_flashattn",
+   "minicpm_flashinfer",
+   "aiter",
+   "wave",
+   "intel_amx",
+   "ascend",
+   "intel_xpu"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--attn-cp-size": {
+  "aliases": [
+   "--attention-context-parallel-size"
+  ],
+  "default": 1,
+  "type": "int"
+ },
+ "--base-gpu-id": {
+  "default": 0,
+  "type": "int"
+ },
+ "--batch-notify-size": {
+  "default": 16,
+  "type": "int"
+ },
+ "--bf16-gemm-backend": {
+  "choices": [],
+  "default": "auto",
+  "help": "Choose the backend for unquantized BF16 GEMM operations. Options: 'auto' (default; selects 'cutedsl' on SM10x GPUs, except deterministic inference selects 'torch'; otherwise uses cuBLAS via torch.nn.f",
+  "type": "str"
+ },
+ "--bucket-e2e-request-latency": {
+  "default": "None",
+  "type": "str"
+ },
+ "--bucket-inter-token-latency": {
+  "default": "None",
+  "type": "str"
+ },
+ "--bucket-time-to-first-token": {
+  "default": "None",
+  "type": "str"
+ },
+ "--c128-page-size": {
+  "default": 16,
+  "type": "int"
+ },
+ "--chat-template": {
+  "default": "None",
+  "type": "str"
+ },
+ "--checkpoint-engine-wait-weights-before-ready": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--chunked-prefill-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--completion-template": {
+  "default": "None",
+  "type": "str"
+ },
+ "--constrained-json-disable-any-whitespace": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--constrained-json-whitespace-pattern": {
+  "default": "None",
+  "type": "str"
+ },
+ "--context-length": {
+  "default": "None",
+  "type": "str"
+ },
+ "--cp-strategy": {
+  "choices": [],
+  "default": "None",
+  "help": "Sharding strategy for prefill CP. 'zigzag' assigns each rank one early and one late sequence block; 'interleave' assigns token indices modulo the CP size.",
+  "type": "str"
+ },
+ "--cpu-offload-gb": {
+  "default": 0,
+  "type": "int"
+ },
+ "--crash-dump-folder": {
+  "default": "None",
+  "type": "str"
+ },
+ "--cuda-graph-backend-decode": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--cuda-graph-backend-prefill": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--cuda-graph-bs-decode": {
+  "default": "None",
+  "type": "str"
+ },
+ "--cuda-graph-bs-prefill": {
+  "default": "None",
+  "type": "str"
+ },
+ "--cuda-graph-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--cuda-graph-max-bs-decode": {
+  "default": "None",
+  "type": "str"
+ },
+ "--cuda-graph-max-bs-prefill": {
+  "default": "None",
+  "type": "str"
+ },
+ "--cuda-graph-tc-compiler": {
+  "default": "None",
+  "type": "str"
+ },
+ "--custom-weight-loader": {
+  "default": "None",
+  "type": "str"
+ },
+ "--dcp-comm-backend": {
+  "choices": [],
+  "default": "None",
+  "help": "Communication backend for the decode context-parallel (DCP) attention reduction: 'ag_rs' (AllGather + ReduceScatter), 'a2a' (fused NCCL All-to-All exchange of output+LSE + local Triton LSE combine), o",
+  "type": "str"
+ },
+ "--dcp-replicate-q-proj": {
+  "default": "None",
+  "type": "str"
+ },
+ "--dcp-size": {
+  "aliases": [
+   "--decode-context-parallel-size"
+  ],
+  "default": 1,
+  "type": "int"
+ },
+ "--debug-cuda-graph": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--debug-tensor-dump-input-file": {
+  "default": "None",
+  "type": "str"
+ },
+ "--debug-tensor-dump-layers": {
+  "default": "None",
+  "type": "str"
+ },
+ "--debug-tensor-dump-output-folder": {
+  "default": "None",
+  "type": "str"
+ },
+ "--decode-attention-backend": {
+  "choices": [
+   "triton",
+   "torch_native",
+   "flex_attention",
+   "dsa",
+   "nsa",
+   "qsa",
+   "dsv4",
+   "compressed",
+   "fa3",
+   "fa4",
+   "flashinfer",
+   "flashmla",
+   "trtllm_mla",
+   "cutedsl_mla",
+   "tokenspeed_mla",
+   "trtllm_mha",
+   "hpc_ops",
+   "minicpm_flashattn",
+   "minicpm_flashinfer",
+   "aiter",
+   "wave",
+   "intel_amx",
+   "ascend",
+   "intel_xpu"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--decode-log-interval": {
+  "default": 40,
+  "type": "int"
+ },
+ "--decoupled-spec-bind-endpoint": {
+  "default": "None",
+  "type": "str"
+ },
+ "--decoupled-spec-connect-endpoints": {
+  "default": "None",
+  "type": "str"
+ },
+ "--decoupled-spec-rank": {
+  "default": "None",
+  "type": "str"
+ },
+ "--decoupled-spec-role": {
+  "default": "null",
+  "type": "str"
+ },
+ "--decrypted-config-file": {
+  "default": "None",
+  "type": "str"
+ },
+ "--decrypted-draft-config-file": {
+  "default": "None",
+  "type": "str"
+ },
+ "--deepep-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--deepep-dispatcher-output-dtype": {
+  "default": "auto",
+  "type": "str"
+ },
+ "--deepep-mode": {
+  "default": "auto",
+  "type": "str"
+ },
+ "--deepep-v2-mode": {
+  "default": "direct",
+  "type": "str"
+ },
+ "--default-chat-template-kwargs": {
+  "default": "None",
+  "help": "Default chat template kwargs applied to every request when not overridden per-request. Keys must match what the model's chat template expects (e.g. enable_thinking, thinking, reasoning_effort). Per-re",
+  "type": "str"
+ },
+ "--default-priority-value": {
+  "default": "None",
+  "type": "str"
+ },
+ "--delete-ckpt-after-loading": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--detokenizer-worker-num": {
+  "default": 1,
+  "type": "int"
+ },
+ "--device": {
+  "default": "None",
+  "type": "str"
+ },
+ "--disable-attn-tp-gather": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-chunked-prefix-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-cuda-graph": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-cuda-graph-padding": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-custom-all-reduce": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-decode-cuda-graph": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-fast-image-processor": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-flashinfer-autotune": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-flashinfer-cutlass-moe-fp4-allgather": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-hybrid-swa-memory": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-outlines-disk-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-overlap-schedule": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-prefill-cuda-graph": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-priority-preemption": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-radix-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-shared-experts-fusion": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disable-tokenizer-batch-decode": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disaggregation-bootstrap-port": {
+  "default": 8998,
+  "type": "int"
+ },
+ "--disaggregation-decode-enable-offload-kvcache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disaggregation-decode-enable-radix-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--disaggregation-decode-extra-slots": {
+  "default": "None",
+  "type": "str"
+ },
+ "--disaggregation-decode-polling-interval": {
+  "default": 1,
+  "type": "int"
+ },
+ "--disaggregation-decode-retraction-backup": {
+  "choices": [],
+  "default": "None",
+  "help": "Storage backend for KV preserved across PD decode retraction. 'cpu_tensor' uses per-request CPU tensors. 'host_pool' uses a reserved HiCache pool and does not fall back on exhaustion. If omitted, the ",
+  "type": "str"
+ },
+ "--disaggregation-ib-device": {
+  "default": "None",
+  "type": "str"
+ },
+ "--disaggregation-mode": {
+  "default": "null",
+  "type": "str"
+ },
+ "--disaggregation-transfer-backend": {
+  "choices": [
+   "mooncake",
+   "nixl",
+   "ascend",
+   "fake",
+   "mori",
+   "mooncake_tcp"
+  ],
+  "default": "mooncake",
+  "type": "str"
+ },
+ "--dist-init-addr": {
+  "aliases": [
+   "--nccl-init-addr"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--dist-timeout": {
+  "default": "None",
+  "type": "str"
+ },
+ "--dllm-algorithm": {
+  "default": "None",
+  "type": "str"
+ },
+ "--dllm-algorithm-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--dllm-fdfo": {
+  "default": "True",
+  "type": "bool"
+ },
+ "--download-dir": {
+  "default": "None",
+  "type": "str"
+ },
+ "--dp-size": {
+  "aliases": [
+   "--data-parallel-size"
+  ],
+  "default": 1,
+  "type": "int"
+ },
+ "--dsa-decode-backend": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--dsa-paged-mqa-logits-backend": {
+  "choices": [],
+  "default": "auto",
+  "help": "DSA indexer paged MQA logits kernel backend. Options: 'auto' (default; DeepGEMM on CUDA, aiter on ROCm), 'deepgemm', 'cutedsl' (CuTe DSL kernel, SM 100 (Blackwell) only; wins at low batch size and lon",
+  "type": "str"
+ },
+ "--dsa-prefill-backend": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--dsa-topk-backend": {
+  "choices": [],
+  "default": "sgl-kernel",
+  "help": "DSA indexer top-k backend for the target model. Options: 'sgl-kernel', 'torch', 'flashinfer'. The 'torch' backend currently requires SGLANG_DSA_FUSE_TOPK=false.",
+  "type": "str"
+ },
+ "--dsv4-attn-backend": {
+  "choices": [],
+  "default": "auto",
+  "help": "DeepSeek V4 attention backend. 'auto' (default) resolves to 'flashmla'. 'trtllm' (opt-in, SM100/SM103 with FP8 KV cache) switches the SWA/compressed KV pools to a uniform 512-dim FP8 layout and runs d",
+  "type": "str"
+ },
+ "--dsv4-prefill-backend": {
+  "choices": [],
+  "default": "auto",
+  "help": "DeepSeek-V4 sparse prefill backend. 'auto' and 'flashmla_sparse' use the existing BF16 sparse prefill path; 'flashmla_sparse_q8' enables the Q8KV8 sparse prefill path.",
+  "type": "str"
+ },
+ "--dtype": {
+  "choices": [],
+  "default": "auto",
+  "type": "str"
+ },
+ "--dwdp-size": {
+  "default": 1,
+  "type": "int"
+ },
+ "--dynamic-batch-tokenizer-batch-size": {
+  "default": 32,
+  "type": "int"
+ },
+ "--dynamic-batch-tokenizer-batch-timeout": {
+  "default": 0.002,
+  "type": "float"
+ },
+ "--elastic-ep-backend": {
+  "choices": [],
+  "default": "None",
+  "help": "Specify the collective communication backend for elastic EP. Supports 'mooncake' and 'nixl'.",
+  "type": "str"
+ },
+ "--elastic-ep-initial-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--elastic-ep-rejoin": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--elastic-ep-scale-timeout": {
+  "default": 600,
+  "type": "float"
+ },
+ "--enable-adaptive-dispatch-to-encoder": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-aiter-allreduce-fusion": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-attn-tp-input-scattered": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-broadcast-mm-inputs-process": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-cache-report": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-cp-decode-attn-tp": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-cudagraph-gc": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-custom-logit-processor": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-deepseek-v4-fp4-indexer": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-dense-mlp-attn-tp": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-deterministic-inference": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-dp-attention": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-dp-attention-local-control-broadcast": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-dp-lm-head": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-draft-weights-cpu-backup": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-dsa-cache-layer-split": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-dynamic-batch-tokenizer": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-dynamic-chunking": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-elastic-expert-backup": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-eplb": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-flashinfer-allreduce-fusion": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-flexkv": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-forward-pass-metrics": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-fp32-lm-head": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-fused-moe-sum-all-reduce": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-fused-qk-norm-rope": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-hierarchical-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-hisparse": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-http2": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-int8-mamba-checkpoint": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-layernorm-sp": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-layerwise-nvtx-marker": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-lean-attention": {
+  "default": "None",
+  "type": "str"
+ },
+ "--enable-linear-replayssm": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-linear-replayssm-spec": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-lmcache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-lora": {
+  "default": "None",
+  "type": "str"
+ },
+ "--enable-lora-overlap-loading": {
+  "default": "None",
+  "type": "str"
+ },
+ "--enable-mamba-cache-stochastic-rounding": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-memory-saver": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-metrics": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-metrics-for-all-schedulers": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-mfu-metrics": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-mis": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-mixed-chunk": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-mm-global-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-mscclpp": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-multi-layer-eagle": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-multimodal": {
+  "default": "None",
+  "type": "str"
+ },
+ "--enable-nccl-nvls": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-p2p-check": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-page-major-kv-layout": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-pdmux": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-precise-embedding-interpolation": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-prefill-cp": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-prefill-delayer": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-prefix-mm-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-priority-scheduling": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-profile-cuda-graph": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-quant-communications": {
+  "default": "False",
+  "type": "str"
+ },
+ "--enable-request-time-stats-logging": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-return-hidden-states": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-return-indexer-topk": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-return-routed-experts": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-scattered-sconv": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-session-radix-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-shared-experts-attn-tp": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-single-batch-overlap": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-ssl-refresh": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-streaming-session": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-strict-thinking": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-symm-mem": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-tf32-matmul": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-tokenizer-batch-encode": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-torch-compile": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-torch-compile-debug-mode": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-torch-symm-mem": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-tp-lm-head-all-to-all": {
+  "default": "None",
+  "type": "str"
+ },
+ "--enable-trace": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-two-batch-overlap": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-unified-cache-external-linker": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-unified-memory": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-w4a4-mxfp4-megamoe": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-waterfill": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enable-weights-cpu-backup": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--encoder-bootstrap-port": {
+  "default": 8997,
+  "type": "int"
+ },
+ "--encoder-only": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--encoder-register-urls": {
+  "default": "msgspec.field(default_factory=list)",
+  "type": "str"
+ },
+ "--encoder-transfer-backend": {
+  "choices": [],
+  "default": "auto",
+  "type": "str"
+ },
+ "--encoder-urls": {
+  "default": "msgspec.field(default_factory=list)",
+  "type": "str"
+ },
+ "--enforce-disable-flashinfer-allreduce-fusion": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--enforce-shared-experts-fusion": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--engine-info-bootstrap-port": {
+  "default": 6789,
+  "type": "int"
+ },
+ "--ep-dispatch-algorithm": {
+  "default": "None",
+  "type": "str"
+ },
+ "--ep-join-mode": {
+  "choices": [],
+  "default": "None",
+  "help": "Join mode for elastic EP. 'recover' rejoins an existing slot after a fault. 'scale' joins as a new rank beyond the original group size and requires --node-rank 1.",
+  "type": "str"
+ },
+ "--ep-join-rank-offset": {
+  "default": 0,
+  "type": "int"
+ },
+ "--ep-num-redundant-experts": {
+  "default": 0,
+  "type": "int"
+ },
+ "--ep-size": {
+  "aliases": [
+   "--expert-parallel-size",
+   "--ep"
+  ],
+  "default": 1,
+  "type": "int"
+ },
+ "--eplb-algorithm": {
+  "default": "auto",
+  "type": "str"
+ },
+ "--eplb-min-rebalancing-utilization-threshold": {
+  "default": 1.0,
+  "type": "float"
+ },
+ "--eplb-rebalance-layers-per-chunk": {
+  "default": "None",
+  "type": "str"
+ },
+ "--eplb-rebalance-num-iterations": {
+  "default": 1000,
+  "type": "int"
+ },
+ "--expert-balancedness-report-mode": {
+  "default": "off",
+  "type": "str"
+ },
+ "--expert-distribution-recorder-buffer-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--expert-distribution-recorder-mode": {
+  "default": "None",
+  "type": "str"
+ },
+ "--experts-shared-outer-loras": {
+  "default": "None",
+  "type": "str"
+ },
+ "--export-metrics-to-file": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--export-metrics-to-file-dir": {
+  "default": "None",
+  "type": "str"
+ },
+ "--extra-metric-labels": {
+  "default": "None",
+  "type": "str"
+ },
+ "--fastapi-root-path": {
+  "default": "",
+  "type": "str"
+ },
+ "--file-storage-path": {
+  "default": "sglang_storage",
+  "type": "str"
+ },
+ "--flashinfer-a2a-dispatch-type": {
+  "default": "None",
+  "type": "str"
+ },
+ "--flashinfer-allreduce-fusion-backend": {
+  "default": "None",
+  "help": "Enable FlashInfer allreduce fusion and choose backend. Requires SM90 or SM10X NVIDIA GPUs. Defaults to auto. 'auto': choose mnnvl on Blackwell (SM100/SM103) systems (single- and multi-node) and trtllm",
+  "type": "str"
+ },
+ "--flashinfer-autotune-skip-ops": {
+  "default": "None",
+  "help": "FlashInfer custom-op identifiers to skip during autotuning. Skipped ops use FlashInfer's heuristic fallback. SGLang temporarily skips mxfp8_gemm by default due to an IMA.",
+  "type": "str"
+ },
+ "--flashinfer-mla-disable-ragged": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--flashinfer-mxfp4-moe-precision": {
+  "default": "default",
+  "type": "str"
+ },
+ "--flexkv-config-file": {
+  "default": "None",
+  "type": "str"
+ },
+ "--forward-hooks": {
+  "default": "None",
+  "type": "str"
+ },
+ "--forward-pass-metrics-ipc-name": {
+  "default": "None",
+  "type": "str"
+ },
+ "--forward-pass-metrics-worker-id": {
+  "default": "",
+  "type": "str"
+ },
+ "--fp4-gemm-runner-backend": {
+  "choices": [
+   "auto",
+   "flashinfer_cudnn",
+   "flashinfer_cutedsl",
+   "flashinfer_cutlass",
+   "flashinfer_trtllm",
+   "marlin"
+  ],
+  "default": "auto",
+  "help": "Choose the runner backend for NVFP4 GEMM operations. Options: 'auto' (default; selects flashinfer_cutedsl on SM100, marlin on SM80-SM90, flashinfer_cutlass otherwise (including SM120)), 'flashinfer_cu",
+  "type": "str"
+ },
+ "--fp8-gemm-runner-backend": {
+  "choices": [
+   "auto",
+   "deep_gemm",
+   "flashinfer_trtllm",
+   "flashinfer_cutlass",
+   "flashinfer_deepgemm",
+   "flashinfer_cutedsl",
+   "cutlass",
+   "triton",
+   "aiter"
+  ],
+  "default": "auto",
+  "help": "Choose the runner backend for Blockwise FP8 GEMM operations. Options: 'auto' (default, auto-selects based on hardware; MXFP8 dense picks flashinfer_cutedsl on SM100/SM103 and FlashInfer CUTLASS on oth",
+  "type": "str"
+ },
+ "--fuseep-mode": {
+  "default": 2,
+  "type": "str"
+ },
+ "--gated-launch-port": {
+  "default": "None",
+  "type": "str"
+ },
+ "--gc-threshold": {
+  "default": "None",
+  "type": "str"
+ },
+ "--gc-warning-threshold-secs": {
+  "default": 0.0,
+  "type": "float"
+ },
+ "--generation-tokens-buckets": {
+  "default": "None",
+  "type": "str"
+ },
+ "--gpu-id-step": {
+  "default": 1,
+  "type": "int"
+ },
+ "--grammar-backend": {
+  "choices": [
+   "xgrammar",
+   "outlines",
+   "llguidance",
+   "none"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--grpc-mode": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--grpc-port": {
+  "default": "None",
+  "type": "str"
+ },
+ "--grpc-worker-threads": {
+  "default": "None",
+  "type": "str"
+ },
+ "--hf-chat-template-name": {
+  "default": "None",
+  "type": "str"
+ },
+ "--hicache-host-memory-mode": {
+  "choices": [],
+  "default": "cache",
+  "type": "str"
+ },
+ "--hicache-io-backend": {
+  "choices": [],
+  "default": "kernel",
+  "type": "str"
+ },
+ "--hicache-mem-layout": {
+  "choices": [],
+  "default": "page_first",
+  "type": "str"
+ },
+ "--hicache-ratio": {
+  "default": "None",
+  "type": "str"
+ },
+ "--hicache-size": {
+  "default": 0,
+  "type": "int"
+ },
+ "--hicache-storage-backend": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--hicache-storage-backend-extra-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--hicache-storage-prefetch-policy": {
+  "choices": [],
+  "default": "timeout",
+  "type": "str"
+ },
+ "--hicache-storage-prefetch-retry-max-attempts": {
+  "default": 4,
+  "type": "int"
+ },
+ "--hicache-storage-prefetch-retry-poll-interval": {
+  "default": 0,
+  "type": "int"
+ },
+ "--hicache-write-policy": {
+  "choices": [],
+  "default": "write_through",
+  "type": "str"
+ },
+ "--hisparse-config": {
+  "aliases": [
+   "--hierarchical-sparse-attention-extra-config"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--host": {
+  "default": "127.0.0.1",
+  "type": "str"
+ },
+ "--http2-initial-connection-window-size": {
+  "default": "1024 * 1024",
+  "type": "int"
+ },
+ "--http2-max-concurrent-streams": {
+  "default": 200,
+  "type": "int"
+ },
+ "--image-processor-backend": {
+  "default": "auto",
+  "type": "str"
+ },
+ "--incremental-streaming-output": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--init-expert-location": {
+  "default": "trivial",
+  "type": "str"
+ },
+ "--int8-mamba-ckpt-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--is-embedding": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--json-model-override-args": {
+  "default": "{}",
+  "type": "str"
+ },
+ "--keep-mm-feature-on-device": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--kt-cpuinfer": {
+  "default": "None",
+  "type": "str"
+ },
+ "--kt-max-deferred-experts-per-token": {
+  "default": "None",
+  "type": "str"
+ },
+ "--kt-method": {
+  "default": "AMXINT4",
+  "type": "str"
+ },
+ "--kt-num-gpu-experts": {
+  "default": "None",
+  "type": "str"
+ },
+ "--kt-threadpool-count": {
+  "default": 2,
+  "type": "int"
+ },
+ "--kt-weight-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--kv-cache-dtype": {
+  "choices": [],
+  "default": "auto",
+  "type": "str"
+ },
+ "--kv-canary": {
+  "choices": [],
+  "default": "none",
+  "help": "KV cache canary mode. 'none' disables the canary (default). 'log' prints them while the server keeps running (production-safe). 'raise' fails the server on the first detected mismatch (CI lane).",
+  "type": "str"
+ },
+ "--kv-canary-sweep-interval": {
+  "default": 0,
+  "type": "int"
+ },
+ "--kv-events-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--language-model-only": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--language-only": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--limit-mm-data-per-request": {
+  "default": "None",
+  "type": "str"
+ },
+ "--linear-attn-backend": {
+  "choices": [
+   "triton",
+   "cutedsl",
+   "flashinfer",
+   "flashkda",
+   "nvidia_kda",
+   "ptx_kda",
+   "helion",
+   "intel_xpu"
+  ],
+  "default": "triton",
+  "type": "str"
+ },
+ "--linear-attn-decode-backend": {
+  "choices": [
+   "triton",
+   "cutedsl",
+   "flashinfer",
+   "flashkda",
+   "nvidia_kda",
+   "ptx_kda",
+   "helion",
+   "intel_xpu"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--linear-attn-prefill-backend": {
+  "choices": [
+   "triton",
+   "cutedsl",
+   "flashinfer",
+   "flashkda",
+   "nvidia_kda",
+   "ptx_kda",
+   "helion",
+   "intel_xpu"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--linear-attn-verify-backend": {
+  "choices": [
+   "triton",
+   "cutedsl",
+   "flashinfer",
+   "flashkda",
+   "nvidia_kda",
+   "ptx_kda",
+   "helion",
+   "intel_xpu"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--linear-replayssm-cache-len": {
+  "default": 16,
+  "type": "int"
+ },
+ "--lmcache-config-file": {
+  "default": "None",
+  "type": "str"
+ },
+ "--load-balance-method": {
+  "choices": [],
+  "default": "auto",
+  "type": "str"
+ },
+ "--load-format": {
+  "choices": [
+   "auto",
+   "pt",
+   "safetensors",
+   "npcache",
+   "dummy",
+   "sharded_state",
+   "presharded",
+   "gguf",
+   "expert_pack",
+   "bitsandbytes",
+   "mistral",
+   "layered",
+   "flash_rl",
+   "remote",
+   "remote_instance",
+   "fastsafetensors",
+   "private",
+   "runai_streamer"
+  ],
+  "default": "auto",
+  "type": "str"
+ },
+ "--load-publish-endpoint": {
+  "default": "None",
+  "type": "str"
+ },
+ "--load-snapshot-publish-interval": {
+  "default": 15,
+  "type": "int"
+ },
+ "--log-level": {
+  "default": "info",
+  "type": "str"
+ },
+ "--log-level-http": {
+  "default": "None",
+  "type": "str"
+ },
+ "--log-requests": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--log-requests-format": {
+  "choices": [],
+  "default": "text",
+  "help": "Format for request logging: 'text' (human-readable) or 'json' (structured)",
+  "type": "str"
+ },
+ "--log-requests-level": {
+  "choices": [],
+  "default": 2,
+  "type": "int"
+ },
+ "--log-requests-target": {
+  "default": "None",
+  "type": "str"
+ },
+ "--lora-backend": {
+  "choices": [],
+  "default": "csgmv",
+  "type": "str"
+ },
+ "--lora-drain-wait-threshold": {
+  "default": 0.0,
+  "type": "float"
+ },
+ "--lora-eviction-policy": {
+  "choices": [],
+  "default": "lru",
+  "help": "LoRA adapter eviction policy when memory pool is full. 'lru': Least Recently Used (default, better cache efficiency). 'fifo': First-In-First-Out.",
+  "type": "str"
+ },
+ "--lora-paths": {
+  "default": "None",
+  "type": "str"
+ },
+ "--lora-strict-loading": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--lora-target-modules": {
+  "choices": [],
+  "default": "None",
+  "help": "The union set of all target modules where LoRA should be applied. If not specified, it will be automatically inferred from the adapters provided in --lora-paths. If 'all' is specified, all supported m",
+  "type": "str"
+ },
+ "--lora-use-virtual-experts": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--mamba-backend": {
+  "choices": [],
+  "default": "triton",
+  "help": "Choose the kernel backend for Mamba SSM operations. Default is 'triton'. Options: 'triton' (default), 'flashinfer' (requires FlashInfer with Mamba support).",
+  "type": "str"
+ },
+ "--mamba-cache-philox-rounds": {
+  "default": 0,
+  "type": "int"
+ },
+ "--mamba-full-memory-ratio": {
+  "default": "None",
+  "type": "str"
+ },
+ "--mamba-max-states-per-path": {
+  "default": -1,
+  "type": "int"
+ },
+ "--mamba-radix-cache-strategy": {
+  "choices": [],
+  "default": "auto",
+  "type": "str"
+ },
+ "--mamba-ssm-dtype": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--mamba-track-interval": {
+  "default": 256,
+  "type": "int"
+ },
+ "--max-ep-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--max-loaded-loras": {
+  "default": "None",
+  "type": "str"
+ },
+ "--max-lora-chunk-size": {
+  "choices": [],
+  "default": 16,
+  "help": "Maximum chunk size for the ChunkedSGMV LoRA backend. Only used when --lora-backend is 'csgmv'. Choosing a larger value might improve performance.",
+  "type": "str"
+ },
+ "--max-lora-rank": {
+  "default": "None",
+  "type": "str"
+ },
+ "--max-loras-per-batch": {
+  "default": 8,
+  "type": "int"
+ },
+ "--max-mamba-cache-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--max-prefill-tokens": {
+  "default": 16384,
+  "help": "The maximum number of tokens in a prefill batch. The real bound will be the maximum of this value and the model's maximum context length.",
+  "type": "int"
+ },
+ "--max-queued-requests": {
+  "default": "None",
+  "type": "str"
+ },
+ "--max-running-requests": {
+  "default": "None",
+  "type": "str"
+ },
+ "--max-total-tokens": {
+  "default": "None",
+  "type": "str"
+ },
+ "--media-url-max-file-size-mb": {
+  "default": 64,
+  "type": "int"
+ },
+ "--mem-fraction-static": {
+  "default": "None",
+  "type": "str"
+ },
+ "--min-free-slots-delay": {
+  "default": "None",
+  "type": "str"
+ },
+ "--mlx-enable-sampling": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--mm-attention-backend": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--mm-enable-dp-encoder": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--mm-feature-transport": {
+  "default": "None",
+  "type": "str"
+ },
+ "--mm-global-cache-backend": {
+  "choices": [],
+  "default": "mooncake",
+  "type": "str"
+ },
+ "--mm-io-worker-num": {
+  "default": 0,
+  "type": "int"
+ },
+ "--mm-preprocess-cache-size-mb": {
+  "default": "None",
+  "type": "str"
+ },
+ "--mm-process-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--mm-processor-worker-num": {
+  "default": 0,
+  "type": "int"
+ },
+ "--model-checksum": {
+  "default": "None",
+  "type": "str"
+ },
+ "--model-config-parser": {
+  "default": "auto",
+  "type": "str"
+ },
+ "--model-impl": {
+  "default": "auto",
+  "type": "str"
+ },
+ "--model-loader-extra-config": {
+  "default": "{}",
+  "type": "str"
+ },
+ "--model-path": {
+  "aliases": [
+   "--model"
+  ],
+  "type": "str"
+ },
+ "--modelexpress-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--modelopt-checkpoint-restore-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--modelopt-checkpoint-save-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--modelopt-export-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--modelopt-quant": {
+  "default": "None",
+  "type": "str"
+ },
+ "--moe-a2a-backend": {
+  "choices": [],
+  "default": "none",
+  "type": "str"
+ },
+ "--moe-dense-tp-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--moe-dp-size": {
+  "aliases": [
+   "--moe-data-parallel-size"
+  ],
+  "default": 1,
+  "type": "int"
+ },
+ "--moe-runner-backend": {
+  "choices": [
+   "auto",
+   "deep_gemm",
+   "triton",
+   "triton_kernel",
+   "flashinfer_trtllm",
+   "experimental_sgl_trtllm",
+   "flashinfer_trtllm_routed",
+   "flashinfer_cutlass",
+   "flashinfer_mxfp4",
+   "flashinfer_cutedsl",
+   "flashinfer_megamoe",
+   "cutlass",
+   "aiter",
+   "marlin",
+   "humming",
+   "experimental_sgl_marlin",
+   "hpc_ops",
+   "megamoe",
+   "intel_xpu"
+  ],
+  "default": "auto",
+  "type": "str"
+ },
+ "--mooncake-ib-device": {
+  "default": "None",
+  "type": "str"
+ },
+ "--msprobe-dump-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--nccl-port": {
+  "default": "None",
+  "type": "str"
+ },
+ "--nnodes": {
+  "default": 1,
+  "type": "int"
+ },
+ "--node-rank": {
+  "default": 0,
+  "type": "int"
+ },
+ "--num-continuous-decode-steps": {
+  "default": 1,
+  "type": "int"
+ },
+ "--num-reserved-decode-tokens": {
+  "default": 512,
+  "type": "int"
+ },
+ "--numa-node": {
+  "default": "None",
+  "type": "str"
+ },
+ "--offload-group-size": {
+  "default": -1,
+  "type": "int"
+ },
+ "--offload-mode": {
+  "default": "cpu",
+  "type": "str"
+ },
+ "--offload-num-in-group": {
+  "default": 1,
+  "type": "int"
+ },
+ "--offload-prefetch-step": {
+  "default": 1,
+  "type": "int"
+ },
+ "--optimistic-prefill-attempts": {
+  "default": 0,
+  "type": "int"
+ },
+ "--otlp-traces-endpoint": {
+  "default": "localhost:4317",
+  "type": "str"
+ },
+ "--page-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--pdmux-config-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--ple-offload-backend": {
+  "choices": [],
+  "default": "pinned",
+  "help": "Host storage for the offloaded Qwen4 PLE n-gram table. 'pinned' (default) uses CPU pinned memory. 'file' maps a sparse file under --ple-offload-dir and lets the gather kernel read it directly; use it ",
+  "type": "str"
+ },
+ "--ple-offload-dir": {
+  "default": "None",
+  "help": "Directory for the file-backed PLE table when --ple-offload-backend is 'file'. Defaults to $SGLANG_CACHE_DIR/ple/<model path>, one directory per checkpoint. The file is sparse and reused across restart",
+  "type": "str"
+ },
+ "--ple-offload-embedding": {
+  "default": "None",
+  "type": "str"
+ },
+ "--port": {
+  "default": 30000,
+  "type": "int"
+ },
+ "--pp-async-batch-depth": {
+  "default": 0,
+  "type": "int"
+ },
+ "--pp-max-micro-batch-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--pp-size": {
+  "aliases": [
+   "--pipeline-parallel-size"
+  ],
+  "default": 1,
+  "type": "int"
+ },
+ "--pre-warm-nccl": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--preferred-sampling-params": {
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-attention-backend": {
+  "choices": [
+   "triton",
+   "torch_native",
+   "flex_attention",
+   "dsa",
+   "nsa",
+   "qsa",
+   "dsv4",
+   "compressed",
+   "fa3",
+   "fa4",
+   "flashinfer",
+   "flashmla",
+   "trtllm_mla",
+   "cutedsl_mla",
+   "tokenspeed_mla",
+   "trtllm_mha",
+   "hpc_ops",
+   "minicpm_flashattn",
+   "minicpm_flashinfer",
+   "aiter",
+   "wave",
+   "intel_amx",
+   "ascend",
+   "intel_xpu"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-decode-interval": {
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-delayer-forward-passes-buckets": {
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-delayer-max-delay-ms": {
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-delayer-max-delay-passes": {
+  "default": 30,
+  "type": "int"
+ },
+ "--prefill-delayer-queue-min-ratio": {
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-delayer-token-usage-low-watermark": {
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-delayer-wait-seconds-buckets": {
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-max-requests": {
+  "default": "None",
+  "type": "str"
+ },
+ "--prefill-only-disable-kv-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--priority-scheduling-preemption-threshold": {
+  "default": 10,
+  "type": "int"
+ },
+ "--prompt-tokens-buckets": {
+  "default": "None",
+  "type": "str"
+ },
+ "--quantization": {
+  "choices": [
+   "awq",
+   "fp8",
+   "mxfp8",
+   "gptq",
+   "gptq_marlin",
+   "awq_marlin",
+   "bitsandbytes",
+   "gguf",
+   "modelopt",
+   "modelopt_fp8",
+   "modelopt_fp4",
+   "nvfp4_online",
+   "modelopt_mixed",
+   "petit_nvfp4",
+   "w8a8_int8",
+   "w8a8_fp8",
+   "moe_wna16",
+   "w4afp8",
+   "mxfp4",
+   "auto-round",
+   "auto-round-int8",
+   "compressed-tensors",
+   "modelslim",
+   "mxfp_w4a8",
+   "quark",
+   "quark_int4fp8_moe",
+   "quark_mxfp4",
+   "mlx_q4",
+   "mlx_q8",
+   "unquant",
+   "humming"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--quantization-param-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--quantize-and-serve": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--radix-cache-backend": {
+  "default": "None",
+  "type": "str"
+ },
+ "--radix-eviction-policy": {
+  "choices": [
+   "lru",
+   "lfu",
+   "slru",
+   "priority"
+  ],
+  "default": "lru",
+  "help": "The eviction policy of radix trees. 'lru' stands for Least Recently Used, 'lfu' stands for Least Frequently Used, 'slru' stands for Segmented Least Recently Used, and 'priority' evicts lower-priority ",
+  "type": "str"
+ },
+ "--radix-eviction-policy-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--random-seed": {
+  "default": "None",
+  "type": "str"
+ },
+ "--remote-instance-weight-loader-backend": {
+  "default": "nccl",
+  "type": "str"
+ },
+ "--remote-instance-weight-loader-seed-instance-ip": {
+  "default": "None",
+  "type": "str"
+ },
+ "--remote-instance-weight-loader-seed-instance-service-port": {
+  "default": "None",
+  "type": "str"
+ },
+ "--remote-instance-weight-loader-send-weights-group-ports": {
+  "default": "None",
+  "type": "str"
+ },
+ "--remote-instance-weight-loader-start-seed-via-transfer-engine": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--retraction-policy": {
+  "choices": [],
+  "default": "length",
+  "help": "The decode retraction policy to use when the KV cache is full. 'length' preserves the existing behavior and retracts short-output, long-input requests first. 'priority' retracts lower-priority request",
+  "type": "str"
+ },
+ "--return-hidden-states-mode": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--return-input-ids": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--return-output-ids": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--revision": {
+  "default": "None",
+  "type": "str"
+ },
+ "--rl-on-policy-target": {
+  "choices": [
+   "fsdp"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--rl-quant-profile": {
+  "default": "None",
+  "type": "str"
+ },
+ "--sampling-backend": {
+  "default": "None",
+  "type": "str"
+ },
+ "--sampling-defaults": {
+  "choices": [],
+  "default": "model",
+  "help": "Where to get default sampling parameters. 'openai' uses SGLang/OpenAI defaults (temperature=1.0, top_p=1.0, etc.). 'model' uses the model's generation_config.json to get the recommended sampling param",
+  "type": "str"
+ },
+ "--sampling-mask-max-tokens": {
+  "default": 4096,
+  "type": "int"
+ },
+ "--schedule-conservativeness": {
+  "default": 1.0,
+  "type": "float"
+ },
+ "--schedule-low-priority-values-first": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--schedule-policy": {
+  "choices": [],
+  "default": "fcfs",
+  "type": "str"
+ },
+ "--scheduler-recv-interval": {
+  "default": 1,
+  "type": "int"
+ },
+ "--served-model-name": {
+  "default": "None",
+  "type": "str"
+ },
+ "--show-time-cost": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--sidecar": {
+  "default": "None",
+  "type": "str"
+ },
+ "--sidecar-args": {
+  "default": "None",
+  "help": "JSON array passed to the selected sidecar module's main(argv) function. --sidecar-shutdown-timeout SECONDS is consumed by SGLang.",
+  "type": "str"
+ },
+ "--skip-server-warmup": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--skip-tokenizer-init": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--sleep-on-idle": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--sm-group-num": {
+  "default": 8,
+  "type": "int"
+ },
+ "--smg-grpc-mode": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--smg-http-sidecar-port": {
+  "aliases": [
+   "--grpc-http-sidecar-port"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--soft-watchdog-timeout": {
+  "default": "None",
+  "type": "str"
+ },
+ "--spec-trace-dir": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-accept-threshold-acc": {
+  "default": 1.0,
+  "type": "float"
+ },
+ "--speculative-accept-threshold-single": {
+  "default": 1.0,
+  "type": "float"
+ },
+ "--speculative-adaptive": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--speculative-adaptive-config": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-algorithm": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-attention-mode": {
+  "choices": [],
+  "default": "prefill",
+  "help": "Attention backend for speculative decoding operations (both target verify and draft extend). Can be one of 'prefill' (default) or 'decode'.",
+  "type": "str"
+ },
+ "--speculative-dflash-block-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-domino-candidate-pool-size": {
+  "default": 2048,
+  "type": "int"
+ },
+ "--speculative-draft-attention-backend": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-draft-kv-cache-dtype": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-draft-load-format": {
+  "choices": [
+   "auto",
+   "pt",
+   "safetensors",
+   "npcache",
+   "dummy",
+   "sharded_state",
+   "presharded",
+   "gguf",
+   "expert_pack",
+   "bitsandbytes",
+   "mistral",
+   "layered",
+   "flash_rl",
+   "remote",
+   "remote_instance",
+   "fastsafetensors",
+   "private",
+   "runai_streamer"
+  ],
+  "default": "None",
+  "help": "The format of the draft model weights to load. If not specified, will use the same format as --load-format. Use 'dummy' to initialize draft model weights with random values for profiling.",
+  "type": "str"
+ },
+ "--speculative-draft-model-path": {
+  "aliases": [
+   "--speculative-draft-model"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-draft-model-quantization": {
+  "choices": [
+   "awq",
+   "fp8",
+   "mxfp8",
+   "gptq",
+   "gptq_marlin",
+   "awq_marlin",
+   "bitsandbytes",
+   "gguf",
+   "modelopt",
+   "modelopt_fp8",
+   "modelopt_fp4",
+   "nvfp4_online",
+   "modelopt_mixed",
+   "petit_nvfp4",
+   "w8a8_int8",
+   "w8a8_fp8",
+   "moe_wna16",
+   "w4afp8",
+   "mxfp4",
+   "auto-round",
+   "auto-round-int8",
+   "compressed-tensors",
+   "modelslim",
+   "mxfp_w4a8",
+   "quark",
+   "quark_int4fp8_moe",
+   "quark_mxfp4",
+   "mlx_q4",
+   "mlx_q8",
+   "unquant",
+   "humming"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-draft-model-revision": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-draft-window-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-dsa-topk-backend": {
+  "choices": [],
+  "default": "sgl-kernel",
+  "help": "DSA indexer top-k backend for speculative draft workers. Options: 'sgl-kernel', 'torch', 'flashinfer'. The 'torch' backend currently requires SGLANG_DSA_FUSE_TOPK=false.",
+  "type": "str"
+ },
+ "--speculative-dspark-align-verify-tokens-to-graph-tier": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--speculative-dspark-block-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-dspark-confidence-sts-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-dspark-sps-table-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-eagle-topk": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-moe-a2a-backend": {
+  "choices": [],
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-moe-runner-backend": {
+  "choices": [
+   "auto",
+   "deep_gemm",
+   "triton",
+   "triton_kernel",
+   "flashinfer_trtllm",
+   "experimental_sgl_trtllm",
+   "flashinfer_trtllm_routed",
+   "flashinfer_cutlass",
+   "flashinfer_mxfp4",
+   "flashinfer_cutedsl",
+   "flashinfer_megamoe",
+   "cutlass",
+   "aiter",
+   "marlin",
+   "humming",
+   "experimental_sgl_marlin",
+   "hpc_ops",
+   "megamoe",
+   "intel_xpu"
+  ],
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-ngram-capacity": {
+  "default": "10 * 1000 * 1000",
+  "type": "int"
+ },
+ "--speculative-ngram-external-corpus-max-tokens": {
+  "default": 10000000,
+  "type": "int"
+ },
+ "--speculative-ngram-external-corpus-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-ngram-external-sam-budget": {
+  "default": 0,
+  "type": "int"
+ },
+ "--speculative-ngram-match-type": {
+  "default": "BFS",
+  "type": "str"
+ },
+ "--speculative-ngram-max-bfs-breadth": {
+  "default": 10,
+  "type": "int"
+ },
+ "--speculative-ngram-max-trie-depth": {
+  "default": 18,
+  "type": "int"
+ },
+ "--speculative-ngram-min-bfs-breadth": {
+  "default": 1,
+  "type": "int"
+ },
+ "--speculative-num-draft-tokens": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-num-steps": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-skip-dp-mlp-sync": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--speculative-token-map": {
+  "default": "None",
+  "type": "str"
+ },
+ "--speculative-use-rejection-sampling": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--ssl-ca-certs": {
+  "default": "None",
+  "type": "str"
+ },
+ "--ssl-certfile": {
+  "default": "None",
+  "type": "str"
+ },
+ "--ssl-keyfile": {
+  "default": "None",
+  "type": "str"
+ },
+ "--ssl-keyfile-password": {
+  "default": "None",
+  "type": "str"
+ },
+ "--startup-weight-load-mode": {
+  "default": "serial",
+  "type": "str"
+ },
+ "--stream-interval": {
+  "default": 1,
+  "type": "int"
+ },
+ "--stream-response-default-include-usage": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--strip-thinking-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--swa-full-tokens-ratio": {
+  "default": "None",
+  "type": "str"
+ },
+ "--tbo-token-distribution-threshold": {
+  "default": 0.48,
+  "type": "float"
+ },
+ "--tokenizer-backend": {
+  "choices": [],
+  "default": "huggingface",
+  "help": "Tokenizer backend. 'huggingface' uses the default HuggingFace tokenizers library, and 'fastokens' uses the fastokens library for faster tokenization. Requires the fastokens package to be installed.",
+  "type": "str"
+ },
+ "--tokenizer-metrics-allowed-custom-labels": {
+  "default": "None",
+  "type": "str"
+ },
+ "--tokenizer-metrics-custom-labels-header": {
+  "default": "x-custom-labels",
+  "type": "str"
+ },
+ "--tokenizer-mode": {
+  "choices": [],
+  "default": "auto",
+  "help": "Tokenizer mode. 'auto' will use the fast tokenizer if available, and 'slow' will always use the slow tokenizer.",
+  "type": "str"
+ },
+ "--tokenizer-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--tokenizer-worker-num": {
+  "default": 1,
+  "type": "int"
+ },
+ "--tool-server": {
+  "default": "None",
+  "type": "str"
+ },
+ "--torch-compile-max-bs": {
+  "default": 32,
+  "type": "int"
+ },
+ "--tp-size": {
+  "aliases": [
+   "--tensor-parallel-size"
+  ],
+  "default": 1,
+  "type": "int"
+ },
+ "--trace-modules": {
+  "default": "request",
+  "type": "str"
+ },
+ "--triton-attention-num-kv-splits": {
+  "default": 8,
+  "type": "int"
+ },
+ "--triton-attention-reduce-in-fp32": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--triton-attention-split-tile-size": {
+  "default": "None",
+  "type": "str"
+ },
+ "--trust-mm-content-hashes": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--trust-remote-code": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--unified-cache-external-linker-backend": {
+  "choices": [],
+  "default": "mooncake",
+  "type": "str"
+ },
+ "--uno-lora-path": {
+  "default": "None",
+  "type": "str"
+ },
+ "--use-ray": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--uses-mamba-radix-cache": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--uvicorn-access-log-exclude-prefixes": {
+  "default": "msgspec.field(default_factory=list)",
+  "type": "str"
+ },
+ "--warmups": {
+  "default": "None",
+  "type": "str"
+ },
+ "--watchdog-timeout": {
+  "default": 300,
+  "type": "float"
+ },
+ "--weight-cache-mode": {
+  "choices": [],
+  "default": "off",
+  "help": "Weight cache mode. 'off': normal disk loading. 'daemon': launch weight cache daemon (holds weights in GPU memory). Engine-spawned daemons are co-terminal with the engine and do NOT persist across rest",
+  "type": "str"
+ },
+ "--weight-cache-socket": {
+  "default": "None",
+  "help": "Unix socket path for weight cache daemon (client mode).If not set, derives the path from SGLANG_WEIGHT_CACHE_SOCKET_TEMPLATE using the caller's physical GPU UUID.",
+  "type": "str"
+ },
+ "--weight-cache-timeout": {
+  "default": 1800,
+  "type": "int"
+ },
+ "--weight-loader-disable-mmap": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--weight-loader-drop-cache-after-load": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--weight-loader-prefetch-checkpoints": {
+  "default": "False",
+  "type": "bool"
+ },
+ "--weight-loader-prefetch-num-threads": {
+  "default": 4,
+  "type": "int"
+ },
+ "--weight-version": {
+  "default": "default",
+  "type": "str"
+ }
+}

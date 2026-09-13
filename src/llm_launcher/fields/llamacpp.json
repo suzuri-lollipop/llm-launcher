@@ -1,0 +1,1728 @@
+{
+ "--adaptive-decay": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--adaptive-target": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--alias": {
+  "aliases": [
+   "-a"
+  ],
+  "help": "set model name aliases, comma-separated (to be used by API)",
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--api-key": {
+  "default": "none",
+  "help": "API key to use for authentication, multiple keys can be provided as a comma-separated list (default: none)",
+  "metavar": "KEY",
+  "type": "str"
+ },
+ "--api-key-file": {
+  "default": "none",
+  "help": "path to file containing API keys, one per line; lines starting with a hash are treated as comments (default: none)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--api-prefix": {
+  "metavar": "PREFIX",
+  "type": "str"
+ },
+ "--attention": {
+  "help": "{causal,non-causal}",
+  "type": "bool"
+ },
+ "--backend-sampling": {
+  "aliases": [
+   "-bs"
+  ],
+  "default": "disabled",
+  "help": "enable backend sampling (experimental) (default: disabled)",
+  "type": "bool"
+ },
+ "--batch-size": {
+  "aliases": [
+   "-b"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--binary-file": {
+  "aliases": [
+   "-bf"
+  ],
+  "default": "none",
+  "help": "binary file containing the prompt (default: none)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--cache-list": {
+  "aliases": [
+   "-cl"
+  ],
+  "help": "show list of models in cache",
+  "type": "bool"
+ },
+ "--cache-ram": {
+  "aliases": [
+   "-cram"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--cache-reuse": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--cache-type-k": {
+  "aliases": [
+   "-ctk"
+  ],
+  "metavar": "TYPE",
+  "type": "str"
+ },
+ "--cache-type-v": {
+  "aliases": [
+   "-ctv"
+  ],
+  "metavar": "TYPE",
+  "type": "str"
+ },
+ "--chat-template": {
+  "metavar": "JINJA_TEMPLATE",
+  "type": "str"
+ },
+ "--chat-template-file": {
+  "metavar": "JINJA_TEMPLATE_FILE",
+  "type": "str"
+ },
+ "--chat-template-kwargs": {
+  "help": "sets additional params for the json template parser, must be a valid json object string, e.g. '{\\\"key1\\\":\\\"value1\\\",\\\"key2\\\":\\\"value2\\\"}'",
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--checkpoint-min-step": {
+  "aliases": [
+   "-cms"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--chunk": {
+  "aliases": [
+   "--from-chunk"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--chunk-separator": {
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--chunk-size": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--chunks": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--cls-separator": {
+  "help": "separator of classification sequences (default \\\\t) for example \\\"<#seq#>\\\"",
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--color": {
+  "aliases": [
+   "-co"
+  ],
+  "choices": [
+   "auto",
+   "off",
+   "on"
+  ],
+  "help": "Colorize output to distinguish prompt and user input from generations ('on', 'off', or 'auto', default: 'auto')\\n",
+  "metavar": "[on|off|auto]",
+  "type": "select"
+ },
+ "--completion-bash": {
+  "help": "print source-able bash completion script for llama.cpp",
+  "type": "bool"
+ },
+ "--context-file": {
+  "help": "file to load context from (use comma-separated values to specify multiple files)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--control-vector": {
+  "help": "add a control vector\\nnote: use comma-separated values to add multiple control vectors",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--control-vector-layer-range": {
+  "help": "END",
+  "metavar": "START",
+  "type": "str"
+ },
+ "--control-vector-scaled": {
+  "help": "FNAME:SCALE,...",
+  "type": "bool"
+ },
+ "--cors-headers": {
+  "metavar": "HEADERS",
+  "type": "str"
+ },
+ "--cors-methods": {
+  "metavar": "METHODS",
+  "type": "str"
+ },
+ "--cors-origins": {
+  "metavar": "ORIGINS",
+  "type": "str"
+ },
+ "--cpu-mask": {
+  "aliases": [
+   "-C"
+  ],
+  "help": "CPU affinity mask: arbitrarily long hex. Complements cpu-range (default: \\\"\\\")",
+  "metavar": "M",
+  "type": "str"
+ },
+ "--cpu-mask-batch": {
+  "aliases": [
+   "-Cb"
+  ],
+  "default": "same",
+  "help": "CPU affinity mask: arbitrarily long hex. Complements cpu-range-batch (default: same as --cpu-mask)",
+  "metavar": "M",
+  "type": "str"
+ },
+ "--cpu-moe": {
+  "aliases": [
+   "-cmoe"
+  ],
+  "help": "keep all Mixture of Experts (MoE) weights in the CPU",
+  "type": "bool"
+ },
+ "--cpu-range": {
+  "aliases": [
+   "-Cr"
+  ],
+  "help": "lo-hi",
+  "type": "bool"
+ },
+ "--cpu-range-batch": {
+  "aliases": [
+   "-Crb"
+  ],
+  "help": "lo-hi",
+  "type": "bool"
+ },
+ "--cpu-strict": {
+  "metavar": "<0|1>",
+  "type": "str"
+ },
+ "--cpu-strict-batch": {
+  "default": "same",
+  "help": "use strict CPU placement (default: same as --cpu-strict)",
+  "metavar": "<0|1>",
+  "type": "str"
+ },
+ "--ctx-checkpoints": {
+  "aliases": [
+   "-ctxcp",
+   "--swa-checkpoints"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--ctx-size": {
+  "aliases": [
+   "-c"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--defrag-thold": {
+  "aliases": [
+   "-dt"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--device": {
+  "aliases": [
+   "-dev"
+  ],
+  "help": "<dev1,dev2,..>",
+  "type": "bool"
+ },
+ "--dflash": {
+  "default": "unused",
+  "help": "also download the DFlash sidecar, if available (default: unused)",
+  "type": "bool"
+ },
+ "--diffusion-add-gumbel-noise": {
+  "metavar": "F",
+  "type": "float"
+ },
+ "--diffusion-alg-temp": {
+  "metavar": "F",
+  "type": "float"
+ },
+ "--diffusion-algorithm": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--diffusion-block-length": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--diffusion-cfg-scale": {
+  "metavar": "F",
+  "type": "float"
+ },
+ "--diffusion-eps": {
+  "metavar": "F",
+  "type": "float"
+ },
+ "--diffusion-steps": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--docker-repo": {
+  "aliases": [
+   "-dr"
+  ],
+  "help": "[<repo>/]<model>[:quant]",
+  "type": "bool"
+ },
+ "--draft": {
+  "aliases": [
+   "--draft-n",
+   "--draft-max"
+  ],
+  "help": "the argument has been removed. use --spec-draft-n-max or --spec-ngram-mod-n-max",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--draft-min": {
+  "aliases": [
+   "--draft-n-min"
+  ],
+  "help": "the argument has been removed. use --spec-draft-n-min or --spec-ngram-mod-n-min",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--dry-allowed-length": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--dry-base": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--dry-multiplier": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--dry-penalty-last-n": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--dry-sequence-breaker": {
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--dynatemp-exp": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--dynatemp-range": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--eagle3": {
+  "default": "unused",
+  "help": "also download the Eagle3 sidecar, if available (default: unused)",
+  "type": "bool"
+ },
+ "--embd-normalize": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--embd-output-format": {
+  "help": "empty = default, \\\"array\\\" = [[],[]...], \\\"json\\\" = openai style, \\\"json+\\\" = same \\\"json\\\" + cosine similarity matrix, \\\"raw\\\" = plain whitespace-delimited output (one embedding per line)",
+  "metavar": "FORMAT",
+  "type": "str"
+ },
+ "--embd-separator": {
+  "help": "separator of embeddings (default \\\\n) for example \\\"<#sep#>\\\"",
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--epochs": {
+  "aliases": [
+   "-epochs"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--file": {
+  "aliases": [
+   "-f"
+  ],
+  "default": "none",
+  "help": "a file containing the prompt (default: none)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--fit": {
+  "aliases": [
+   "-fit"
+  ],
+  "choices": [
+   "off",
+   "on"
+  ],
+  "metavar": "[on|off]",
+  "type": "select"
+ },
+ "--fit-ctx": {
+  "aliases": [
+   "-fitc"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--fit-print": {
+  "aliases": [
+   "-fitp"
+  ],
+  "choices": [
+   "off",
+   "on"
+  ],
+  "metavar": "[on|off]",
+  "type": "select"
+ },
+ "--fit-target": {
+  "aliases": [
+   "-fitt"
+  ],
+  "help": "MiB0,MiB1,MiB2,...",
+  "type": "bool"
+ },
+ "--flash-attn": {
+  "aliases": [
+   "-fa"
+  ],
+  "choices": [
+   "auto",
+   "off",
+   "on"
+  ],
+  "metavar": "[on|off|auto]",
+  "type": "select"
+ },
+ "--frequency-penalty": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--gpu-layers": {
+  "aliases": [
+   "-ngl",
+   "--n-gpu-layers"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--grammar": {
+  "help": "BNF-like grammar to constrain generations (see samples in grammars/ dir)",
+  "metavar": "GRAMMAR",
+  "type": "str"
+ },
+ "--grammar-file": {
+  "help": "file to read grammar from",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--grp-attn-n": {
+  "aliases": [
+   "-gan"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--grp-attn-w": {
+  "aliases": [
+   "-gaw"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--hellaswag": {
+  "help": "compute HellaSwag score over random tasks from datafile supplied with -f",
+  "type": "bool"
+ },
+ "--hellaswag-tasks": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--help": {
+  "aliases": [
+   "-h",
+   "--usage"
+  ],
+  "help": "print usage and exit",
+  "type": "bool"
+ },
+ "--hf-file": {
+  "aliases": [
+   "-hff"
+  ],
+  "default": "unused",
+  "help": "Hugging Face model file. If specified, it will override the quant in --hf-repo (default: unused)",
+  "metavar": "FILE",
+  "type": "str"
+ },
+ "--hf-repo": {
+  "aliases": [
+   "-hf",
+   "-hfr"
+  ],
+  "help": "<user>/<model>[:quant]",
+  "type": "bool"
+ },
+ "--hf-token": {
+  "aliases": [
+   "-hft"
+  ],
+  "default": "value",
+  "help": "Hugging Face access token (default: value from HF_TOKEN environment variable)",
+  "metavar": "TOKEN",
+  "type": "str"
+ },
+ "--host": {
+  "metavar": "HOST",
+  "type": "str"
+ },
+ "--ignore-eos": {
+  "help": "ignore end of stream token and continue generating (implies --logit-bias EOS-inf)",
+  "type": "bool"
+ },
+ "--image": {
+  "aliases": [
+   "--audio",
+   "--video"
+  ],
+  "help": "path to an image, audio, or video file. use with multimodal models, use comma-separated values for multiple files\\n",
+  "metavar": "FILE",
+  "type": "str"
+ },
+ "--image-max-tokens": {
+  "default": "read",
+  "help": "maximum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--image-min-tokens": {
+  "default": "read",
+  "help": "minimum number of tokens each image can take, only used by vision models with dynamic resolution (default: read from model)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--in-file": {
+  "help": "an input file (use comma-separated values to specify multiple files)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--in-prefix": {
+  "default": "empty",
+  "help": "string to prefix user inputs with (default: empty)",
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--in-prefix-bos": {
+  "help": "prefix BOS to user inputs, preceding the `--in-prefix` string",
+  "type": "bool"
+ },
+ "--in-suffix": {
+  "default": "empty",
+  "help": "string to suffix after user inputs with (default: empty)",
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--json-schema": {
+  "aliases": [
+   "-j"
+  ],
+  "help": "JSON schema to constrain generations (https://json-schema.org/), e.g. `{\\\"type\\\": \\\"object\\\"}` for any JSON object",
+  "metavar": "SCHEMA",
+  "type": "str"
+ },
+ "--json-schema-file": {
+  "aliases": [
+   "-jf"
+  ],
+  "help": "File containing a JSON schema to constrain generations (https://json-schema.org/), e.g. `{\\\"type\\\": \\\"object\\\"}` for any JSON object",
+  "metavar": "FILE",
+  "type": "str"
+ },
+ "--junk": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--keep": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--kl-divergence": {
+  "help": "computes KL-divergence to logits provided via --kl-divergence-base",
+  "type": "bool"
+ },
+ "--kv-unified-per-slot": {
+  "default": "unset",
+  "help": "context limit per parallel slot (default: unset, behavior unchanged).\\n",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--lazy-mode": {
+  "aliases": [
+   "-lzm"
+  ],
+  "default": "auto",
+  "help": "on-demand reading of certain tensors, for example per-layer embeddings (default: auto)\\n",
+  "metavar": "MODE",
+  "type": "str"
+ },
+ "--learning-rate": {
+  "aliases": [
+   "-lr"
+  ],
+  "metavar": "ALPHA",
+  "type": "str"
+ },
+ "--learning-rate-decay-epochs": {
+  "aliases": [
+   "-decay-epochs"
+  ],
+  "metavar": "ALPHA",
+  "type": "str"
+ },
+ "--learning-rate-min": {
+  "aliases": [
+   "-lr-min"
+  ],
+  "metavar": "ALPHA",
+  "type": "str"
+ },
+ "--list-devices": {
+  "help": "print list of available devices and exit",
+  "type": "bool"
+ },
+ "--load-mode": {
+  "aliases": [
+   "-lm"
+  ],
+  "default": "auto",
+  "help": "model loading mode (default: auto)\\n",
+  "metavar": "MODE",
+  "type": "str"
+ },
+ "--log-colors": {
+  "choices": [
+   "auto",
+   "off",
+   "on"
+  ],
+  "help": "Set colored logging ('on', 'off', or 'auto', default: 'auto')\\n",
+  "metavar": "[on|off|auto]",
+  "type": "select"
+ },
+ "--log-disable": {
+  "help": "Log disable",
+  "type": "bool"
+ },
+ "--log-file": {
+  "help": "Log to file",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--log-prompts-dir": {
+  "default": "disabled",
+  "help": "Log prompts to directory (auto-created if not present; only used for debugging, default: disabled)",
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--logit-bias": {
+  "aliases": [
+   "-l"
+  ],
+  "help": "modifies the likelihood of token appearing in the completion,\\n",
+  "metavar": "TOKEN_ID(+/-)BIAS",
+  "type": "str"
+ },
+ "--logits-output-dir": {
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--lookup-cache-dynamic": {
+  "aliases": [
+   "-lcd"
+  ],
+  "help": "path to dynamic lookup cache to use for lookup decoding (updated by generation)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--lookup-cache-static": {
+  "aliases": [
+   "-lcs"
+  ],
+  "help": "path to static lookup cache to use for lookup decoding (not updated by generation)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--lora": {
+  "help": "path to LoRA adapter (use comma-separated values to load multiple adapters)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--lora-scaled": {
+  "help": "FNAME:SCALE,...",
+  "type": "bool"
+ },
+ "--main-gpu": {
+  "aliases": [
+   "-mg"
+  ],
+  "metavar": "INDEX",
+  "type": "str"
+ },
+ "--mcp-servers-config": {
+  "default": "none",
+  "help": "experimental: path to JSON file with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none)\\n",
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--mcp-servers-json": {
+  "default": "none",
+  "help": "experimental: inline JSON with MCP server definitions (Cursor-compatible format) - do not enable in untrusted environments (default: none)\\n",
+  "metavar": "JSON",
+  "type": "str"
+ },
+ "--media-path": {
+  "default": "disabled",
+  "help": "directory for loading local media files; files can be accessed via file:// URLs using relative paths (default: disabled)",
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--method": {
+  "help": "{pca, mean}",
+  "type": "bool"
+ },
+ "--min-p": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--mirostat": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--mirostat-ent": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--mirostat-lr": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--mmproj": {
+  "aliases": [
+   "-mm"
+  ],
+  "help": "path to a multimodal projector file. see tools/mtmd/README.md\\n",
+  "metavar": "FILE",
+  "type": "str"
+ },
+ "--mmproj-device": {
+  "aliases": [
+   "-mmdev"
+  ],
+  "default": "follows",
+  "help": "device to use for multimodal projector (none = don't offload, default: follows --device)\\n",
+  "metavar": "DEVICE",
+  "type": "str"
+ },
+ "--mmproj-url": {
+  "aliases": [
+   "-mmu"
+  ],
+  "help": "URL to a multimodal projector file. see tools/mtmd/README.md",
+  "metavar": "URL",
+  "type": "str"
+ },
+ "--model": {
+  "aliases": [
+   "-m"
+  ],
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--model-url": {
+  "aliases": [
+   "-mu"
+  ],
+  "default": "unused",
+  "help": "model download url (default: unused)",
+  "metavar": "MODEL_URL",
+  "type": "str"
+ },
+ "--models-dir": {
+  "default": "disabled",
+  "help": "directory containing models for the router server (default: disabled)",
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--models-max": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--models-preset": {
+  "default": "disabled",
+  "help": "path to INI file containing model presets for the router server (default: disabled)",
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--mtmd-batch-max-tokens": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--mtp": {
+  "default": "unused",
+  "help": "also download the multi-token prediction (MTP) head, if available (default: unused)",
+  "type": "bool"
+ },
+ "--multiline-input": {
+  "aliases": [
+   "-mli"
+  ],
+  "help": "allows you to write or paste multiple lines without ending each in '\\\\'",
+  "type": "bool"
+ },
+ "--multiple-choice": {
+  "help": "compute multiple choice score over random tasks from datafile supplied with -f",
+  "type": "bool"
+ },
+ "--multiple-choice-tasks": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--n-cpu-ffn": {
+  "aliases": [
+   "-ncffn"
+  ],
+  "help": "keep the dense FFN weights of the first N layers in the CPU\\n",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--n-cpu-moe": {
+  "aliases": [
+   "-ncmoe"
+  ],
+  "help": "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--negative-file": {
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--no-agent": {
+  "aliases": [
+   "-no-ag"
+  ],
+  "default": "disabled",
+  "help": "whether to enable CORS proxy and all built-in tools - do not enable in untrusted environments (default: disabled)\\n",
+  "type": "bool"
+ },
+ "--no-cache-idle-slots": {
+  "default": "enabled",
+  "help": "save idle slots to the prompt cache on new task, and clear them when using unified KV (default: enabled, requires cache-ram)",
+  "type": "bool"
+ },
+ "--no-conversation": {
+  "aliases": [
+   "-no-cnv"
+  ],
+  "help": "whether to run in conversation mode:\\n",
+  "type": "bool"
+ },
+ "--no-host": {
+  "help": "bypass host buffer allowing extra buffers to be used",
+  "type": "bool"
+ },
+ "--no-kv-unified": {
+  "aliases": [
+   "-no-kvu"
+  ],
+  "default": "enabled",
+  "help": "use single unified KV buffer shared across all sequences (default: enabled if number of slots is auto)",
+  "type": "bool"
+ },
+ "--no-log-jsonl": {
+  "default": "disabled",
+  "help": "Log as JSONL (one JSON object per line) to stdout, this also disables colored logging (default: disabled)",
+  "type": "bool"
+ },
+ "--no-log-prefix": {
+  "help": "Enable prefix in log messages",
+  "type": "bool"
+ },
+ "--no-log-timestamps": {
+  "help": "Enable timestamps in log messages",
+  "type": "bool"
+ },
+ "--no-reasoning-preserve": {
+  "default": "enabled",
+  "help": "preserve reasoning trace in the full history, not just the last assistant message (default: enabled)\\n",
+  "type": "bool"
+ },
+ "--no-ui-mcp-proxy": {
+  "aliases": [
+   "--no-webui-mcp-proxy"
+  ],
+  "default": "disabled",
+  "help": "experimental: whether to enable MCP CORS proxy - do not enable in untrusted environments (default: disabled)",
+  "type": "bool"
+ },
+ "--numa": {
+  "help": "attempt optimizations that help on some NUMA systems\\n",
+  "metavar": "TYPE",
+  "type": "str"
+ },
+ "--offline": {
+  "help": "Offline mode: forces use of cache, prevents network access",
+  "type": "bool"
+ },
+ "--optimizer": {
+  "aliases": [
+   "-opt"
+  ],
+  "help": "adamw or sgd",
+  "metavar": "sgd|adamw",
+  "type": "str"
+ },
+ "--output": {
+  "aliases": [
+   "-o",
+   "--output-file"
+  ],
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--output-format": {
+  "help": "{md,jsonl}",
+  "type": "bool"
+ },
+ "--output-frequency": {
+  "aliases": [
+   "-ofreq"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--override-kv": {
+  "help": "KEY=TYPE:VALUE,...",
+  "type": "bool"
+ },
+ "--override-tensor": {
+  "aliases": [
+   "-ot"
+  ],
+  "help": "<tensor name pattern>=<buffer type>,...",
+  "type": "bool"
+ },
+ "--parallel": {
+  "aliases": [
+   "-np"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--path": {
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--pca-batch": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--pca-iter": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--poll": {
+  "metavar": "<0...100>",
+  "type": "str"
+ },
+ "--poll-batch": {
+  "default": "same",
+  "help": "use polling to wait for work (default: same as --poll)",
+  "metavar": "<0|1>",
+  "type": "str"
+ },
+ "--pooling": {
+  "help": "{none,mean,cls,last,rank}",
+  "type": "bool"
+ },
+ "--port": {
+  "metavar": "PORT",
+  "type": "str"
+ },
+ "--pos": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--positive-file": {
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--ppl-output-type": {
+  "metavar": "<0|1>",
+  "type": "str"
+ },
+ "--ppl-stride": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--predict": {
+  "aliases": [
+   "-n",
+   "--n-predict"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--presence-penalty": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--print-token-count": {
+  "aliases": [
+   "-ptc"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--prio": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--prio-batch": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--prompt": {
+  "aliases": [
+   "-p"
+  ],
+  "help": "prompt to start generation with; for system message, use -sys",
+  "metavar": "PROMPT",
+  "type": "str"
+ },
+ "--prompt-cache": {
+  "default": "none",
+  "help": "file to cache prompt state for faster startup (default: none)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--prompt-cache-all": {
+  "help": "if specified, saves user input and generations to cache as well\\n",
+  "type": "bool"
+ },
+ "--prompt-cache-ro": {
+  "help": "if specified, uses the prompt cache but does not update it",
+  "type": "bool"
+ },
+ "--reasoning": {
+  "aliases": [
+   "-rea"
+  ],
+  "choices": [
+   "auto",
+   "off",
+   "on"
+  ],
+  "help": "Use reasoning/thinking in the chat ('on', 'off', or 'auto', default: 'auto' (detect from template))",
+  "metavar": "[on|off|auto]",
+  "type": "select"
+ },
+ "--reasoning-budget": {
+  "default": "-1",
+  "help": "token budget for thinking: -1 for unrestricted, 0 for immediate end, N>0 for token budget (default: -1)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--reasoning-budget-message": {
+  "default": "none",
+  "help": "message injected before the end-of-thinking tag when reasoning budget is exhausted (default: none)",
+  "metavar": "MESSAGE",
+  "type": "str"
+ },
+ "--reasoning-effort": {
+  "help": "reasoning effort level given to the chat template: 'default' to keep the template default,\\n",
+  "metavar": "LEVEL",
+  "type": "str"
+ },
+ "--reasoning-format": {
+  "help": "controls whether thought tags are allowed and/or extracted from the response, and in which format they're returned; one of:\\n",
+  "metavar": "FORMAT",
+  "type": "str"
+ },
+ "--repeat-last-n": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--repeat-penalty": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--reverse-prompt": {
+  "aliases": [
+   "-r"
+  ],
+  "help": "halt generation at PROMPT, return control in interactive mode\\n",
+  "metavar": "PROMPT",
+  "type": "str"
+ },
+ "--rope-freq-base": {
+  "default": "loaded",
+  "help": "RoPE base frequency, used by NTK-aware scaling (default: loaded from model)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--rope-freq-scale": {
+  "help": "RoPE frequency scaling factor, expands context by a factor of 1/N",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--rope-scale": {
+  "help": "RoPE context scaling factor, expands context by a factor of N",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--rope-scaling": {
+  "help": "{none,linear,yarn}",
+  "type": "bool"
+ },
+ "--rpc": {
+  "help": "comma-separated list of RPC servers (host:port)",
+  "metavar": "SERVERS",
+  "type": "str"
+ },
+ "--sampler-seq": {
+  "aliases": [
+   "--sampling-seq"
+  ],
+  "metavar": "SEQUENCE",
+  "type": "str"
+ },
+ "--samplers": {
+  "metavar": "SAMPLERS",
+  "type": "str"
+ },
+ "--save-all-logits": {
+  "aliases": [
+   "--kl-divergence-base"
+  ],
+  "help": "set logits file",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--save-frequency": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--seed": {
+  "aliases": [
+   "-s"
+  ],
+  "metavar": "SEED",
+  "type": "str"
+ },
+ "--sequences": {
+  "aliases": [
+   "-ns"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--server-base": {
+  "metavar": "URL",
+  "type": "str"
+ },
+ "--simple-io": {
+  "help": "use basic IO for better compatibility in subprocesses and limited consoles",
+  "type": "bool"
+ },
+ "--single-turn": {
+  "aliases": [
+   "-st"
+  ],
+  "help": "run conversation for a single turn only, then exit when done\\n",
+  "type": "bool"
+ },
+ "--sleep-idle-seconds": {
+  "metavar": "SECONDS",
+  "type": "str"
+ },
+ "--slot-prompt-similarity": {
+  "aliases": [
+   "-sps"
+  ],
+  "metavar": "SIMILARITY",
+  "type": "str"
+ },
+ "--slot-save-path": {
+  "default": "disabled",
+  "help": "path to save slot kv cache (default: disabled)",
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--spec-draft-cpu-mask": {
+  "aliases": [
+   "-Cd",
+   "--cpu-mask-draft"
+  ],
+  "default": "same",
+  "help": "Draft model CPU affinity mask. Complements cpu-range-draft (default: same as --cpu-mask)",
+  "metavar": "M",
+  "type": "str"
+ },
+ "--spec-draft-cpu-mask-batch": {
+  "aliases": [
+   "-Cbd",
+   "--cpu-mask-batch-draft"
+  ],
+  "default": "same",
+  "help": "Draft model CPU affinity mask. Complements cpu-range-draft (default: same as --cpu-mask)",
+  "metavar": "M",
+  "type": "str"
+ },
+ "--spec-draft-cpu-moe": {
+  "aliases": [
+   "-cmoed",
+   "--cpu-moe-draft"
+  ],
+  "help": "keep all Mixture of Experts (MoE) weights in the CPU for the draft model",
+  "type": "bool"
+ },
+ "--spec-draft-cpu-range": {
+  "aliases": [
+   "-Crd",
+   "--cpu-range-draft"
+  ],
+  "help": "lo-hi",
+  "type": "bool"
+ },
+ "--spec-draft-cpu-range-batch": {
+  "aliases": [
+   "-Crbd",
+   "--cpu-range-batch-draft"
+  ],
+  "help": "lo-hi",
+  "type": "bool"
+ },
+ "--spec-draft-cpu-strict": {
+  "aliases": [
+   "--cpu-strict-draft"
+  ],
+  "default": "same",
+  "help": "Use strict CPU placement for draft model (default: same as --cpu-strict)",
+  "metavar": "<0|1>",
+  "type": "str"
+ },
+ "--spec-draft-cpu-strict-batch": {
+  "aliases": [
+   "--cpu-strict-batch-draft"
+  ],
+  "default": "--cpu-strict-draft",
+  "help": "Use strict CPU placement for draft model (default: --cpu-strict-draft)",
+  "metavar": "<0|1>",
+  "type": "str"
+ },
+ "--spec-draft-device": {
+  "aliases": [
+   "-devd",
+   "--device-draft"
+  ],
+  "help": "<dev1,dev2,..>",
+  "type": "bool"
+ },
+ "--spec-draft-hf": {
+  "aliases": [
+   "-hfd",
+   "-hfrd",
+   "--hf-repo-draft"
+  ],
+  "help": "<user>/<model>[:quant]",
+  "type": "bool"
+ },
+ "--spec-draft-model": {
+  "aliases": [
+   "-md",
+   "--model-draft"
+  ],
+  "default": "unused",
+  "help": "draft model for speculative decoding (default: unused)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--spec-draft-n-cpu-moe": {
+  "aliases": [
+   "--spec-draft-ncmoe",
+   "-ncmoed",
+   "--n-cpu-moe-draft"
+  ],
+  "help": "keep the Mixture of Experts (MoE) weights of the first N layers in the CPU for the draft model",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-draft-n-max": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-draft-n-min": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-draft-ngl": {
+  "aliases": [
+   "-ngld",
+   "--gpu-layers-draft",
+   "--n-gpu-layers-draft"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-draft-override-tensor": {
+  "aliases": [
+   "-otd",
+   "--override-tensor-draft"
+  ],
+  "help": "<tensor name pattern>=<buffer type>,...",
+  "type": "bool"
+ },
+ "--spec-draft-p-min": {
+  "aliases": [
+   "--draft-p-min"
+  ],
+  "metavar": "P",
+  "type": "str"
+ },
+ "--spec-draft-p-split": {
+  "aliases": [
+   "--draft-p-split"
+  ],
+  "metavar": "P",
+  "type": "str"
+ },
+ "--spec-draft-poll": {
+  "aliases": [
+   "--poll-draft"
+  ],
+  "default": "same",
+  "help": "Use polling to wait for draft model work (default: same as --poll)",
+  "metavar": "<0|1>",
+  "type": "str"
+ },
+ "--spec-draft-poll-batch": {
+  "aliases": [
+   "--poll-batch-draft"
+  ],
+  "default": "--poll-draft",
+  "help": "Use polling to wait for draft model work (default: --poll-draft)",
+  "metavar": "<0|1>",
+  "type": "str"
+ },
+ "--spec-draft-prio": {
+  "aliases": [
+   "--prio-draft"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-draft-prio-batch": {
+  "aliases": [
+   "--prio-batch-draft"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-draft-threads": {
+  "aliases": [
+   "-td",
+   "--threads-draft"
+  ],
+  "default": "same",
+  "help": "number of threads to use during generation (default: same as --threads)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-draft-threads-batch": {
+  "aliases": [
+   "-tbd",
+   "--threads-batch-draft"
+  ],
+  "default": "same",
+  "help": "number of threads to use during batch and prompt processing (default: same as --threads-draft)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-draft-type-k": {
+  "aliases": [
+   "-ctkd",
+   "--cache-type-k-draft"
+  ],
+  "metavar": "TYPE",
+  "type": "str"
+ },
+ "--spec-draft-type-v": {
+  "aliases": [
+   "-ctvd",
+   "--cache-type-v-draft"
+  ],
+  "metavar": "TYPE",
+  "type": "str"
+ },
+ "--spec-ngram-map-k-min-hits": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-map-k-size-m": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-map-k-size-n": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-map-k4v-min-hits": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-map-k4v-size-m": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-map-k4v-size-n": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-min-hits": {
+  "help": "the argument has been removed. use the respective --spec-ngram-*-min-hits",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-mod-n-match": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-mod-n-max": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-mod-n-min": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-simple-min-hits": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-simple-size-m": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-simple-size-n": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-size-m": {
+  "help": "the argument has been removed. use the respective --spec-ngram-*-size-m",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-ngram-size-n": {
+  "help": "the argument has been removed. use the respective --spec-ngram-*-size-n or --spec-ngram-mod-n-match",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--spec-synth-len": {
+  "help": "target mean synthetic acceptance length, including the target token (benchmarking only)",
+  "metavar": "L",
+  "type": "str"
+ },
+ "--spec-synth-rates": {
+  "help": "comma-separated unconditional per-position synthetic acceptance probabilities (benchmarking only)",
+  "metavar": "P0,P1,...",
+  "type": "str"
+ },
+ "--split-mode": {
+  "aliases": [
+   "-sm"
+  ],
+  "help": "{none,layer,row,tensor}",
+  "type": "bool"
+ },
+ "--sse-ping-interval": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--ssl-cert-file": {
+  "help": "path to file a PEM-encoded SSL certificate",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--ssl-key-file": {
+  "help": "path to file a PEM-encoded SSL private key",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--system-prompt": {
+  "aliases": [
+   "-sys"
+  ],
+  "help": "system prompt to use with model (if applicable, depending on chat template)",
+  "metavar": "PROMPT",
+  "type": "str"
+ },
+ "--system-prompt-file": {
+  "aliases": [
+   "-sysf"
+  ],
+  "default": "none",
+  "help": "a file containing the system prompt (default: none)",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--tags": {
+  "help": "set model tags, comma-separated (informational, not used for routing)",
+  "metavar": "STRING",
+  "type": "str"
+ },
+ "--temp": {
+  "aliases": [
+   "--temperature"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--tensor-filter": {
+  "help": "filter tensor names for debug output (regex pattern, can be specified multiple times)",
+  "metavar": "REGEX",
+  "type": "str"
+ },
+ "--tensor-split": {
+  "aliases": [
+   "-ts"
+  ],
+  "help": "fraction of the model to offload to each GPU, comma-separated list of proportions, e.g. 3,1",
+  "metavar": "N0,N1,N2,...",
+  "type": "str"
+ },
+ "--threads": {
+  "aliases": [
+   "-t"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--threads-batch": {
+  "aliases": [
+   "-tb"
+  ],
+  "default": "same",
+  "help": "number of threads to use during batch and prompt processing (default: same as --threads)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--threads-http": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--timeout": {
+  "aliases": [
+   "-to"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--tools": {
+  "default": "no",
+  "help": "experimental: whether to enable built-in tools for AI agents - do not enable in untrusted environments (default: no tools)\\n",
+  "metavar": "TOOL1,TOOL2,...",
+  "type": "str"
+ },
+ "--tools-runtime": {
+  "default": "none",
+  "help": "experimental: run tools in a separate runtime environment (default: none, use host environment)\\n",
+  "metavar": "OPTION",
+  "type": "str"
+ },
+ "--top-k": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--top-nsigma": {
+  "aliases": [
+   "--top-n-sigma"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--top-p": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--tts-lang": {
+  "help": "language (ISO 639-1) for audio generation\\n",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--tts-speaker-file": {
+  "help": "speaker file path for audio generation",
+  "metavar": "FNAME",
+  "type": "str"
+ },
+ "--typical": {
+  "aliases": [
+   "--typical-p"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--ubatch-size": {
+  "aliases": [
+   "-ub"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--ui-config": {
+  "aliases": [
+   "--webui-config"
+  ],
+  "help": "JSON that provides default UI settings (overrides UI defaults)",
+  "metavar": "JSON",
+  "type": "str"
+ },
+ "--ui-config-file": {
+  "aliases": [
+   "--webui-config-file"
+  ],
+  "help": "JSON file that provides default UI settings (overrides UI defaults)",
+  "metavar": "PATH",
+  "type": "str"
+ },
+ "--val-split": {
+  "aliases": [
+   "-val-split"
+  ],
+  "metavar": "FRACTION",
+  "type": "str"
+ },
+ "--verbose": {
+  "aliases": [
+   "-v",
+   "--log-verbose"
+  ],
+  "help": "Set verbosity level to infinity (i.e. log all messages, useful for debugging)",
+  "type": "bool"
+ },
+ "--verbosity": {
+  "aliases": [
+   "-lv",
+   "--log-verbosity"
+  ],
+  "metavar": "N",
+  "type": "int"
+ },
+ "--version": {
+  "help": "show version and build info",
+  "type": "bool"
+ },
+ "--video-ffmpeg-dir": {
+  "default": "search",
+  "help": "path to the directory containing ffmpeg and ffprobe (default: search in PATH)",
+  "metavar": "DIR",
+  "type": "str"
+ },
+ "--video-fps": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--video-timestamp-interval": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--weight-decay": {
+  "aliases": [
+   "-wd"
+  ],
+  "metavar": "WD",
+  "type": "str"
+ },
+ "--winogrande": {
+  "help": "compute Winogrande score over random tasks from datafile supplied with -f",
+  "type": "bool"
+ },
+ "--winogrande-tasks": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--xtc-probability": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--xtc-threshold": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--yarn-attn-factor": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--yarn-beta-fast": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--yarn-beta-slow": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--yarn-ext-factor": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "--yarn-orig-ctx": {
+  "metavar": "N",
+  "type": "int"
+ },
+ "-npl": {
+  "help": "n0,n1,...",
+  "type": "bool"
+ },
+ "-npp": {
+  "help": "n0,n1,...",
+  "type": "bool"
+ },
+ "-ntg": {
+  "help": "n0,n1,...",
+  "type": "bool"
+ }
+}

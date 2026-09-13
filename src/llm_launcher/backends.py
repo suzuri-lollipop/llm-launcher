@@ -1,15 +1,20 @@
 """バックエンド(vllm / sglang / llama.cpp / FreeToken)の定義と起動コマンド組み立て。
 
 各バックエンドは `module/` 配下の git submodule として登録されている。
-ここでは「起動コマンドテンプレート」と「UI 用の完全な起動パラメータ定義」を持つ。
 
-フィールドはセクション (モデル設定 / 並列・分散 / スケジューリング / サーバー /
-サンプリング / ログ ...) に分類され、UI はセクションごとにグループ表示する。
-追加引数を素の CLI で書かなくても、主要パラメータはすべてリストから設定できる。
+設計:
+  - 起動引数の **型・choices・既定値** は `fields/<backend>.json` 正表が権威。
+    正表は `python -m llm_launcher.gen_fields` で submodule ソースから生成する
+    (vLLM の tool/reasoning parser 51/34種、quantization 30種、kv-cache-dtype 等は
+    ソース実在値。SGLang は arg_groups/fields AST 抽出 491 flags)。
+  - このファイルは UI に出すフラグの選択 + 日本語ラベル/セクション/上書き用の
+    choices (動的生成で抽出不能だったもの) だけを管理する。
+    正表に無いフラグを参照した場合は埋め込みフォールバックで補完する。
 """
 
 from __future__ import annotations
 
+import json
 import re
 import shlex
 import shutil
@@ -17,31 +22,177 @@ import sys
 from pathlib import Path
 from typing import Any
 
+FIELDS_DIR = Path(__file__).parent / "fields"
+
+_tables: dict[str, dict[str, Any]] = {}
+
+
+def load_table(backend_id: str) -> dict[str, Any]:
+    if backend_id not in _tables:
+        p = FIELDS_DIR / f"{backend_id}.json"
+        _tables[backend_id] = json.loads(p.read_text("utf-8")) if p.exists() else {}
+    return _tables[backend_id]
+
+
+# llama.cpp は C++ 独自 DSL のため生成器の網羅が弱い部分があり、
+# ソース照合済みの補完表を持つ (型・既定値は common/arg.cpp と common.h ベース)。
+LLAMA_SUPPLEMENT: dict[str, dict[str, Any]] = {
+    "--model": {"type": "str"},
+    "--alias": {"type": "str"},
+    "--hf-repo": {"type": "str"}, "--hf-file": {"type": "str"}, "--hf-token": {"type": "str"},
+    "--chat-template": {"type": "str"},
+    "--jinja": {"type": "bool"},
+    "--reasoning": {"type": "select", "choices": ["auto", "on", "off"]},
+    "--lora": {"type": "str"},
+    "--ctx-size": {"type": "int", "default": "4096"},
+    "--n-gpu-layers": {"type": "int", "default": "0"},
+    "--batch-size": {"type": "int", "default": "2048"},
+    "--ubatch-size": {"type": "int", "default": "512"},
+    "--parallel": {"type": "int", "default": "1"},
+    "--threads": {"type": "int", "default": "0"},
+    "--flash-attn": {"type": "select", "choices": ["auto", "on", "off"], "default": "auto"},
+    "--load-mode": {"type": "select", "choices": ["auto", "none", "mmap", "mmap+mlock"], "default": "auto"},
+    "--cache-type-k": {"type": "select", "choices": ["", "f32", "f16", "bf16", "q8_0", "q4_0", "iq4_nl", "mxfp4"], "default": "f16"},
+    "--cache-type-v": {"type": "select", "choices": ["", "f32", "f16", "bf16", "q8_0", "q4_0", "iq4_nl", "mxfp4"], "default": "f16"},
+    "--defrag-thold": {"type": "float"},
+    "--temp": {"type": "float", "default": "0.80"},
+    "--top-k": {"type": "int", "default": "40"},
+    "--top-p": {"type": "float", "default": "0.95"},
+    "--min-p": {"type": "float", "default": "0.05"},
+    "--repeat-penalty": {"type": "float", "default": "1.00"},
+    "--presence-penalty": {"type": "float", "default": "0.00"},
+    "--frequency-penalty": {"type": "float", "default": "0.00"},
+    "--seed": {"type": "int", "default": "-1"},
+    "--host": {"type": "str", "default": "127.0.0.1"},
+    "--port": {"type": "int", "default": "8080"},
+    "--api-key": {"type": "str"},
+    "--no-webui": {"type": "bool"},
+    "--webui-path": {"type": "str"},
+    "--metrics": {"type": "bool"},
+    "--slots": {"type": "bool"},
+    "--no-cont-batching": {"type": "bool"},
+    "--embedding": {"type": "bool"},
+    "--timeout-keep-alive": {"type": "int", "default": "5"},
+    "--warmup": {"type": "bool"},
+    "--spec-type": {"type": "select", "choices": ["", "none", "draft-model", "ngram", "ngram-mod", "cheat-sheet", "dflash", "eagle3"]},
+}
+
+# 動的生成 (レジストリ・関数) で正表が空になった分の選択肢補完。
+CHOICE_SUPPLEMENT: dict[str, dict[str, list[str]]] = {
+    "sglang": {
+        "--kv-cache-dtype": ["", "auto", "fp8_e5m2", "fp8_e4m3", "bf16", "bfloat16"],
+        "--dtype": ["", "auto", "float16", "bfloat16", "float32"],
+        "--schedule-policy": ["", "lpm", "fcfs", "random", "priority"],
+        "--sampling-backend": ["", "flashinfer", "pytorch"],
+        "--log-level": ["", "critical", "error", "warning", "info", "debug"],
+        "--tool-call-parser": ["", "auto", "deepseek", "deepseekv3", "glm", "glm4", "gpt-oss", "kimi_k2",
+                               "llama_3_1", "mistral", "phi4", "qwen", "qwen25", "pythonic", "step3", "step3p5"],
+        "--reasoning-parser": ["", "deepseek_r1", "deepseek_v3", "glm45", "qwen3", "qwen3_thinking",
+                               "qwen3_moe", "kimi_k2", "minimax_m2", "mistral", "step3", "olmo3"],
+    },
+    "vllm": {
+        "--generation-config": ["", "auto", "vllm"],
+        "--distributed-executor-backend": ["", "mp", "ray", "uni", "external_launcher"],
+        "--uvicorn-log-level": ["", "critical", "error", "warning", "info", "debug", "trace"],
+        "--chat-template-content-format": ["", "auto", "string", "openai"],
+    },
+    "freetoken": {
+        "--model-source": ["", "huggingface", "modelscope"],
+        "--ple-backend": ["", "pinned", "disk"],
+        "--nvfp4-backend": ["", "auto", "marlin", "flashinfer", "triton"],
+        "--moe-cache-policy": ["", "lru"],
+        "--cache-type": ["", "radix"],
+    },
+}
+
+# 正表自体がSparseな vllm 数値/文字列系の補完 (arg_utils.py 準拠)
+VLLM_SUPPLEMENT: dict[str, dict[str, Any]] = {
+    "--model": {"type": "str"}, "--served-model-name": {"type": "str"},
+    "--tokenizer": {"type": "str"}, "--revision": {"type": "str"},
+    "--chat-template": {"type": "str"}, "--download-dir": {"type": "str"},
+    "--api-key": {"type": "str"}, "--root-path": {"type": "str"},
+    "--max-model-len": {"type": "int"}, "--seed": {"type": "int"},
+    "--block-size": {"type": "int"}, "--max-num-seqs": {"type": "int"},
+    "--max-num-batched-tokens": {"type": "int"},
+    "--cpu-offload-gb": {"type": "float", "default": "0"},
+    "--pipeline-parallel-size": {"type": "int"}, "--data-parallel-size": {"type": "int"},
+    "--max-logprobs": {"type": "int", "default": "20"},
+    "--max-loras": {"type": "int", "default": "1"}, "--max-lora-rank": {"type": "int"},
+    "--host": {"type": "str"},
+}
+
+# 抽出時に付くノイズ (help文言の断片・sentinel・空コンテナ) を弾く
+_JUNK_DEFAULTS = {"unused", "%s", "n", "()", "[]", "{}", "none",
+                  "argparse.suppress", "suppress", "true", "false", "none"}
+
+_alias_index: dict[str, dict[str, str]] = {}
+
+
+def _resolve_alias(backend_id: str, flag: str) -> str:
+    """--tp-size のような alias でも正表の本体エントリを引けるようにする。"""
+    idx = _alias_index.get(backend_id)
+    if idx is None:
+        idx = {}
+        for prim, spec in load_table(backend_id).items():
+            for a in (spec or {}).get("aliases", []):
+                idx.setdefault(a, prim)
+        _alias_index[backend_id] = idx
+    return idx.get(flag, flag)
+
+
+def _spec(backend_id: str, flag: str) -> dict[str, Any]:
+    """正表→補完表の順で {type,choices,default} を解決する (alias 追従)。"""
+    table = load_table(backend_id)
+    spec = dict(table.get(flag) or table.get(_resolve_alias(backend_id, flag)) or {})
+    if backend_id == "llamacpp":
+        spec = {**spec, **{k: v for k, v in LLAMA_SUPPLEMENT.get(flag, {}).items() if v not in (None, [])}}
+    sup = (VLLM_SUPPLEMENT if backend_id == "vllm" else {})
+    spec = {**sup.get(flag, {}), **{k: v for k, v in spec.items() if v not in (None, [])}} if backend_id == "vllm" else spec
+    if flag in CHOICE_SUPPLEMENT.get(backend_id, {}):
+        spec = {**spec, "choices": CHOICE_SUPPLEMENT[backend_id][flag]}
+    d = spec.get("default")
+    if isinstance(d, str) and (d.strip().lower() in _JUNK_DEFAULTS or d.strip() in ("()", "[]", "{}")):
+        spec.pop("default")
+    if isinstance(d, bool):
+        # bool 既定は store_true 意味 → bool 型へ正規化し既定値は空にする
+        spec.setdefault("type", "bool")
+        spec["default"] = "" if not d else ""
+    if spec.get("type") == "bool":
+        spec.pop("default", None)
+    return spec
+
+
 # ---------------------------------------------------------------------------
-# フィールド定義ヘルパ
+# UI フィールド構築ヘルパ (正表参照型)
 # ---------------------------------------------------------------------------
 
 
-def f_str(key: str, flag: str, label: str, *, section: str = "model", placeholder: str = "",
-          default: str = "", help: str = "") -> dict[str, Any]:
-    return {"key": key, "flag": flag, "type": "str", "label": label, "section": section,
-            "placeholder": placeholder, "default": default, "help": help}
-
-
-def f_num(key: str, flag: str, label: str, *, section: str = "model", numtype: str = "int",
-          default: str = "", placeholder: str = "", help: str = "") -> dict[str, Any]:
-    return {"key": key, "flag": flag, "type": numtype, "label": label, "section": section,
-            "default": default, "placeholder": placeholder, "help": help}
-
-
-def f_bool(key: str, flag: str, label: str, *, section: str = "model", help: str = "") -> dict[str, Any]:
-    return {"key": key, "flag": flag, "type": "bool", "label": label, "section": section, "help": help}
-
-
-def f_select(key: str, flag: str, label: str, options: list[str], *, section: str = "model",
-             default: str = "", help: str = "") -> dict[str, Any]:
-    return {"key": key, "flag": flag, "type": "select", "label": label, "section": section,
-            "options": options, "default": default, "help": help}
+def fld(backend_id: str, flag: str, label: str, *, section: str = "model",
+        placeholder: str = "", help: str = "", default: str | None = None,
+        ftype: str | None = None, choices: list[str] | None = None) -> dict[str, Any]:
+    spec = _spec(backend_id, flag)
+    ch = choices if choices is not None else spec.get("choices")
+    t = ftype or spec.get("type") or "str"
+    if ch and ftype is None and t != "bool":
+        t = "select"          # 選択肢が抽出できた項目は select 化
+    key = re.sub(r"^--", "", flag).replace("-", "_")
+    d = spec.get("default") if default is None else default
+    if d is None:
+        d = ""
+    if t == "bool":
+        d = ""
+    if t == "select":
+        ch = list(ch or [])
+        if "" not in ch:
+            ch.insert(0, "")
+        if d and d not in ch:
+            ch.insert(1, d)
+    entry: dict[str, Any] = {"key": key, "flag": flag, "type": t, "label": label,
+                             "section": section, "placeholder": placeholder,
+                             "default": str(d) if d != "" else "", "help": help or spec.get("help", "")[:160]}
+    if t == "select":
+        entry["options"] = ch
+    return entry
 
 
 SECTIONS_JA = {
@@ -52,6 +203,7 @@ SECTIONS_JA = {
     "server": "サーバー・API",
     "tools": "ツール呼び出し・推論・LoRA",
     "sampling": "デフォルトサンプリング",
+    "cache": "KVキャッシュ・オフロード",
     "logs": "ログ・可観測性",
 }
 
@@ -66,172 +218,266 @@ def sections_order(backend: dict[str, Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# バックエンド定義 (flags/既定値は submodule ソース準拠)
+# バックエンド定義
 # ---------------------------------------------------------------------------
 
-BACKENDS: dict[str, dict[str, Any]] = {
-    # =====================================================================
+
+def build_vllm() -> dict[str, Any]:
+    b = "vllm"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--model", "モデル", placeholder="Qwen/Qwen2.5-7B-Instruct またはローカルパス"),
+        F("--served-model-name", "提供モデル名", placeholder="省略時は --model"),
+        F("--tokenizer", "トークナイザ (任意)", placeholder="モデルと異なる場合のみ"),
+        F("--revision", "リビジョン/ブランチ (任意)"),
+        F("--chat-template", "チャットテンプレートファイル (任意)"),
+        F("--chat-template-content-format", "テンプレート内容形式", choices=None),
+        F("--max-model-len", "最大コンテキスト長", placeholder="空=自動 (モデルの学習長)"),
+        F("--dtype", "dtype"),
+        F("--quantization", "量子化"),
+        F("--load-format", "ウェイト読み込み形式"),
+        F("--kv-cache-dtype", "KVキャッシュ量子化", help="fp8 系で KV メモリを削減"),
+        F("--download-dir", "DLキャッシュDIR (任意)"),
+        F("--trust-remote-code", "trust-remote-code"),
+        F("--seed", "乱数seed", placeholder="空=ランダム"),
+        F("--generation-config", "生成設定"),
+        F("--tensor-parallel-size", "Tensor並列数 (TP)", section="parallel"),
+        F("--pipeline-parallel-size", "Pipeline並列数 (PP)", section="parallel", placeholder="1"),
+        F("--data-parallel-size", "Data並列数 (DP)", section="parallel", placeholder="1"),
+        F("--enable-expert-parallel", "Expert並列 (MoE)", section="parallel"),
+        F("--distributed-executor-backend", "実行バックエンド", section="parallel", help="空=自動"),
+        F("--gpu-memory-utilization", "GPUメモリ使用率", section="sched"),
+        F("--cpu-offload-gb", "CPUオフロード (GB)", section="sched", placeholder="0"),
+        F("--max-num-batched-tokens", "最大バッチトークン数", section="sched", placeholder="自動"),
+        F("--max-num-seqs", "最大同時系列数", section="sched", placeholder="自動"),
+        F("--block-size", "KVブロックサイズ", section="sched", placeholder="自動 (16)"),
+        F("--enable-prefix-caching", "prefix caching", section="sched"),
+        F("--enable-chunked-prefill", "chunked prefill", section="sched", help="v1エンジンでは既定で有効"),
+        F("--enforce-eager", "eager モード (CUDA graph 無効)", section="sched"),
+        F("--host", "ホスト", section="server", default="0.0.0.0"),
+        F("--port", "ポート", section="server"),
+        F("--api-key", "APIキー", section="server", placeholder="設定すると Bearer 認証"),
+        F("--root-path", "ルートパス (任意)", section="server", help="リバースプロキシ配下運用時"),
+        F("--uvicorn-log-level", "uvicornログレベル", section="server"),
+        F("--disable-uvicorn-access-log", "accessログ無効", section="server"),
+        F("--disable-fastapi-docs", "/docs 無効", section="server"),
+        F("--allow-credentials", "CORS credentials", section="server"),
+        F("--enable-auto-tool-choice", "auto tool choice", section="tools", help="--tool-call-parser と併用必須"),
+        F("--tool-call-parser", "ツールコールパーサ", section="tools"),
+        F("--reasoning-parser", "reasoningパーサ", section="tools"),
+        F("--enable-lora", "LoRA有効", section="tools"),
+        F("--max-loras", "LoRA最大数", section="tools"),
+        F("--max-lora-rank", "LoRA最大ランク", section="tools", placeholder="16"),
+        F("--max-logprobs", "最大logprobs", section="tools"),
+        F("--disable-log-stats", "統計ログ無効", section="logs"),
+    ]
+    return _backend_meta(b, fields)
+
+
+def build_sglang() -> dict[str, Any]:
+    b = "sglang"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--model-path", "モデル", placeholder="Qwen/Qwen2.5-7B-Instruct またはローカルパス"),
+        F("--tokenizer-path", "トークナイザパス (任意)"),
+        F("--served-model-name", "提供モデル名 (任意)"),
+        F("--chat-template", "チャットテンプレート (任意)"),
+        F("--context-length", "最大コンテキスト長", placeholder="空=モデル設定に従う"),
+        F("--json-model-override-args", "config.json オーバーライド (JSON)", placeholder='{"max_position_embeddings": 65536}'),
+        F("--dtype", "dtype"),
+        F("--kv-cache-dtype", "KVキャッシュ量子化"),
+        F("--quantization", "量子化"),
+        F("--load-format", "ウェイト読み込み形式"),
+        F("--download-dir", "DLキャッシュDIR (任意)"),
+        F("--revision", "リビジョン/ブランチ (任意)"),
+        F("--trust-remote-code", "trust-remote-code"),
+        F("--tp-size", "Tensor並列数 (TP)", section="parallel"),
+        F("--pp-size", "Pipeline並列数 (PP)", section="parallel", placeholder="1"),
+        F("--dp-size", "Data並列数 (DP)", section="parallel", placeholder="1"),
+        F("--ep-size", "Expert並列数 (EP)", section="parallel", placeholder="1"),
+        F("--enable-dp-attention", "DP attention", section="parallel"),
+        F("--nnodes", "ノード数", section="parallel", placeholder="1"),
+        F("--node-rank", "このノードの rank", section="parallel", placeholder="0"),
+        F("--dist-init-addr", "分散初期化先 (host:port)", section="parallel", placeholder="マルチnode時のみ"),
+        F("--mem-fraction-static", "静的メモリ比率", section="sched", ftype="float", placeholder="空=自動"),
+        F("--max-running-requests", "最大実行中リクエスト", section="sched", placeholder="自動"),
+        F("--max-total-tokens", "KV総トークン数", section="sched", placeholder="自動"),
+        F("--chunked-prefill-size", "chunked prefillサイズ", section="sched", placeholder="自動"),
+        F("--max-prefill-tokens", "最大prefillトークン", section="sched"),
+        F("--schedule-policy", "スケジューリング方針", section="sched"),
+        F("--page-size", "ページサイズ", section="sched", placeholder="自動"),
+        F("--disable-overlap-schedule", "overlapスケジューリング無効", section="sched"),
+        F("--enable-mixed-chunk", "mixed chunk", section="sched"),
+        F("--watchdog-timeout", "ウォッチドッグ秒", section="sched", placeholder="300"),
+        F("--disable-radix-cache", "Radixキャッシュ無効", section="cache"),
+        F("--radix-eviction-policy", "Radix追出方針", section="cache"),
+        F("--enable-hierarchical-cache", "階層キャッシュ (HiCache)", section="cache"),
+        F("--hicache-ratio", "HiCacheホスト比率", section="cache", ftype="float", placeholder="2.0"),
+        F("--attention-backend", "Attentionバックエンド", section="exec"),
+        F("--sampling-backend", "Samplingバックエンド", section="exec"),
+        F("--grammar-backend", "Grammarバックエンド", section="exec"),
+        F("--fp8-gemm-runner-backend", "FP8 GEMM バックエンド", section="exec"),
+        F("--disable-cuda-graph", "CUDA graph 無効", section="exec"),
+        F("--enable-torch-compile", "torch.compile", section="exec"),
+        F("--cuda-graph-max-bs-decode", "CUDA graph 最大bs (decode)", section="exec", placeholder="自動"),
+        F("--cpu-offload-gb", "CPUオフロード (GB)", section="exec", placeholder="0"),
+        F("--base-gpu-id", "開始GPU ID", section="exec"),
+        F("--gpu-id-step", "GPU IDステップ", section="exec"),
+        F("--random-seed", "乱数seed", section="exec", placeholder="空=ランダム"),
+        F("--host", "ホスト", section="server", default="0.0.0.0"),
+        F("--port", "ポート", section="server"),
+        F("--api-key", "APIキー", section="server", placeholder="設定すると Bearer 認証"),
+        F("--admin-api-key", "管理者APIキー (任意)"),
+        F("--tokenizer-worker-num", "トークナイザworker数", section="server"),
+        F("--detokenizer-worker-num", "デトークナイザworker数", section="server", placeholder="1"),
+        F("--skip-server-warmup", "ウォームアップスキップ", section="server"),
+        F("--fastapi-root-path", "ルートパス (リバースプロキシ用)", section="server"),
+        F("--tool-call-parser", "ツールコールパーサ", section="tools"),
+        F("--reasoning-parser", "reasoningパーサ", section="tools"),
+        F("--log-level", "ログレベル", section="logs"),
+        F("--log-requests", "リクエスト内容をログ", section="logs"),
+        F("--log-requests-level", "リクエストログ詳細度", section="logs", placeholder="0-3"),
+        F("--decode-log-interval", "decodeログ間隔", section="logs"),
+        F("--enable-metrics", "Prometheus /metrics", section="logs"),
+        F("--enable-cache-report", "キャッシュレポート", section="logs"),
+    ]
+    return _backend_meta(b, fields)
+
+
+def build_llamacpp() -> dict[str, Any]:
+    b = "llamacpp"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--model", "GGUFモデル", placeholder="~/models/xxx-Q4_K_M.gguf"),
+        F("--alias", "提供モデル名 (任意)"),
+        F("--hf-repo", "HuggingFaceリポジトリ", placeholder="例: ggml-org/models", help="HFから自動ダウンロードする場合のみ"),
+        F("--hf-file", "HFファイル", placeholder="例: llama-2-7b.Q4_K_M.gguf"),
+        F("--hf-token", "HFトークン (Private用)", placeholder="hf_..."),
+        F("--chat-template", "チャットテンプレート (任意)"),
+        F("--jinja", "Jinjaテンプレートエンジン"),
+        F("--reasoning", "reasoning出力"),
+        F("--lora", "LoRAアダプタ (任意)", placeholder=".gguf LoRAパス"),
+        F("--ctx-size", "コンテキスト長", section="sched", help="0=モデルの学習長"),
+        F("--n-gpu-layers", "GPUに載せる層数 (ngl)", section="sched", placeholder="-1=全て / 0=CPU"),
+        F("--batch-size", "バッチサイズ (b)", section="sched"),
+        F("--ubatch-size", "マイクロバッチ (ub)", section="sched"),
+        F("--parallel", "並列スロット数 (np)", section="sched"),
+        F("--threads", "スレッド数 (t)", section="sched", placeholder="0=自動"),
+        F("--flash-attn", "Flash Attention (fa)", section="sched"),
+        F("--load-mode", "モデルロード方法", section="sched", help="mmap+mlock = RAM常駐 (mlock 相当)"),
+        F("--cache-type-k", "KVキャッシュ型 (K)", section="cache", help="q8_0 等でVRAM削減"),
+        F("--cache-type-v", "KVキャッシュ型 (V)", section="cache"),
+        F("--defrag-thold", "KV defrag閾値", section="cache", ftype="float", placeholder="有効時 0.1 程度"),
+        F("--host", "ホスト", section="server", default="0.0.0.0"),
+        F("--port", "ポート", section="server"),
+        F("--api-key", "APIキー", section="server", placeholder="設定すると Bearer 認証"),
+        F("--no-webui", "WebUI を無効化", section="server"),
+        F("--webui-path", "WebUI静的ファイル先 (任意)", section="server"),
+        F("--metrics", "/metrics (Prometheus)", section="server"),
+        F("--slots", "/slots API (KV状態)", section="server"),
+        F("--no-cont-batching", "継続バッチング無効", section="server"),
+        F("--embedding", "埋め込みモード (embedding API)", section="server"),
+        F("--timeout-keep-alive", "keep-alive秒", section="server"),
+        F("--warmup", "起動時ウォームアップ", section="server"),
+        F("--spec-type", "推測的デコード方式", section="exec"),
+        F("--temp", "temperature", section="sampling"),
+        F("--top-k", "top-k", section="sampling"),
+        F("--top-p", "top-p", section="sampling"),
+        F("--min-p", "min-p", section="sampling"),
+        F("--repeat-penalty", "反復ペナルティ", section="sampling"),
+        F("--presence-penalty", "presence ペナルティ", section="sampling"),
+        F("--frequency-penalty", "frequency ペナルティ", section="sampling"),
+        F("--seed", "乱数seed", section="sampling", placeholder="-1=ランダム"),
+    ]
+    return _backend_meta(b, fields)
+
+
+def build_freetoken() -> dict[str, Any]:
+    b = "freetoken"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--model-path", "モデル", placeholder="deepseek-ai/DeepSeek-V4 など"),
+        F("--served-model-name", "提供モデル名 (任意)"),
+        F("--model-source", "モデル取得元"),
+        F("--dtype", "dtype"),
+        F("--max-seq-len-override", "最大コンテキスト長上書き", placeholder="空=モデル設定"),
+        F("--max-output-tokens", "最大出力トークン", placeholder="空=自動"),
+        F("--sampling-defaults", "サンプリング既定"),
+        F("--tp-size", "Tensor並列数 (TP)", section="parallel"),
+        F("--gpu", "GPUデバイス指定", section="parallel", placeholder="0 または 0,1 (空=自動)"),
+        F("--cuda-graph-max-bs", "CUDA graph 最大bs", section="parallel", placeholder="自動"),
+        F("--num-tokenizer", "トークナイザ数", section="parallel", placeholder="自動"),
+        F("--disable-pynccl", "PyNCCL 無効", section="parallel"),
+        F("--dummy-weight", "ダミーウェイト (動作確認用)", section="parallel"),
+        F("--max-running-requests", "最大実行中リクエスト", section="sched", placeholder="自動"),
+        F("--memory-ratio", "メモリ使用率", section="sched", ftype="float"),
+        F("--max-prefill-length", "最大prefill/extendトークン", section="sched", placeholder="自動",
+          help="--max-extend-length でも指定可"),
+        F("--page-size", "KVページサイズ", section="sched"),
+        F("--num-pages", "KVページ数", section="sched", placeholder="自動"),
+        F("--num-tokens", "KVトークン数指定", section="sched", placeholder="自動"),
+        F("--kv-reserve-tokens", "KV予約トークン", section="sched", help="--moe-cache-auto 時のKV下限"),
+        F("--cache-type", "KVキャッシュ型", section="sched"),
+        F("--moe-strategy", "MoE戦略", section="cache"),
+        F("--expert-load", "エキスパート読込", section="cache"),
+        F("--quant-backend", "量子化バックエンド", section="cache", help="moe.nvfp4=... 形式も可"),
+        F("--ple-backend", "PLEオフロード", section="cache"),
+        F("--nvfp4-backend", "NVFP4バックエンド", section="cache"),
+        F("--moe-cache-size", "MoEキャッシュサイズ", section="cache", placeholder="0=自動", help="--moe-cache-rate / --moe-cache-auto と排他"),
+        F("--moe-cache-rate", "MoEキャッシュ比率", section="cache", ftype="float", placeholder="例 0.5", help="--moe-cache-size と排他"),
+        F("--moe-cache-auto", "MoEキャッシュ自動", section="cache", help="サイズ系の他2項目と排他"),
+        F("--moe-cache-policy", "MoEキャッシュ方針", section="cache"),
+        F("--moe-cpu-threads", "MoE CPUスレッド数", section="cache", placeholder="0=自動"),
+        F("--moe-cpu-layers", "CPU実行MoE層 (任意)", section="cache", placeholder="例: 0,1,2"),
+        F("--moe-hybrid-max-fetch", "hybrid最大fetch", section="cache", placeholder="-1=無制限"),
+        F("--disable-moe-prefill-overlap", "prefill overlap無効", section="cache"),
+        F("--moe-prefill-hit-d2d", "prefillヒットD2D", section="cache"),
+        F("--enable-special-token-ckpt", "special token checkpoint", section="cache"),
+        F("--attention-backend", "Attentionバックエンド", section="exec"),
+        F("--host", "ホスト", section="server", default="0.0.0.0"),
+        F("--port", "ポート", section="server"),
+        F("--cors-origins", "CORS許可origin", section="server", placeholder="カンマ区切り", default="",
+          help="既定は FreeToken クライアント用 origin。Web から叩く場合は * 等を追加"),
+        F("--enable-cache-report", "キャッシュレポート", section="server"),
+        F("--shell-mode", "シェルモード (対話)", section="server", help="Webサーバーではなく対話シェルで起動する"),
+        F("--tool-call-parser", "ツールコールパーサ", section="tools"),
+        F("--reasoning-parser", "reasoningパーサ", section="tools"),
+        F("--decode-log-interval", "decodeログ間隔", section="logs"),
+    ]
+    return _backend_meta(b, fields)
+
+
+def _backend_meta(bid: str, fields: list[dict[str, Any]]) -> dict[str, Any]:
+    meta = dict(_BACKEND_META[bid])
+    meta["fields"] = fields
+    return meta
+
+
+_BACKEND_META: dict[str, dict[str, Any]] = {
     "vllm": {
-        "id": "vllm",
-        "name": "vLLM",
+        "id": "vllm", "name": "vLLM",
         "repo": "https://github.com/vllm-project/vllm",
-        "module_path": "module/vllm",
-        "kind": "python",
+        "module_path": "module/vllm", "kind": "python",
         "desc": "高スループットな OpenAI 互換 API サーバー。",
         "default_command": "{python} -m vllm.entrypoints.cli.main serve",
-        "check_module": "vllm",
-        "health_path": "/health",
+        "check_module": "vllm", "health_path": "/health",
         "ready_markers": ["Application startup complete", "Uvicorn running"],
         "default_port": "8000",
-        "fields": [
-            # --- モデル -----------------------------------------------------
-            f_str("model", "--model", "モデル", placeholder="Qwen/Qwen2.5-7B-Instruct またはローカルパス"),
-            f_str("served_model_name", "--served-model-name", "提供モデル名", placeholder="省略時は --model"),
-            f_str("tokenizer", "--tokenizer", "トークナイザパス (任意)", placeholder="モデルと異なる場合のみ"),
-            f_str("revision", "--revision", "リビジョン/ブランチ (任意)"),
-            f_str("chat_template", "--chat-template", "チャットテンプレートファイル (任意)"),
-            f_num("max_model_len", "--max-model-len", "最大コンテキスト長", placeholder="空=自動"),
-            f_select("dtype", "--dtype", "dtype", ["", "auto", "half", "float16", "bfloat16", "float", "float32"], default="auto"),
-            f_select("quantization", "--quantization", "量子化",
-                     ["", "awq", "fp8", "gptq", "gptq_marlin", "bitsandbytes", "gguf", "modelopt", "experts_int8"]),
-            f_select("load_format", "--load-format", "ウェイト読み込み形式",
-                     ["", "auto", "pt", "safetensors", "dummy", "sharded_state", "gguf", "bitsandbytes", "fastsafetensors", "mistral"], default="auto"),
-            f_str("download_dir", "--download-dir", "DLキャッシュDIR (任意)"),
-            f_bool("trust_remote_code", "--trust-remote-code", "trust-remote-code"),
-            f_num("seed", "--seed", "乱数seed", placeholder="空=ランダム"),
-            f_select("generation_config", "--generation-config", "生成設定", ["", "auto", "vllm"], default="auto",
-                     help="モデル同梱 generation_config.json を尊重するか"),
-            # --- 並列・分散 -------------------------------------------------
-            f_num("tensor_parallel_size", "--tensor-parallel-size", "Tensor並列数 (TP)", section="parallel", default="1"),
-            f_num("pipeline_parallel_size", "--pipeline-parallel-size", "Pipeline並列数 (PP)", section="parallel", placeholder="1"),
-            f_num("data_parallel_size", "--data-parallel-size", "Data並列数 (DP)", section="parallel", placeholder="1"),
-            f_bool("enable_expert_parallel", "--enable-expert-parallel", "Expert並列 (MoE)", section="parallel"),
-            f_select("distributed_executor_backend", "--distributed-executor-backend", "実行バックエンド",
-                     ["", "mp", "ray", "uni", "external_launcher"], section="parallel", help="空=自動 (複数node時はray)"),
-            # --- スケジューリング・メモリ ------------------------------------
-            f_num("gpu_memory_utilization", "--gpu-memory-utilization", "GPUメモリ使用率", section="sched", numtype="float", default="0.9"),
-            f_num("cpu_offload_gb", "--cpu-offload-gb", "CPUオフロード (GB)", section="sched", numtype="float", placeholder="0"),
-            f_num("max_num_batched_tokens", "--max-num-batched-tokens", "最大バッチトークン数", section="sched", placeholder="自動"),
-            f_num("max_num_seqs", "--max-num-seqs", "最大同時系列数", section="sched", placeholder="自動"),
-            f_num("block_size", "--block-size", "KVブロックサイズ", section="sched", placeholder="自動 (16)"),
-            f_bool("enable_prefix_caching", "--enable-prefix-caching", "prefix caching", section="sched"),
-            f_bool("enable_chunked_prefill", "--enable-chunked-prefill", "chunked prefill", section="sched",
-                   help="v1エンジンでは既定で有効"),
-            f_bool("enforce_eager", "--enforce-eager", "eager モード (CUDA graph 無効)", section="sched"),
-            # --- サーバー ---------------------------------------------------
-            f_str("host", "--host", "ホスト", section="server", default="0.0.0.0"),
-            f_num("port", "--port", "ポート", section="server", default="8000"),
-            f_str("api_key", "--api-key", "APIキー", section="server", placeholder="設定すると Bearer 認証"),
-            f_select("uvicorn_log_level", "--uvicorn-log-level", "uvicornログレベル",
-                     ["", "critical", "error", "warning", "info", "debug", "trace"], section="server", default="info"),
-            f_bool("disable_uvicorn_access_log", "--disable-uvicorn-access-log", "accessログ無効", section="server"),
-            f_bool("disable_fastapi_docs", "--disable-fastapi-docs", "APIドキュメント(/docs)無効", section="server"),
-            f_bool("allow_credentials", "--allow-credentials", "CORS credentials", section="server"),
-            # --- ツール・LoRA -----------------------------------------------
-            f_bool("enable_auto_tool_choice", "--enable-auto-tool-choice", "auto tool choice", section="tools",
-                   help="--tool-call-parser と併用必須"),
-            f_select("tool_call_parser", "--tool-call-parser", "ツールコールパーサ",
-                     ["", "hermes", "llama31", "llama4", "mistral", "pythonic", "qwen", "qwen25", "phi4", "deepseekv32", "minimax_m2"], section="tools"),
-            f_select("reasoning_parser", "--reasoning-parser", "reasoningパーサ",
-                     ["", "deepseek_r1", "qwen3", "granite", "glm4_5", "hunyuan_a13b", "kimi", "lfm2", "minimax_m2", "olmo3", "phi4", "seed_oss"], section="tools"),
-            f_bool("enable_lora", "--enable-lora", "LoRA有効", section="tools"),
-            f_num("max_loras", "--max-loras", "LoRA最大数", section="tools", placeholder="1"),
-            f_num("max_lora_rank", "--max-lora-rank", "LoRA最大ランク", section="tools", placeholder="16"),
-            f_num("max_logprobs", "--max-logprobs", "最大logprobs", section="tools", placeholder="20"),
-            # --- ログ -------------------------------------------------------
-            f_bool("disable_log_stats", "--disable-log-stats", "統計ログ無効", section="logs"),
-        ],
     },
-    # =====================================================================
     "sglang": {
-        "id": "sglang",
-        "name": "SGLang",
+        "id": "sglang", "name": "SGLang",
         "repo": "https://github.com/sgl-project/sglang",
-        "module_path": "module/sglang",
-        "kind": "python",
+        "module_path": "module/sglang", "kind": "python",
         "desc": "RadixAttention による高速な OpenAI 互換サーバー。",
         "default_command": "{python} -m sglang.launch_server",
-        "check_module": "sglang",
-        "health_path": "/health",
+        "check_module": "sglang", "health_path": "/health",
         "ready_markers": ["The server is fired up and ready to roll", "Uvicorn running"],
         "default_port": "30000",
-        "fields": [
-            # --- モデル -----------------------------------------------------
-            f_str("model_path", "--model-path", "モデル", placeholder="Qwen/Qwen2.5-7B-Instruct またはローカルパス"),
-            f_str("tokenizer_path", "--tokenizer-path", "トークナイザパス (任意)"),
-            f_str("served_model_name", "--served-model-name", "提供モデル名 (任意)"),
-            f_str("chat_template", "--chat-template", "チャットテンプレート (任意)"),
-            f_num("context_length", "--context-length", "最大コンテキスト長", placeholder="空=モデル設定に従う"),
-            f_select("dtype", "--dtype", "dtype", ["", "auto", "float16", "bfloat16"], section="model", default="auto"),
-            f_select("kv_cache_dtype", "--kv-cache-dtype", "KVキャッシュdtype",
-                     ["", "auto", "fp8_e5m2", "fp8_e4m3"], default="auto"),
-            f_select("quantization", "--quantization", "量子化",
-                     ["", "awq", "fp8", "gptq", "w8a8_int8", "w8a8_fp8", "modelopt", "gguf"]),
-            f_select("load_format", "--load-format", "ウェイト読み込み形式",
-                     ["", "auto", "pt", "safetensors", "dummy", "pt_gguf", "safetensors_gguf"], default="auto"),
-            f_str("download_dir", "--download-dir", "DLキャッシュDIR (任意)"),
-            f_str("revision", "--revision", "リビジョン/ブランチ (任意)"),
-            f_bool("trust_remote_code", "--trust-remote-code", "trust-remote-code"),
-            # --- 並列・分散 -------------------------------------------------
-            f_num("tp_size", "--tp-size", "Tensor並列数 (TP)", section="parallel", default="1"),
-            f_num("pp_size", "--pp-size", "Pipeline並列数 (PP)", section="parallel", placeholder="1"),
-            f_num("dp_size", "--dp-size", "Data並列数 (DP)", section="parallel", placeholder="1"),
-            f_num("ep_size", "--ep-size", "Expert並列数 (EP)", section="parallel", placeholder="1"),
-            f_bool("enable_dp_attention", "--enable-dp-attention", "DP attention", section="parallel"),
-            f_num("nnodes", "--nnodes", "ノード数", section="parallel", placeholder="1"),
-            f_num("node_rank", "--node-rank", "このノードのrank", section="parallel", placeholder="0"),
-            f_str("dist_init_addr", "--dist-init-addr", "分散初期化先 (host:port)", section="parallel", placeholder="マルチnode時のみ"),
-            # --- スケジューリング・メモリ ------------------------------------
-            f_num("mem_fraction_static", "--mem-fraction-static", "静的メモリ比率", section="sched", numtype="float", placeholder="空=自動"),
-            f_num("max_running_requests", "--max-running-requests", "最大実行中リクエスト", section="sched", placeholder="自動"),
-            f_num("max_total_tokens", "--max-total-tokens", "KV総トークン数", section="sched", placeholder="自動"),
-            f_num("chunked_prefill_size", "--chunked-prefill-size", "chunked prefillサイズ", section="sched", placeholder="自動"),
-            f_num("max_prefill_tokens", "--max-prefill-tokens", "最大prefillトークン", section="sched", default="16384"),
-            f_select("schedule_policy", "--schedule-policy", "スケジューリング方針",
-                     ["", "lpm", "fcfs", "random", "priority"], section="sched", default="fcfs"),
-            f_num("page_size", "--page-size", "ページサイズ", section="sched", placeholder="自動"),
-            f_bool("disable_overlap_schedule", "--disable-overlap-schedule", "overlapスケジューリング無効", section="sched"),
-            f_bool("disable_radix_cache", "--disable-radix-cache", "Radixキャッシュ無効", section="sched"),
-            f_bool("enable_hierarchical_cache", "--enable-hierarchical-cache", "階層キャッシュ (HiCache)", section="sched"),
-            f_num("hicache_ratio", "--hicache-ratio", "HiCacheホスト比率", section="sched", numtype="float", placeholder="2.0"),
-            # --- 実行エンジン -----------------------------------------------
-            f_select("attention_backend", "--attention-backend", "Attentionバックエンド",
-                     ["", "flashinfer", "triton", "torch_native", "fa3", "nsa"], section="exec", help="空=自動"),
-            f_select("sampling_backend", "--sampling-backend", "Samplingバックエンド",
-                     ["", "flashinfer", "pytorch"], section="exec"),
-            f_select("grammar_backend", "--grammar-backend", "Grammarバックエンド",
-                     ["", "xgrammar", "outlines", "llguidance", "none"], section="exec"),
-            f_bool("disable_cuda_graph", "--disable-cuda-graph", "CUDA graph 無効", section="exec"),
-            f_bool("enable_torch_compile", "--enable-torch-compile", "torch.compile", section="exec"),
-            f_num("cuda_graph_max_bs_decode", "--cuda-graph-max-bs-decode", "CUDA graph 最大bs (decode)", section="exec", placeholder="自動"),
-            f_num("cpu_offload_gb", "--cpu-offload-gb", "CPUオフロード (GB)", section="exec", placeholder="0"),
-            f_num("base_gpu_id", "--base-gpu-id", "開始GPU ID", section="exec", default="0"),
-            f_num("gpu_id_step", "--gpu-id-step", "GPU IDステップ", section="exec", default="1"),
-            f_num("random_seed", "--random-seed", "乱数seed", section="exec", placeholder="空=ランダム"),
-            # --- サーバー ---------------------------------------------------
-            f_str("host", "--host", "ホスト", section="server", default="0.0.0.0"),
-            f_num("port", "--port", "ポート", section="server", default="30000"),
-            f_str("api_key", "--api-key", "APIキー", section="server", placeholder="設定すると Bearer 認証"),
-            f_str("admin_api_key", "--admin-api-key", "管理者APIキー (任意)"),
-            f_num("tokenizer_worker_num", "--tokenizer-worker-num", "トークナイザworker数", section="server", default="1"),
-            f_bool("skip_server_warmup", "--skip-server-warmup", "ウォームアップスキップ", section="server"),
-            f_str("fastapi_root_path", "--fastapi-root-path", "ルートパス (リバースプロキシ用)", section="server"),
-            # --- ログ -------------------------------------------------------
-            f_select("log_level", "--log-level", "ログレベル",
-                     ["", "info", "debug", "warning", "error", "critical"], section="logs", default="info"),
-            f_bool("log_requests", "--log-requests", "リクエスト内容をログ", section="logs"),
-            f_num("log_requests_level", "--log-requests-level", "リクエストログ詳細度", section="logs", default="2", placeholder="0-3"),
-            f_num("decode_log_interval", "--decode-log-interval", "decodeログ間隔", section="logs", default="40"),
-            f_bool("enable_metrics", "--enable-metrics", "Prometheus /metrics", section="logs"),
-        ],
     },
-    # =====================================================================
     "llamacpp": {
-        "id": "llamacpp",
-        "name": "llama.cpp",
+        "id": "llamacpp", "name": "llama.cpp",
         "repo": "https://github.com/ggml-org/llama.cpp",
-        "module_path": "module/llama.cpp",
-        "kind": "binary",
+        "module_path": "module/llama.cpp", "kind": "binary",
         "desc": "GGUF モデル用軽量サーバー (llama-server)。",
         "default_command": "{llama_server}",
         "binaries": ["llama-server"],
@@ -239,127 +485,24 @@ BACKENDS: dict[str, dict[str, Any]] = {
         "health_path": "/health",
         "ready_markers": ["startup complete", "listening"],
         "default_port": "8080",
-        "fields": [
-            # --- モデル -----------------------------------------------------
-            f_str("model", "--model", "GGUFモデル", placeholder="~/models/xxx-Q4_K_M.gguf"),
-            f_str("alias", "--alias", "提供モデル名 (任意)"),
-            f_str("hf_repo", "--hf-repo", "HuggingFaceリポジトリ", placeholder="例: ggml-org/models", help="HFから自動ダウンロードする場合のみ"),
-            f_str("hf_file", "--hf-file", "HFファイル", placeholder="例: llama-2-7b.Q4_K_M.gguf"),
-            f_str("hf_token", "--hf-token", "HFトークン (Private用)", placeholder="hf_..."),
-            f_str("chat_template", "--chat-template", "チャットテンプレート (任意)"),
-            f_bool("jinja", "--jinja", "Jinjaテンプレートエンジン"),
-            f_select("reasoning", "--reasoning", "reasoning出力", ["", "auto", "on", "off"], default="auto"),
-            f_str("lora", "--lora", "LoRAアダプタ (任意)", placeholder=".gguf LoRAパス"),
-            # --- 性能・メモリ ------------------------------------------------
-            f_num("ctx_size", "--ctx-size", "コンテキスト長", section="sched", default="4096", placeholder="0=モデルの学習長"),
-            f_num("n_gpu_layers", "--n-gpu-layers", "GPUに載せる層数 (ngl)", section="sched", placeholder="-1=全て / 0=CPU"),
-            f_num("batch_size", "--batch-size", "バッチサイズ (b)", section="sched", default="2048"),
-            f_num("ubatch_size", "--ubatch-size", "マイクロバッチ (ub)", section="sched", default="512"),
-            f_num("parallel", "--parallel", "並列スロット数 (np)", section="sched", default="1"),
-            f_num("threads", "--threads", "スレッド数 (t)", section="sched", placeholder="0=自動", help="空欄のときは自動"),
-            f_select("flash_attn", "--flash-attn", "Flash Attention (fa)", ["", "auto", "on", "off"], section="sched", default="auto"),
-            f_select("load_mode", "--load-mode", "モデルロード方法",
-                     ["", "auto", "none", "mmap", "mmap+mlock"], section="sched", default="auto",
-                     help="mmap+mlock = RAM常駐 (mlock 相当)"),
-            f_num("defrag_thold", "--defrag-thold", "KV defrag閾値", section="sched", numtype="float", placeholder="有効時 0.1 程度"),
-            # --- サーバー ---------------------------------------------------
-            f_str("host", "--host", "ホスト", section="server", default="0.0.0.0"),
-            f_num("port", "--port", "ポート", section="server", default="8080"),
-            f_str("api_key", "--api-key", "APIキー", section="server", placeholder="設定すると Bearer 認証"),
-            f_bool("no_webui", "--no-webui", "WebUI を無効化", section="server"),
-            f_bool("metrics", "--metrics", "/metrics (Prometheus)", section="server"),
-            f_bool("slots", "--slots", "/slots API (KV状態)", section="server"),
-            f_bool("no_cont_batching", "--no-cont-batching", "継続バッチング無効", section="server"),
-            f_bool("embedding", "--embedding", "埋め込みモード (embedding API)", section="server"),
-            f_num("timeout_keep_alive", "--timeout-keep-alive", "keep-alive秒", section="server", default="5"),
-            # --- デフォルトサンプリング ---------------------------------------
-            f_num("temp", "--temp", "temperature", section="sampling", numtype="float", default="0.80"),
-            f_num("top_k", "--top-k", "top-k", section="sampling", default="40"),
-            f_num("top_p", "--top-p", "top-p", section="sampling", numtype="float", default="0.95"),
-            f_num("min_p", "--min-p", "min-p", section="sampling", numtype="float", default="0.05"),
-            f_num("repeat_penalty", "--repeat-penalty", "反復ペナルティ", section="sampling", numtype="float", default="1.00"),
-            f_num("seed", "--seed", "乱数seed", section="sampling", placeholder="-1=ランダム"),
-        ],
     },
-    # =====================================================================
     "freetoken": {
-        "id": "freetoken",
-        "name": "FreeToken",
+        "id": "freetoken", "name": "FreeToken",
         "repo": "https://github.com/FlashML-org/FreeToken",
-        "module_path": "module/freetoken",
-        "kind": "python",
+        "module_path": "module/freetoken", "kind": "python",
         "desc": "MoEエキスパートオフロードによる大型モデルのローカル推論 (OpenAI/Anthropic 互換)。",
         "default_command": "{python} -m freetoken",
-        "check_module": "freetoken",
-        "health_path": "/health",
+        "check_module": "freetoken", "health_path": "/health",
         "ready_markers": ["Uvicorn running", "Application startup complete"],
         "default_port": "1919",
-        "fields": [
-            # --- モデル -----------------------------------------------------
-            f_str("model_path", "--model-path", "モデル", placeholder="deepseek-ai/DeepSeek-V4 など"),
-            f_str("served_model_name", "--served-model-name", "提供モデル名 (任意)"),
-            f_select("model_source", "--model-source", "モデル取得元", ["", "huggingface", "modelscope"], default="huggingface"),
-            f_select("dtype", "--dtype", "dtype", ["", "auto", "float16", "bfloat16", "float32"], default="auto"),
-            f_num("max_seq_len_override", "--max-seq-len-override", "最大コンテキスト長上書き", placeholder="空=モデル設定"),
-            f_num("max_output_tokens", "--max-output-tokens", "最大出力トークン", placeholder="空=自動"),
-            f_select("sampling_defaults", "--sampling-defaults", "サンプリング既定", ["", "model", "none"], default="model"),
-            # --- 並列・デバイス ----------------------------------------------
-            f_num("tp_size", "--tp-size", "Tensor並列数 (TP)", section="parallel", default="1"),
-            f_str("gpu", "--gpu", "GPUデバイス指定", section="parallel", placeholder="0 または 0,1 (空=自動)"),
-            f_num("cuda_graph_max_bs", "--cuda-graph-max-bs", "CUDA graph 最大bs", section="parallel", placeholder="自動"),
-            f_num("num_tokenizer", "--num-tokenizer", "トークナイザ数", section="parallel", placeholder="自動"),
-            f_bool("disable_pynccl", "--disable-pynccl", "PyNCCL 無効", section="parallel"),
-            f_bool("dummy_weight", "--dummy-weight", "ダミーウェイト (動作確認用)", section="parallel"),
-            # --- スケジューリング・メモリ -------------------------------------
-            f_num("max_running_requests", "--max-running-requests", "最大実行中リクエスト", section="sched", placeholder="自動"),
-            f_num("memory_ratio", "--memory-ratio", "メモリ使用率", section="sched", numtype="float", default="0.9"),
-            f_num("max_extend_length", "--max-extend-length", "最大extendトークン", section="sched", default="8192"),
-            f_num("max_prefill_length", "--max-prefill-length", "最大prefillトークン", section="sched", placeholder="自動"),
-            f_num("page_size", "--page-size", "KVページサイズ", section="sched", default="1"),
-            f_num("num_pages", "--num-pages", "KVページ数", section="sched", placeholder="自動"),
-            f_num("num_tokens", "--num-tokens", "KVトークン数指定", section="sched", placeholder="自動"),
-            f_num("kv_reserve_tokens", "--kv-reserve-tokens", "KV予約トークン", section="sched", default="8192",
-                   help="--moe-cache-auto 時のKV下限"),
-            f_select("cache_type", "--cache-type", "KVキャッシュ型", ["", "radix"], default="radix"),
-            # --- MoE オフロード ---------------------------------------------
-            f_select("moe_strategy", "--moe-strategy", "MoE戦略", ["", "auto", "fused", "offload", "cpu", "hybrid"], default="auto"),
-            f_select("expert_load", "--expert-load", "エキスパート読込", ["", "auto", "serial", "parallel"], default="auto"),
-            f_select("quant_backend", "--quant-backend", "量子化バックエンド", ["", "auto", "triton", "marlin"],
-                     help="moe.nvfp4=... 形式も可"),
-            f_select("ple_backend", "--ple-backend", "PLEオフロード", ["", "pinned", "disk"]),
-            f_select("nvfp4_backend", "--nvfp4-backend", "NVFP4バックエンド", ["", "auto", "marlin", "flashinfer", "triton"]),
-            f_num("moe_cache_size", "--moe-cache-size", "MoEキャッシュサイズ", section="exec", placeholder="0=自動",
-                   help="--moe-cache-rate / --moe-cache-auto と排他"),
-            f_num("moe_cache_rate", "--moe-cache-rate", "MoEキャッシュ比率", section="exec", numtype="float", placeholder="例 0.5",
-                   help="--moe-cache-size と排他"),
-            f_bool("moe_cache_auto", "--moe-cache-auto", "MoEキャッシュ自動", section="exec",
-                   help="サイズ系の他2項目と排他"),
-            f_select("moe_cache_policy", "--moe-cache-policy", "MoEキャッシュ方針", ["", "lru"], section="exec"),
-            f_num("moe_cpu_threads", "--moe-cpu-threads", "MoE CPUスレッド数", section="exec", placeholder="0=自動"),
-            f_str("moe_cpu_layers", "--moe-cpu-layers", "CPU実行MoE層 (任意)", section="exec", placeholder="例: 0,1,2") ,
-            f_num("moe_hybrid_max_fetch", "--moe-hybrid-max-fetch", "hybrid最大fetch", section="exec", placeholder="-1=無制限"),
-            f_bool("disable_moe_prefill_overlap", "--disable-moe-prefill-overlap", "prefill overlap無効", section="exec"),
-            f_bool("moe_prefill_hit_d2d", "--moe-prefill-hit-d2d", "prefillヒットD2D", section="exec"),
-            f_bool("enable_special_token_ckpt", "--enable-special-token-ckpt", "special token checkpoint", section="exec"),
-            # --- サーバー ---------------------------------------------------
-            f_str("host", "--host", "ホスト", section="server", default="0.0.0.0"),
-            f_num("port", "--port", "ポート", section="server", default="1919"),
-            f_str("cors_origins", "--cors-origins", "CORS許可origin", section="server", placeholder="カンマ区切り"),
-            f_bool("enable_cache_report", "--enable-cache-report", "キャッシュレポート", section="server"),
-            f_bool("shell_mode", "--shell-mode", "シェルモード (対話)", section="server",
-                   help="Webサーバーではなく対話シェルで起動する"),
-            # --- ツール・推論 ------------------------------------------------
-            f_select("tool_call_parser", "--tool-call-parser", "ツールコールパーサ",
-                     ["", "auto", "llama3", "qwen", "qwen25", "qwen3_coder", "mistral", "deepseekv32",
-                      "gemma4", "glm47", "minimax", "minimax_m3", "muse_glimmer", "gpt_oss"], default="auto"),
-            f_select("reasoning_parser", "--reasoning-parser", "reasoningパーサ",
-                     ["", "auto", "off", "deepseekv32", "gpt_oss", "qwen3", "glm"], default="auto"),
-            # --- ログ -------------------------------------------------------
-            f_num("decode_log_interval", "--decode-log-interval", "decodeログ間隔", section="logs", default="40"),
-            f_select("attention_backend", "--attention-backend", "Attentionバックエンド",
-                     ["", "auto", "flashinfer", "triton"], section="exec", default="auto"),
-        ],
     },
+}
+
+BACKENDS: dict[str, dict[str, Any]] = {
+    "vllm": build_vllm(),
+    "sglang": build_sglang(),
+    "llamacpp": build_llamacpp(),
+    "freetoken": build_freetoken(),
 }
 
 
@@ -433,9 +576,6 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
         if field["type"] == "bool":
             if sval.lower() in TRUTHY:
                 argv.append(field["flag"])
-        elif field["type"] == "select":
-            if sval:
-                argv += [field["flag"], sval]
         else:
             if sval:
                 argv += [field["flag"], sval]
@@ -446,15 +586,6 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
         except ValueError as e:
             raise ValueError(f"追加引数の解析に失敗しました: {e}")
     return argv
-
-
-def extract_port(backend: dict[str, Any], profile: dict[str, Any]) -> int | None:
-    values = profile.get("values") or {}
-    raw = str(values.get("port", "")).strip() or str(backend.get("default_port", "")).strip()
-    try:
-        return int(raw) if raw else None
-    except ValueError:
-        return None
 
 
 def port_from_argv(argv: list[str]) -> int | None:

@@ -1,0 +1,353 @@
+{
+ "--attention-backend": {
+  "aliases": [
+   "--attn"
+  ],
+  "default": "auto",
+  "help": "The attention backend to use. If two backends are specified, the first one is used for prefill and the second one for decode.",
+  "type": "str"
+ },
+ "--cache-type": {
+  "aliases": [],
+  "choices": [],
+  "default": "radix",
+  "help": "KV cache strategy (naive | radix). For hybrid GDN models 'radix' is materialized as a GDN-aware radix (cross-request GDN-state prefix reuse); pass 'naive' to opt out.",
+  "type": "str"
+ },
+ "--cors-origins": {
+  "aliases": [],
+  "default": "tauri://localhost,http://tauri.localhost,http://localhost:1420",
+  "help": "Comma-separated CORS allow-list for browser/webview clients (default: local Tauri/Vite dev origins). '' disables, '*' allows any.",
+  "type": "str"
+ },
+ "--cuda-graph-max-bs": {
+  "aliases": [
+   "--graph"
+  ],
+  "default": "None",
+  "help": "The maximum batch size for CUDA graph capture. None means auto-tuning based on the GPU memory.",
+  "type": "int"
+ },
+ "--decode-log-interval": {
+  "aliases": [],
+  "default": 40,
+  "help": "Print one decode scheduler status line every N decode forwards.",
+  "type": "str"
+ },
+ "--disable-moe-prefill-overlap": {
+  "aliases": [],
+  "default": "True",
+  "help": "Disable two-buffer overlap for prefill MoE expert copies. By default, prefill overlap is enabled and requires --moe-cache-size >= 2 * num_experts."
+ },
+ "--disable-pynccl": {
+  "aliases": [],
+  "help": "Disable PyNCCL for tensor parallelism."
+ },
+ "--dtype": {
+  "aliases": [],
+  "choices": [
+   "auto",
+   "float16",
+   "bfloat16",
+   "float32"
+  ],
+  "default": "auto",
+  "help": "Data type for model weights and activations. 'auto' will use FP16 for FP32/FP16 models and BF16 for BF16 models.",
+  "type": "str"
+ },
+ "--dummy-weight": {
+  "aliases": [],
+  "help": "Use dummy weights for testing.",
+  "type": "bool"
+ },
+ "--enable-cache-report": {
+  "aliases": [],
+  "default": "False",
+  "help": "Return the number of prefix-cached prompt tokens in each response's usage block (OpenAI usage.prompt_tokens_details.cached_tokens, Anthropic usage.cache_read_input_tokens, Responses usage.input_tokens",
+  "type": "bool"
+ },
+ "--enable-special-token-ckpt": {
+  "aliases": [],
+  "default": "False",
+  "help": "Checkpoint decode state at special tokens (currently the tool-call opener). When a GDN-hybrid or SWA model samples its tool-call opener token, the scheduler preserves a reuse point just after it (GDN:",
+  "type": "bool"
+ },
+ "--expert-load": {
+  "aliases": [],
+  "choices": [
+   "auto",
+   "serial",
+   "parallel"
+  ],
+  "default": "auto",
+  "help": "How MoE expert banks are read into host RAM. 'auto' (default) reads scattered experts in parallel (fast) but falls back to serial when free RAM can't cover the banks + the parallel reader's extra whol"
+ },
+ "--gpu": {
+  "aliases": [],
+  "default": "()",
+  "help": "GPU(s) to run on, comma-separated; entry i is TP rank i. Each entry is a GPU UUID (GPU-xxxx..., as nvidia-smi -L prints) or an nvidia-smi index",
+  "type": "str"
+ },
+ "--host": {
+  "aliases": [],
+  "default": "127.0.0.1",
+  "help": "The host address for the server.",
+  "type": "str"
+ },
+ "--kv-reserve-tokens": {
+  "aliases": [],
+  "default": 8192,
+  "help": "KV-cache token floor reserved before --moe-cache-auto fills experts.",
+  "type": "int"
+ },
+ "--max-output-tokens": {
+  "aliases": [],
+  "default": "None",
+  "help": "Default max output tokens for requests that omit one (default 32k).",
+  "type": "str"
+ },
+ "--max-prefill-length": {
+  "aliases": [
+   "--max-extend-length"
+  ],
+  "default": 8192,
+  "help": "Chunk Prefill maximum chunk size in tokens.",
+  "type": "int"
+ },
+ "--max-running-requests": {
+  "aliases": [],
+  "default": 4,
+  "help": "The maximum number of running requests.",
+  "type": "int"
+ },
+ "--max-seq-len-override": {
+  "aliases": [],
+  "default": "None",
+  "help": "The maximum sequence length override.",
+  "type": "int"
+ },
+ "--memory-ratio": {
+  "aliases": [],
+  "default": 0.9,
+  "help": "Fraction of total GPU free memory the engine may use for weights + MoE cache + KV cache combined; the remainder is reserved runtime headroom.",
+  "type": "float"
+ },
+ "--model-path": {
+  "aliases": [
+   "--model"
+  ],
+  "help": "The path of the model weights. This can be a local folder or a Hugging Face repo ID.",
+  "type": "str"
+ },
+ "--model-source": {
+  "aliases": [],
+  "choices": [
+   "huggingface",
+   "modelscope"
+  ],
+  "default": "huggingface",
+  "help": "The source to download model from. Either 'huggingface' or 'modelscope'.",
+  "type": "str"
+ },
+ "--moe-backend": {
+  "aliases": [],
+  "choices": [
+   "auto",
+   "fused",
+   "offload",
+   "cpu",
+   "hybrid"
+  ],
+  "default": "argparse.SUPPRESS",
+  "help": "[Deprecated] Use --moe-strategy."
+ },
+ "--moe-cache-auto": {
+  "aliases": [],
+  "default": "False",
+  "help": "Auto-pick --moe-cache-size from free VRAM and expert size, MoE-priority (KV gets --kv-reserve-tokens as a floor). Not supported for owned-KV models.",
+  "type": "bool"
+ },
+ "--moe-cache-policy": {
+  "aliases": [],
+  "choices": [
+   "lru"
+  ],
+  "default": "lru",
+  "help": "The unified MoE cache eviction policy."
+ },
+ "--moe-cache-rate": {
+  "aliases": [],
+  "default": "None",
+  "help": "The fraction of all MoE experts to keep in GPU cache.",
+  "type": "str"
+ },
+ "--moe-cache-size": {
+  "aliases": [],
+  "default": 0,
+  "help": "The number of unified MoE expert slots on GPU.",
+  "type": "int"
+ },
+ "--moe-cpu-layers": {
+  "aliases": [],
+  "default": "None",
+  "help": "With --moe-strategy offload/hybrid: which MoE layers compute on the CPU executor instead of the GPU offload/PCIe path (where CUDA pinning is quota-capped, e.g. WSL, their banks are OS-locked instead o",
+  "type": "str"
+ },
+ "--moe-cpu-threads": {
+  "aliases": [],
+  "default": 0,
+  "help": "Number of CPU worker threads for --moe-strategy cpu decode experts. 0 = auto (physical cores).",
+  "type": "int"
+ },
+ "--moe-hybrid-max-fetch": {
+  "aliases": [],
+  "default": -1,
+  "help": "For --moe-strategy hybrid: max experts fetched over PCIe per (layer, decode step); the rest of that step's misses are computed on the CPU, overlapped. -1 (default) = auto: fetch the benched pcie/cpu b",
+  "type": "int"
+ },
+ "--moe-prefill-hit-d2d": {
+  "aliases": [],
+  "default": "False",
+  "help": "During prefill prefetch, copy cache-resident experts device-side into the double buffer and stream only the misses over PCIe (cudaMemcpyBatchAsync, CUDA >= 13.0). Effective with --moe-cache-size > 2 *",
+  "type": "bool"
+ },
+ "--moe-strategy": {
+  "aliases": [],
+  "choices": [
+   "auto",
+   "fused",
+   "offload",
+   "cpu",
+   "hybrid"
+  ],
+  "default": "auto",
+  "help": "How the routed experts are served. 'auto' resolves a MoE model to the offload family (offload, or hybrid when a `ft bench bw` profile recommends it); resident 'fused' experts must be requested explici"
+ },
+ "--num-pages": {
+  "aliases": [],
+  "default": "None",
+  "help": "Set the maximum number of pages for KVCache.",
+  "type": "int"
+ },
+ "--num-tokenizer": {
+  "aliases": [
+   "--tokenizer-count"
+  ],
+  "default": 0,
+  "help": "The number of tokenizer processes to launch. 0 means the tokenizer is shared with the detokenizer.",
+  "type": "int"
+ },
+ "--num-tokens": {
+  "aliases": [],
+  "default": "None",
+  "help": "Total KV-cache capacity in tokens; must be a multiple of the resolved page size (DSV4: 128 window page, TRTLLM backend: 64). Mutually exclusive with --num-pages.",
+  "type": "int"
+ },
+ "--nvfp4-backend": {
+  "aliases": [],
+  "choices": [
+   "auto",
+   "marlin",
+   "flashinfer",
+   "triton"
+  ],
+  "default": "argparse.SUPPRESS",
+  "help": "[Deprecated] Use --quant-backend moe.nvfp4=<marlin|b12x|triton> ('flashinfer' is b12x)."
+ },
+ "--page-size": {
+  "aliases": [],
+  "default": 1,
+  "help": "Set the page size for system management.",
+  "type": "int"
+ },
+ "--ple-backend": {
+  "aliases": [],
+  "choices": [
+   "pinned",
+   "disk"
+  ],
+  "default": "disk",
+  "help": "Where a PLE n-gram table lives. 'disk' (default) reads rows straight from the checkpoint files; 'pinned' preloads the whole table into page-locked host RAM."
+ },
+ "--port": {
+  "aliases": [],
+  "default": 1919,
+  "help": "The port number for the server to listen on.",
+  "type": "int"
+ },
+ "--quant-backend": {
+  "aliases": [],
+  "default": "None",
+  "help": "Kernel per quantized layer type: comma-separated layer[.kind]=name entries, e.g. 'linear=marlin,moe=b12x' or 'moe.nvfp4=triton'. A layer-level entry applies to every kind whose kernel table lists the ",
+  "type": "str"
+ },
+ "--reasoning-parser": {
+  "aliases": [],
+  "choices": [
+   "auto",
+   "off",
+   "deepseekv32",
+   "gpt_oss",
+   "qwen3",
+   "glm",
+   "minimax",
+   "minimax_m3",
+   "muse_glimmer",
+   "gemma4"
+  ],
+  "default": "auto",
+  "help": "Reasoning parser that splits chain-of-thought into reasoning_content for OpenAI responses. 'auto' selects per model family (gpt-oss Harmony, <think> for qwen3/glm/minimax, <mm:think> for minimax-m3, A",
+  "type": "str"
+ },
+ "--sampling-defaults": {
+  "aliases": [],
+  "choices": [
+   "model",
+   "none"
+  ],
+  "default": "model",
+  "help": "Source for unspecified request sampling params. 'model' fills temperature/top_k/top_p from the checkpoint's generation_config.json (recommended for reasoning models to avoid greedy repetition loops); ",
+  "type": "str"
+ },
+ "--served-model-name": {
+  "aliases": [],
+  "default": "None",
+  "help": "Model id returned by /v1/models. Defaults to the basename of --model.",
+  "type": "str"
+ },
+ "--shell-mode": {
+  "aliases": [],
+  "help": "Run the server in shell mode.",
+  "type": "bool"
+ },
+ "--tensor-parallel-size": {
+  "aliases": [
+   "--tp-size"
+  ],
+  "default": 1,
+  "help": "The tensor parallelism size.",
+  "type": "int"
+ },
+ "--tool-call-parser": {
+  "aliases": [],
+  "choices": [
+   "auto",
+   "llama3",
+   "qwen",
+   "qwen25",
+   "qwen3_coder",
+   "mistral",
+   "deepseekv32",
+   "gemma4",
+   "glm47",
+   "minimax",
+   "minimax_m3",
+   "muse_glimmer",
+   "gpt_oss",
+   "gpt-oss"
+  ],
+  "default": "auto",
+  "help": "Tool-call parser format for OpenAI-compatible tool responses.",
+  "type": "str"
+ }
+}
