@@ -216,6 +216,34 @@ def resolve_command_tokens(root: Path, template: str, *, python: str, binary: st
 TRUTHY = {"1", "true", "yes", "on", "はい"}
 
 
+def profile_backends(profile: dict[str, Any]) -> list[str]:
+    """プロファイルに含まれるバックエンド id の一覧 (v2: configs / v1: backend)。"""
+    cfgs = profile.get("configs")
+    if isinstance(cfgs, dict) and cfgs:
+        return [bid for bid in cfgs if bid in BACKENDS]
+    b = profile.get("backend")
+    return [b] if b in BACKENDS else []
+
+
+def profile_config(profile: dict[str, Any], backend_id: str) -> dict[str, Any]:
+    """指定バックエンドの設定塊を v1/v2 両対応で取り出す。"""
+    cfgs = profile.get("configs")
+    if isinstance(cfgs, dict) and backend_id in cfgs:
+        return dict(cfgs[backend_id] or {})
+    if profile.get("backend") == backend_id:  # 未マイグレーション v1
+        return {k: profile.get(k) for k in ("values", "extra_args", "env", "cwd", "command")
+                if k in profile}
+    return {}
+
+
+def profile_default_backend(profile: dict[str, Any]) -> str:
+    bids = profile_backends(profile)
+    d = profile.get("default_backend")
+    if d in bids:
+        return d
+    return profile.get("backend") if profile.get("backend") in bids else (bids[0] if bids else "")
+
+
 def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str,
                 binary: str, root: Path) -> list[str]:
     """バックエンド + プロファイルから最終 argv を組み立てる。"""
@@ -229,7 +257,7 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
     if backend["kind"] == "binary" and "{llama_server}" in command and not binary:
         raise ValueError("llama-server が見つかりません。バックエンド設定でパスを指定するか、"
                          "module/llama.cpp をビルドしてください")
-    for field in backend.get("fields", []):
+    for field in ([] if profile.get("custom_only") else backend.get("fields", [])):
         key = field["key"]
         val = values.get(key)
         if val is None:

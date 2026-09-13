@@ -47,24 +47,26 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 
 | タブ | できること |
 | --- | --- |
-| 🚀 起動 | 起動サーバーの選択画面。プロファイルカードをタップでスタート / 停止。バックエンド別フィルタ、稼働中サマリー付き |
-| 🖥️ サーバー | 起動中 + 履歴の一覧。ステータス (起動中 / 稼働中 / 停止 / 異常終了)、PID・稼働時間・API URL、停止 / 再起動、ライブログ表示 (追従・自動スクロール) |
-| 📋 プロファイル | 起動引数のテンプレート管理。モデル / ポート / 量子化 / TP 数などのフォーム入力 + 追加引数 (生の CLI フラグ) + 環境変数。保存前に実行コマンドをリアルタイムプレビュー |
+| 🚀 起動 | 起動サーバーの選択画面。プロファイルカード内で **バックエンドをタップ切り替え** して起動 (同一プロファイルの複数バックエンド同時起動可)。バックエンド別フィルタ、稼働中サマリー付き |
+| 🖥️ サーバー | 起動中 + 履歴の一覧。ステータス (起動中 / 稼働中 / 停止 / 異常終了)、PID・稼働時間・API URL、停止 / 再起動 (元のプロファイル+バックエンドを維持)、ライブログ表示 (追従・自動スクロール) |
+| 📋 プロファイル | **バックエンド選択そのものを含む** 起動テンプレート。1プロファイルに vLLM/SGLang/llama.cpp/FreeToken を複数紐付けでき、各バックエンドの特色に合わせた引数・環境変数・追加フラグ・既定起動先 ★ を個別に保持。保存前にバックエンド別プレビュー |
 | ⚙️ バックエンド | 各 submodule の状態 (取得済み / インストール検出)、起動コマンドテンプレートや python / バイナリパスの上書き設定、再検出 |
 
 ### コマンド組み立ての仕組み
 
-最終 argv = コマンドテンプレート (プロファイル上書き > バックエンド設定 > 既定)
+バックエンドごとに最終 argv = コマンドテンプレート (プロファイル設定 > バックエンド設定 > 既定)
 + フォーム値から生成した `--flag 群` + 追加引数
 
 - テンプレート内トークン: `{python}` `{llama_server}` `{module}` `{root}`、および `{model}` `{port}` などプロファイル変数
 - 空欄の項目はフラグ自体が付きません
+- 「コマンドのみモード」(高度な設定): ON にするとフォーム由来のフラグ自動付与を止めます。フラグ体系の違うカスタムサーバーや位置引数型の起動にも対応
+- 旧形式 (単一バックエンド) の `data/profiles.json` は起動時に自動で v2 (複数バックエンド) へ移行されます。API も旧 JSON ボディ (`backend`/`values` 直置き) を引き続き受理します
 
 ## API (スクリプト等からも操作可能)
 
 - `GET /api/state` — 全体状態 (バックエンド / プロファイル / セッション)
-- `GET/POST/PUT/DELETE /api/profiles[/{id}]` — プロファイル CRUD
-- `POST /api/sessions` `{profile_id, force?}` — 起動 (ポート衝突は 409、`force` で回避)
+- `GET/POST/PUT/DELETE /api/profiles[/{id}]` — プロファイル CRUD。ボディは `{name, note, default_backend, configs: {vllm: {values, extra_args, env, cwd, command, custom_only}, ...}}` (v1 単一バックエンド形式も互換受理)
+- `POST /api/sessions` `{profile_id, backend?, force?}` — 起動 (backend 省略 = プロファイル既定。ポート衝突・同一 profile+backend 二重起動は 409、`force` でポートのみ回避可)
 - `POST /api/sessions/{id}/stop` / `restart`、`GET /api/sessions/{id}/log?cursor=` — 停止 / 再起動 / ログ
 - `PUT /api/backends/{id}`、`POST /api/backends/{id}/detect` — バックエンド設定・再検出
 - OpenAPI ドキュメント: `GET /api/docs`

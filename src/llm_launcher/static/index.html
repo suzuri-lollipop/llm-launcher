@@ -60,14 +60,24 @@ button:disabled{opacity:.45;cursor:default}
 .badge.err{color:var(--err);border-color:#4d2323;background:#241213}
 .badge.info{color:var(--acc);border-color:#254059;background:#12202e}
 .badge.purple{color:var(--purple);border-color:#3d2f55;background:#1a1626}
-.chip{font-size:11.5px;font-weight:700;padding:2.5px 8px;border-radius:6px;color:#04101f}
+.chip{font-size:11.5px;font-weight:700;padding:2.5px 8px;border-radius:6px;color:#04101f;display:inline-flex;align-items:center;gap:5px}
 .chip.vllm{background:var(--vllm)} .chip.sglang{background:var(--sglang)}
 .chip.llamacpp{background:var(--llamacpp)} .chip.freetoken{background:var(--purple);color:#1a1626}
+.chip .run{width:7px;height:7px;border-radius:50%;display:inline-block}
+.chip .run.ok{background:var(--ok);box-shadow:0 0 6px var(--ok)}
+.chip .run.warn{background:#5a3c00;box-shadow:0 0 6px #0000}
 .filters{display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;scrollbar-width:none}
 .filters::-webkit-scrollbar{display:none}
 .fchip{border:1px solid var(--line);background:var(--bg2);color:var(--sub);border-radius:999px;
   padding:7px 14px;font-size:13px;white-space:nowrap;cursor:pointer;min-height:36px}
 .fchip.on{background:var(--acc);border-color:var(--acc);color:#04101f;font-weight:700}
+/* 起動カード内のバックエンド選択チップ */
+.bchip{border:1px solid var(--line);background:var(--bg2);color:var(--sub);border-radius:9px;
+  padding:7px 12px;font-size:13px;cursor:pointer;min-height:38px;display:inline-flex;align-items:center;gap:7px}
+.bchip.on{border-color:var(--acc);color:var(--text);background:#16222f;box-shadow:inset 0 0 0 1px var(--acc)}
+.bchip .rd{width:8px;height:8px;border-radius:50%;background:#39424d;flex:none}
+.bchip .rd.r-warn{background:var(--warn)} .bchip .rd.r-ok{background:var(--ok)}
+.bchip .rd.r-info{background:var(--acc)}
 nav#tabbar{
   position:fixed;left:0;right:0;bottom:0;z-index:30;
   background:rgba(21,26,34,.95);backdrop-filter:blur(12px);
@@ -98,7 +108,6 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
 .switch .lab{font-size:13.5px}
 .fgrid{display:grid;gap:0 14px}
 @media(min-width:620px){.fgrid{grid-template-columns:1fr 1fr}}
-.fgrid .full{grid-column:1/-1}
 pre.cmdprev{
   background:#0a0d12;border:1px solid var(--line);border-radius:var(--r2);
   padding:10px 12px;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:#9fd3a8;
@@ -111,17 +120,19 @@ details.adv{border:1px solid var(--line);border-radius:var(--r2);margin-top:12px
 details.adv summary{padding:10px 12px;font-size:13px;color:var(--sub);cursor:pointer;min-height:42px;display:flex;align-items:center}
 details.adv .inner{padding:0 12px 12px}
 #modal-veil{position:fixed;inset:0;background:rgba(4,7,11,.72);z-index:40;display:none}
-#modal{
-  position:fixed;left:0;right:0;bottom:0;top:0;z-index:50;display:none;justify-content:center;align-items:flex-end;
-}
+#modal{position:fixed;left:0;right:0;bottom:0;top:0;z-index:50;display:none;justify-content:center;align-items:flex-end}
 #modal .sheet{
-  background:var(--card);width:100%;max-width:760px;max-height:92vh;overflow:auto;
+  background:var(--card);width:100%;max-width:820px;max-height:92vh;overflow:auto;
   border-radius:18px 18px 0 0;border:1px solid var(--line);padding:16px 16px calc(20px + env(safe-area-inset-bottom));
 }
 @media(min-width:760px){#modal{align-items:center}#modal .sheet{border-radius:18px;max-height:88vh;margin:0 16px}}
 #modal .sheet h3{margin:2px 0 6px;font-size:16px}
 .sheet-actions{display:flex;gap:10px;margin-top:18px;position:sticky;bottom:-16px;background:var(--card);padding:10px 0 0}
-.sheet-actions .grow{}
+.ed-sec{border:1px solid var(--line);border-radius:var(--r);background:var(--bg2);padding:12px 14px;margin-top:12px}
+.ed-sec>.row{border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:2px}
+.defradio{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--sub);cursor:pointer}
+.defradio input{width:18px;height:18px;accent-color:var(--acc)}
+.xbtn{min-height:32px;padding:4px 10px;font-size:13px;color:var(--err);background:transparent;border-color:#4c2a30}
 #toast{
   position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom));
   background:#252d38;border:1px solid var(--line);color:var(--text);
@@ -131,7 +142,6 @@ details.adv .inner{padding:0 12px 12px}
 .kvs{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px;color:var(--sub)}
 .kvs .v{color:var(--text);overflow-wrap:anywhere}
 .empty{border:1.5px dashed var(--line);border-radius:var(--r);padding:26px 16px;text-align:center;color:var(--sub);font-size:13.5px}
-.section-note{font-size:12px;color:var(--sub);margin:-6px 0 12px}
 .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--sub);border-top-color:transparent;border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
 .hidden{display:none!important}
@@ -145,21 +155,18 @@ details.adv .inner{padding:0 12px 12px}
 </header>
 
 <main>
-  <!-- ============ 起動 ============ -->
   <section id="view-launch" class="view">
     <div id="running-strip"></div>
-    <h2 class="view-title">起動するサーバーを選ぶ</h2>
+    <h2 class="view-title">起動するサーバーを選ぶ <span class="muted">(カード内でバックエンド切替可)</span></h2>
     <div class="filters" id="launch-filters"></div>
     <div class="grid c2" id="launch-grid"></div>
   </section>
 
-  <!-- ============ サーバー ============ -->
   <section id="view-servers" class="view hidden">
     <h2 class="view-title">起動中・履歴</h2>
     <div id="servers-list"></div>
   </section>
 
-  <!-- ============ プロファイル ============ -->
   <section id="view-profiles" class="view hidden">
     <div class="row" style="margin-bottom:12px">
       <h2 class="view-title" style="margin:0">起動プロファイル</h2>
@@ -169,7 +176,6 @@ details.adv .inner{padding:0 12px 12px}
     <div class="grid c2" id="profiles-grid"></div>
   </section>
 
-  <!-- ============ バックエンド ============ -->
   <section id="view-backends" class="view hidden">
     <h2 class="view-title">バックエンド設定 <span class="muted">(module/ のサブモジュール)</span></h2>
     <div class="grid c2" id="backends-grid"></div>
@@ -192,10 +198,9 @@ details.adv .inner{padding:0 12px 12px}
 /* ============================================================= state */
 const S = {
   state: null, tab: "launch", filter: "all",
-  editing: null,            // ドラフト プロファイル
-  openLogs: new Set(),      // サーバービューでログ展開中の session id
-  logCursor: {},            // sid -> byte cursor
-  autoScroll: {}, busy: {}, err: {},
+  sel: {},                 // launch カードで選択中の backend (profile_id -> bid)
+  editing: null,           // ドラフト: {name,note,default_backend,cfg:{bid:{...}}}
+  openLogs: new Set(), logCursor: {}, autoScroll: {}, busy: {},
 };
 const $ = (q, el=document) => el.querySelector(q);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -221,7 +226,7 @@ async function api(path, opts = {}) {
   });
   let data = null;
   try { data = await r.json(); } catch { /* ignore */ }
-  if (!r.ok) { const e = new Error((data && data.detail) || `HTTP ${r.status}`); e.status = r.status; e.data = data; throw e; }
+  if (!r.ok) { const e = new Error((data && data.detail) || `HTTP ${r.status}`); e.status = r.status; throw e; }
   return data;
 }
 function toast(msg, ms = 3500) {
@@ -230,9 +235,13 @@ function toast(msg, ms = 3500) {
 }
 const backendById = id => (S.state?.backends || []).find(b => b.id === id);
 const profileById = id => (S.state?.profiles || []).find(p => p.id === id);
-const liveSessions = () => (S.state?.sessions || []).filter(s => ["running","starting","stopping"].includes(s.status));
-const sessionsOf = pid => (S.state?.sessions || []).filter(s => s.profile_id === pid);
-const liveOf = pid => sessionsOf(pid).find(s => ["running","starting","stopping"].includes(s.status));
+const cfgBackends = p => Object.keys(p.configs || {});
+const pdef = p => (p.default_backend && (p.configs||{})[p.default_backend] ? p.default_backend : cfgBackends(p)[0] || "");
+const cfgOf = (p,bid) => (p.configs||{})[bid] || {};
+const isLive = s => s && ["running","starting","stopping"].includes(s.status);
+const liveSessions = () => (S.state?.sessions || []).filter(isLive);
+const sessionsOf = (pid,bid) => (S.state?.sessions || []).filter(s => s.profile_id===pid && (!bid || s.backend===bid));
+const liveOf = (pid,bid) => sessionsOf(pid,bid).find(isLive);
 
 function statusBadge(s) {
   if (!s) return `<span class="badge"><span class="dot"></span>未起動</span>`;
@@ -293,9 +302,13 @@ function renderTabBadges() {
   nb.classList.toggle("hidden", n === 0); nb.textContent = n;
 }
 
-/* ---------------- launch view ---------------- */
+/* ---------------- launch view (バックエンド選択式) ---------------- */
+function selFor(p) {
+  let sel = S.sel[p.id];
+  if (!sel || !cfgBackends(p).includes(sel)) sel = pdef(p);
+  return sel;
+}
 function renderLaunch() {
-  // 起動中サマリー
   const strip = $("#running-strip");
   const live = liveSessions();
   strip.innerHTML = live.length ? `<div class="card" style="border-color:#274d38">
@@ -305,14 +318,11 @@ function renderLaunch() {
       <span class="badge ${s.ready?"ok":"warn"}" style="cursor:pointer" onclick="switchTab('servers')">
       <span class="dot"></span>${esc(s.profile_name)} · ${esc(s.backend_name)} · :${s.port||"-"}</span>`).join("")}
     </div></div>` : "";
-  // フィルタ
-  const bks = S.state.backends;
   const f = $("#launch-filters");
-  f.innerHTML = [{id:"all",name:"すべて"}, ...bks].map(b =>
+  f.innerHTML = [{id:"all",name:"すべて"}, ...S.state.backends].map(b =>
     `<button class="fchip ${S.filter===b.id?"on":""}" onclick="S.filter='${b.id}';renderLaunch()">${esc(b.name)}</button>`).join("");
-  // カード
   const g = $("#launch-grid");
-  const ps = S.state.profiles.filter(p => S.filter === "all" || p.backend === S.filter);
+  const ps = S.state.profiles.filter(p => S.filter === "all" || (p.configs||{})[S.filter]);
   if (!ps.length) {
     g.innerHTML = `<div class="empty" style="grid-column:1/-1">
       起動プロファイルがありません。<br><br>
@@ -320,25 +330,36 @@ function renderLaunch() {
     return;
   }
   g.innerHTML = ps.map(p => {
-    const b = backendById(p.backend), s = liveOf(p.id);
-    const vals = p.values || {};
-    const model = vals.model || "";
+    const sel = selFor(p);
+    const b = backendById(sel), cfg = cfgOf(p, sel), s = liveOf(p.id, sel);
+    const vals = cfg.values || {};
+    const runningOthers = cfgBackends(p).filter(bid => bid !== sel && liveOf(p.id, bid));
     return `<div class="card">
       <div class="row">
-        <span class="chip ${esc(p.backend)}">${esc(b ? b.name : p.backend)}</span>
         <b class="grow ellip" style="font-size:15.5px">${esc(p.name)}</b>
         ${statusBadge(s)}
       </div>
+      <div class="row" style="margin-top:10px">
+        ${cfgBackends(p).map(bid => {
+          const ls = liveOf(p.id, bid);
+          const rd = ls ? (ls.status==="stopping" ? "r-info" : ls.ready ? "r-ok" : "r-warn") : "";
+          return `<button class="bchip ${bid===sel?"on":""}" onclick="S.sel['${p.id}']='${bid}';renderLaunch()">
+            <span class="rd ${rd}"></span>${esc(backendById(bid)?.name || bid)}${bid===pdef(p)&&cfgBackends(p).length>1?' <span style="font-size:10px;opacity:.7">既定</span>':''}</button>`;
+        }).join("")}
+      </div>
       <div class="kvs" style="margin-top:10px">
-        <span>モデル</span><span class="v ellip" title="${esc(model)}">${esc(model || "-")}</span>
+        <span>モデル</span><span class="v ellip" title="${esc(vals.model||"")}">${esc(vals.model || "-")}</span>
         <span>ポート</span><span class="v mono">${esc(vals.port || b?.default_port || "-")}</span>
         ${p.note ? `<span>備考</span><span class="v">${esc(p.note)}</span>` : ""}
       </div>
+      ${s ? `<div class="muted" style="margin-top:8px">稼働 ${s.status==="running"||s.status==="starting"?fmtUp(s.uptime):"-"} · PID ${s.pid}${s.ready?' · <a href="http://'+esc(S.state.system.ip)+':'+s.port+'" target="_blank" rel="noopener">API ↗</a>':''}</div>` : ""}
+      ${runningOthers.length ? `<div class="muted" style="margin-top:6px">他に起動中: ${runningOthers.map(x=>esc(backendById(x)?.name||x)).join(", ")}</div>` : ""}
       <div class="row" style="margin-top:12px">
         ${s
           ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹'} 停止</button>
              <button onclick="switchTab('servers');openLog('${s.id}')">ログ</button>`
-          : `<button class="primary" onclick="startProfile('${p.id}')" ${S.busy[p.id]?"disabled":""}>${S.busy[p.id]?'<span class="spin"></span>':'▶ 起動'}</button>`}
+          : `<button class="primary" onclick="startProfile('${p.id}','${sel}')" ${S.busy[p.id+sel]?"disabled":""}>
+               ${S.busy[p.id+sel]?'<span class="spin"></span>':'▶'} ${esc(b?b.name:sel)} で起動</button>`}
         <span class="grow"></span>
         <button class="ghost" onclick="openEditor('${p.id}')">編集</button>
       </div>
@@ -347,18 +368,19 @@ function renderLaunch() {
 }
 
 /* ---------------- actions ---------------- */
-async function startProfile(pid, force = false) {
-  S.busy[pid] = true; renderAll();
+async function startProfile(pid, backend, force = false) {
+  const key = pid + (backend||"");
+  S.busy[key] = true; renderAll();
   try {
-    const s = await api("/api/sessions", {method:"POST", body:{profile_id: pid, force}});
-    toast(`起動しました: ${s.profile_name} (pid ${s.pid})`);
+    const s = await api("/api/sessions", {method:"POST", body:{profile_id: pid, backend: backend || "", force}});
+    toast(`起動しました: ${s.profile_name} [${s.backend_name}] (pid ${s.pid})`);
     S.openLogs.add(s.id);
     switchTab("servers");
   } catch (e) {
     if (e.status === 409 && /force/.test(e.message)) {
-      if (confirm(e.message + "\n\n強制的に起動しますか?")) return startProfile(pid, true);
+      if (confirm(e.message + "\n\n強制的に起動しますか?")) return startProfile(pid, backend, true);
     } else toast("起動失敗: " + e.message);
-  } finally { S.busy[pid] = false; renderAll(); }
+  } finally { S.busy[key] = false; renderAll(); }
 }
 async function stopSession(sid) {
   S.busy[sid] = true; renderAll();
@@ -367,7 +389,6 @@ async function stopSession(sid) {
   finally { S.busy[sid] = false; refresh(false); }
 }
 async function restartSession(sid) {
-  const old = S.state.sessions.find(x => x.id === sid);
   S.busy[sid] = true; renderAll();
   try {
     const s = await api(`/api/sessions/${sid}/restart`, {method:"POST"});
@@ -389,11 +410,11 @@ function renderServers() {
   const list = $("#servers-list");
   const ss = S.state.sessions || [];
   if (!ss.length) {
-    list.innerHTML = `<div class="empty">起動中のサーバーはありません。<br>「起動」タブからプロファイルを選んでスタートしてください。</div>`;
+    list.innerHTML = `<div class="empty">起動中のサーバーはありません。<br>「起動」タブからバックエンドを選んでスタートしてください。</div>`;
     return;
   }
-  const live = ss.filter(s => ["running","starting","stopping"].includes(s.status));
-  const dead = ss.filter(s => !["running","starting","stopping"].includes(s.status));
+  const live = ss.filter(isLive);
+  const dead = ss.filter(s => !isLive(s));
   const card = s => {
     const open = S.openLogs.has(s.id);
     const url = s.port ? `http://${esc(S.state.system.ip)}:${s.port}` : "";
@@ -405,19 +426,19 @@ function renderServers() {
       </div>
       <div class="kvs" style="margin-top:8px">
         <span>PID</span><span class="v mono">${s.pid}${s.detached ? ' <span class="muted">(前マネージャーから引き継ぎ)</span>' : ""}</span>
-        <span>稼働時間</span><span class="v">${s.status==="running"||s.status==="starting" ? fmtUp(s.uptime) : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-")}${s.exit_code != null ? ` (code ${s.exit_code})` : ""}</span>
+        <span>稼働時間</span><span class="v">${isLive(s) ? fmtUp(s.uptime) : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-")}${s.exit_code != null ? ` (code ${s.exit_code})` : ""}</span>
         <span>API</span><span class="v mono">${url ? `<a href="${url}" target="_blank" rel="noopener">:${s.port} ↗</a>` : "-"}</span>
       </div>
       <pre class="cmdprev" style="max-height:44px">${esc(s.argv.join(" "))}</pre>
       ${s.error ? `<div class="muted" style="color:var(--err);margin-top:6px">${esc(s.error)}</div>` : ""}
       <div class="row" style="margin-top:10px">
-        ${["running","starting","stopping"].includes(s.status)
+        ${isLive(s)
           ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹ 停止'}</button>
              <button onclick="restartSession('${s.id}')">↻ 再起動</button>`
-          : `<button onclick="rerunProfile('${s.profile_id}')">▶ 再起動</button>`}
-        <button onclick="toggleLog('${s.id}')" class="${open?'':''}">${open ? "ログ閉じる" : "📜 ログ"}</button>
+          : `<button onclick="rerunSession('${s.id}')">▶ 再起動</button>`}
+        <button onclick="toggleLog('${s.id}')">${open ? "ログ閉じる" : "📜 ログ"}</button>
         <span class="grow"></span>
-        ${["exited","failed","lost"].includes(s.status) ? `<button class="ghost" onclick="deleteSession('${s.id}')">削除</button>` : ""}
+        ${!isLive(s) ? `<button class="ghost" onclick="deleteSession('${s.id}')">削除</button>` : ""}
       </div>
       <div class="logwrap ${open ? "" : "hidden"}" id="logwrap-${s.id}">
         <div class="row" style="margin-top:8px">
@@ -433,9 +454,12 @@ function renderServers() {
     (live.length ? `<h2 class="view-title">起動中 (${live.length})</h2>` + live.map(card).join("") : "") +
     (dead.length ? `<h2 class="view-title" style="margin-top:18px">履歴 (${dead.length})</h2>` + dead.slice(0, 20).map(card).join("") : "");
 }
-async function rerunProfile(pid) {
-  if (profileById(pid)) return startProfile(pid);
-  toast("元のプロファイルは削除されています");
+function rerunSession(sid) {
+  const s = S.state.sessions.find(x => x.id === sid);
+  if (!s) return;
+  if (!profileById(s.profile_id)) return toast("元のプロファイルは削除されています");
+  if (!cfgOf(profileById(s.profile_id), s.backend)) return toast(`元のプロファイルから ${s.backend_name} の設定は削除されています`);
+  startProfile(s.profile_id, s.backend);
 }
 function toggleLog(sid) {
   if (S.openLogs.has(sid)) S.openLogs.delete(sid);
@@ -450,7 +474,7 @@ async function pumpLogs() {
       const r = await api(`/api/sessions/${sid}/log?cursor=${cur}`);
       const el = $(`#logbox-${sid}`);
       if (!el) continue;
-      if (r.cursor < cur) el.textContent = "";         // リセットされたら最初から
+      if (r.cursor < cur) el.textContent = "";
       if (r.text) {
         if (el.textContent === "読み込み中…") el.textContent = "";
         el.insertAdjacentText("beforeend", r.text);
@@ -460,9 +484,10 @@ async function pumpLogs() {
         }
       }
       S.logCursor[sid] = r.cursor;
-    } catch { /* session 削除後など */ }
+    } catch { /* ignore */ }
   }
 }
+function openLog(sid) { if (!S.openLogs.has(sid)) toggleLog(sid); }
 
 /* ---------------- profiles view ---------------- */
 function renderProfiles() {
@@ -473,27 +498,34 @@ function renderProfiles() {
     return;
   }
   g.innerHTML = ps.map(p => {
-    const b = backendById(p.backend), s = liveOf(p.id);
-    const v = p.values || {};
+    const bids = cfgBackends(p);
+    const liveCount = bids.filter(bid => liveOf(p.id, bid)).length;
+    const def = pdef(p);
+    const rows = bids.map(bid => {
+      const v = cfgOf(p,bid).values || {};
+      const b = backendById(bid);
+      const ls = liveOf(p.id, bid);
+      const act = ls ? `<button class="danger" style="min-height:30px;padding:2px 9px;font-size:12px" onclick="stopSession('${ls.id}')">⏹</button>`
+                     : `<button style="min-height:30px;padding:2px 9px;font-size:12px" onclick="startProfile('${p.id}','${bid}')">▶ 起動</button>`;
+      return `<div class="row" style="margin-top:6px;gap:6px">
+        <span class="chip ${esc(bid)}" style="font-weight:600">${esc(b?b.name:bid)}${bid===def?" ★":""}</span>
+        <span class="v ellip grow" style="font-size:12px;min-width:0">${esc(v.model || "(モデル未設定)")} @${esc(v.port || b?.default_port || "-")}</span>
+        ${act}</div>`;
+    }).join("");
     return `<div class="card">
       <div class="row">
-        <span class="chip ${esc(p.backend)}">${esc(b ? b.name : p.backend)}</span>
         <b class="grow ellip" style="font-size:15.5px">${esc(p.name)}</b>
-        ${statusBadge(s)}
+        ${liveCount ? `<span class="badge ok"><span class="dot"></span>${liveCount} 起動中</span>` : ""}
       </div>
-      <div class="kvs" style="margin-top:10px">
-        <span>モデル</span><span class="v ellip">${esc(v.model || "-")}</span>
-        <span>エンドポイント</span><span class="v mono">${v.port ? esc(`${(S.state.system.ip)}:${v.port}`) : "-"}</span>
-        <span>追加引数</span><span class="v ellip mono">${esc(p.extra_args || "-")}</span>
-        <span>更新</span><span class="v">${fmtAgo(p.updated_at)}</span>
-      </div>
+      ${rows}
+      ${p.note ? `<div class="muted" style="margin-top:8px">${esc(p.note)}</div>` : ""}
+      <div class="muted" style="margin-top:8px">更新 ${fmtAgo(p.updated_at)}</div>
       <div class="row" style="margin-top:12px">
-        ${s ? `<button class="danger" onclick="stopSession('${s.id}')">⏹ 停止</button>`
-            : `<button class="primary" onclick="startProfile('${p.id}')">▶ 起動</button>`}
+        <button class="primary" onclick="startProfile('${p.id}','${def}')" ${liveOf(p.id,def)?"disabled":""}>▶ ${esc(backendById(def)?.name||"")} で起動</button>
         <button onclick="openEditor('${p.id}')">編集</button>
         <button class="ghost" onclick="dupProfile('${p.id}')">複製</button>
         <span class="grow"></span>
-        ${!s ? `<button class="ghost danger" onclick="delProfile('${p.id}')">削除</button>` : ""}
+        ${!liveCount ? `<button class="ghost danger" onclick="delProfile('${p.id}')">削除</button>` : ""}
       </div>
     </div>`;
   }).join("");
@@ -512,22 +544,29 @@ async function delProfile(pid) {
 }
 
 /* ============================================================= editor */
-function blankDraft(backendId) {
-  return {name:"", backend: backendId || "vllm", values:{}, extra_args:"", env:{}, cwd:"", command:"", note:""};
-}
+const blankCfg = b => ({values: defaultsFor(b), extra_args:"", env:{}, cwd:"", command:"", custom_only:false});
 function defaultsFor(b) {
   const v = {};
-  (b.fields || []).forEach(f => { if (f.default) v[f.key] = f.default; });
+  (b?.fields || []).forEach(f => { if (f.default) v[f.key] = f.default; });
   return v;
 }
 function openEditor(pid) {
   let draft;
   if (pid) {
     const p = profileById(pid); if (!p) return;
-    draft = JSON.parse(JSON.stringify(p));
+    draft = {
+      id: p.id, name: p.name, note: p.note || "",
+      default_backend: pdef(p),
+      cfg: Object.fromEntries(cfgBackends(p).map(bid => {
+        const c = cfgOf(p, bid);
+        return [bid, {values:{...(c.values||{})}, extra_args:c.extra_args||"", env:{...(c.env||{})},
+                      cwd:c.cwd||"", command:c.command||"", custom_only:!!c.custom_only}];
+      })),
+    };
+    if (!draft.default_backend) return toast("バックエンドが空のプロファイルです");
   } else {
-    draft = blankDraft();
-    const b = backendById("vllm"); if (b) draft.values = defaultsFor(b);
+    const b = backendById("vllm");
+    draft = {name:"", note:"", default_backend:"vllm", cfg: b ? {vllm: blankCfg(b)} : {}};
   }
   S.editing = draft;
   $("#modal").style.display = "flex"; $("#modal-veil").style.display = "block";
@@ -537,23 +576,24 @@ function closeEditor() {
   S.editing = null;
   $("#modal").style.display = "none"; $("#modal-veil").style.display = "none";
 }
-function setBackend(bid) {
+function toggleBackend(bid) {
   const d = S.editing; if (!d) return;
-  d.backend = bid;
-  d.values = defaultsFor(backendById(bid) || {fields:[]});
+  if (d.cfg[bid]) {
+    if (Object.keys(d.cfg).length <= 1) return toast("バックエンドは最低1つ必要です");
+    delete d.cfg[bid];
+    if (d.default_backend === bid) d.default_backend = Object.keys(d.cfg)[0];
+  } else {
+    d.cfg[bid] = blankCfg(backendById(bid));
+  }
   renderEditor();
 }
-function inputVal(sel) { const el = $(sel); return el ? el.value : ""; }
-function collectDraft() {
-  const d = S.editing; if (!d) return d;
-  d.name = inputVal("#ed-name");
-  d.extra_args = inputVal("#ed-extra");
-  d.cwd = inputVal("#ed-cwd");
-  d.command = inputVal("#ed-command");
-  d.note = inputVal("#ed-note");
-  d.env = parseEnv(inputVal("#ed-env"));
-  return d;
+function removeBackend(bid) { toggleBackend(bid); }
+function setDefaultBackend(bid) {
+  const d = S.editing; if (!d || !d.cfg[bid]) return;
+  d.default_backend = bid;
+  renderEditor();
 }
+const envToText = env => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join("\n");
 function parseEnv(text) {
   const env = {};
   (text || "").split("\n").forEach(line => {
@@ -563,92 +603,137 @@ function parseEnv(text) {
   });
   return env;
 }
-const envToText = env => Object.entries(env || {}).map(([k, v]) => `${k}=${v}`).join("\n");
-
-let previewTimer = null;
+function collectDraft() {
+  const d = S.editing; if (!d) return d;
+  d.name = inputVal("#ed-name") ?? d.name;
+  d.note = inputVal("#ed-note") ?? d.note;
+  document.querySelectorAll(".ed-sec[data-bid]").forEach(sec => {
+    const bid = sec.dataset.bid, c = d.cfg[bid]; if (!c) return;
+    sec.querySelectorAll("[data-fkey]").forEach(el => {
+      c.values[el.dataset.fkey] = el.type === "checkbox" ? el.checked : el.value;
+    });
+    const x = sec.querySelector("[data-role=extra]");  if (x) c.extra_args = x.value;
+    const e = sec.querySelector("[data-role=env]");    if (e) c.env = parseEnv(e.value);
+    const w = sec.querySelector("[data-role=cwd]");    if (w) c.cwd = w.value;
+    const m = sec.querySelector("[data-role=command]");if (m) c.command = m.value;
+    const o = sec.querySelector("[data-role=customonly]"); if (o) c.custom_only = o.checked;
+  });
+  return d;
+}
+function inputVal(sel) { const el = $(sel); return el ? el.value : null; }
+function editorBody(bid) {
+  collectDraft();
+  const d = S.editing;
+  return {name:d.name, note:d.note, default_backend:d.default_backend,
+          configs:d.cfg, backend: bid || d.default_backend};
+}
+const PT = {};
+function schedulePreview(bid) {
+  clearTimeout(PT[bid]);
+  PT[bid] = setTimeout(() => showPreview(bid), 400);
+}
+async function showPreview(bid) {
+  const el = $(`#edp-${bid}`); if (!el || !S.editing) return;
+  try {
+    const r = await api("/api/preview", {method:"POST", body: editorBody(bid)});
+    el.textContent = r.ok ? r.command : "⚠ " + r.error;
+    el.style.color = r.ok ? "#9fd3a8" : "var(--err)";
+  } catch (e) { el.textContent = "⚠ " + e.message; el.style.color = "var(--err)"; }
+}
 function renderEditor() {
   const d = S.editing; if (!d) return;
-  const b = backendById(d.backend);
   const sheet = $("#editor-sheet");
-  const fieldsHtml = (b?.fields || []).map(f => {
-    const val = d.values[f.key] ?? "";
-    const id = `edv-${f.key}`;
-    const help = f.help ? `<div class="muted" style="font-size:11px;margin-top:2px">${esc(f.help)}</div>` : "";
-    if (f.type === "bool") return `
-      <div><label class="switch"><input type="checkbox" id="${id}" data-fkey="${f.key}" ${val ? "checked" : ""}>
-      <span class="track"></span><span class="lab">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></span></label>${help}</div>`;
-    if (f.type === "select") return `
-      <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span>${f.required?' <span style="color:var(--err)">*</span>':''}</label>
-      <select id="${id}" data-fkey="${f.key}">${(f.options||[]).map(o => `<option ${o===val?"selected":""} value="${esc(o)}">${o===""?"(指定しない)":esc(o)}</option>`).join("")}</select>${help}</div>`;
-    const t = f.type === "int" || f.type === "float" ? "number" : "text";
-    return `
-      <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span>${f.required?' <span style="color:var(--err)">*</span>':''}</label>
-      <input type="${t}" ${f.type==="float"?'step="0.01"':""} inputmode="${t==="number"?"decimal":""}" id="${id}" data-fkey="${f.key}" value="${esc(val)}" placeholder="${esc(f.placeholder||f.default||"")}">${help}</div>`;
+  const chipRow = S.state.backends.map(b => `
+    <button class="bchip ${d.cfg[b.id]?"on":""}" onclick="toggleBackend('${b.id}')">
+      ${d.cfg[b.id] ? "✓" : "＋"} ${esc(b.name)}</button>`).join("");
+  const secs = Object.keys(d.cfg).map(bid => {
+    const b = backendById(bid); if (!b) return "";
+    const c = d.cfg[bid];
+    const fieldsHtml = (b.fields || []).map(f => {
+      const val = c.values[f.key] ?? "";
+      const id = `edv-${bid}-${f.key}`;
+      const help = f.help ? `<div class="muted" style="font-size:11px;margin-top:2px">${esc(f.help)}</div>` : "";
+      if (f.type === "bool") return `
+        <div><label class="switch"><input type="checkbox" id="${id}" data-fkey="${f.key}" ${val?"checked":""}>
+        <span class="track"></span><span class="lab">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></span></label>${help}</div>`;
+      if (f.type === "select") return `
+        <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></label>
+        <select id="${id}" data-fkey="${f.key}">${(f.options||[]).map(o => `<option ${o===val?"selected":""} value="${esc(o)}">${o===""?"(指定しない)":esc(o)}</option>`).join("")}</select>${help}</div>`;
+      const t = f.type === "int" || f.type === "float" ? "number" : "text";
+      return `
+        <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></label>
+        <input type="${t}" ${f.type==="float"?'step="0.01"':""} inputmode="${t==="number"?"decimal":""}" id="${id}" data-fkey="${f.key}" value="${esc(val)}" placeholder="${esc(f.placeholder||f.default||"")}">${help}</div>`;
+    }).join("");
+    return `<div class="ed-sec" data-bid="${bid}">
+      <div class="row">
+        <span class="chip ${esc(bid)}">${esc(b.name)}</span>
+        <label class="defradio"><input type="radio" name="eddef" value="${bid}" ${d.default_backend===bid?"checked":""} onchange="setDefaultBackend(this.value)"> 既定の起動先</label>
+        <span class="grow"></span>
+        <span class="muted" style="font-size:11.5px">${esc(b.default_port?("既定ポート "+b.default_port):"")}</span>
+        ${Object.keys(d.cfg).length>1 ? `<button class="xbtn" onclick="removeBackend('${bid}')">✕ 外す</button>` : ""}
+      </div>
+      <div class="muted" style="font-size:12px;margin-top:6px">${esc(b.desc)}</div>
+      <div class="fgrid" style="margin-top:4px">${fieldsHtml}</div>
+      <label class="f">追加引数 (生のCLIフラグ)</label>
+      <textarea data-role="extra" placeholder="--some-flag 0.5">${esc(c.extra_args)}</textarea>
+      <label class="f">環境変数 (KEY=VALUE 1行ずつ)</label>
+      <textarea data-role="env" placeholder="CUDA_VISIBLE_DEVICES=0">${esc(envToText(c.env))}</textarea>
+      <details class="adv" ${c.cwd||c.command||c.custom_only?"open":""}>
+        <summary>高度な設定 (${esc(b.name)} 用コマンド / 作業DIR)</summary>
+        <div class="inner">
+          <label class="f">起動コマンド上書き <span class="muted">空 = ${esc(b.command || b.default_command)}</span></label>
+          <input type="text" class="mono" data-role="command" value="${esc(c.command)}" placeholder="${esc(b.default_command)}">
+          <label class="f">作業ディレクトリ (空 = プロジェクトルート)</label>
+          <input type="text" class="mono" data-role="cwd" value="${esc(c.cwd)}">
+          <div class="muted" style="font-size:11.5px;margin-top:6px">トークン: {python} {llama_server} {module} {root} と値変数 {model} {port} 等が使えます</div>
+          <label class="switch" style="margin-top:6px"><input type="checkbox" data-role="customonly" ${c.custom_only?"checked":""}>
+            <span class="track"></span><span class="lab" style="font-size:12.5px">コマンドのみモード (上のフォーム引数を自動付与しない。追加引数は有効)</span></label>
+        </div>
+      </details>
+      <label class="f" style="margin-top:12px">起動コマンド プレビュー</label>
+      <pre class="cmdprev" id="edp-${bid}">…</pre>
+    </div>`;
   }).join("");
   sheet.innerHTML = `
     <h3>${d.id ? "プロファイル編集" : "新規プロファイル"}</h3>
     <label class="f" for="ed-name">プロファイル名</label>
-    <input type="text" id="ed-name" value="${esc(d.name)}" placeholder="例: Qwen2.5-7B / vLLM">
-    <label class="f" for="ed-backend">バックエンド</label>
-    <select id="ed-backend" onchange="setBackend(this.value)">
-      ${(S.state?.backends||[]).map(bb => `<option value="${bb.id}" ${bb.id===d.backend?"selected":""}>${esc(bb.name)}</option>`).join("")}
-    </select>
-    <div class="muted" style="margin-top:6px;font-size:12px">${esc(b?.desc || "")}</div>
-    <div class="fgrid" style="margin-top:4px">${fieldsHtml}</div>
-    <label class="f" for="ed-extra">追加引数 (生のCLIフラグ・上級者向け)</label>
-    <textarea id="ed-extra" placeholder="--some-flag 0.5 --another-flag">${esc(d.extra_args)}</textarea>
-    <label class="f" for="ed-env">環境変数 (KEY=VALUE を1行ずつ)</label>
-    <textarea id="ed-env" placeholder="CUDA_VISIBLE_DEVICES=0">${esc(envToText(d.env))}</textarea>
-    <details class="adv" ${d.cwd||d.command?"open":""}>
-      <summary>高度な設定 (コマンド上書き / 作業ディレクトリ)</summary>
-      <div class="inner">
-        <label class="f" for="ed-command">起動コマンド上書き <span class="muted">空=バックエンド既定 (${esc(b?.default_command||"")})</span></label>
-        <input type="text" id="ed-command" class="mono" value="${esc(d.command)}" placeholder="{python} -m vllm.entrypoints.openai.api_server">
-        <label class="f" for="ed-cwd">作業ディレクトリ (空 = プロジェクトルート)</label>
-        <input type="text" id="ed-cwd" class="mono" value="${esc(d.cwd)}">
-      </div>
-    </details>
-    <label class="f" for="ed-note">メモ</label>
+    <input type="text" id="ed-name" value="${esc(d.name)}" placeholder="例: Qwen2.5-7B 3way比較">
+    <label class="f">含めるバックエンド <span class="muted">(タップで追加 / 削除。起動画面でこの中から選べます)</span></label>
+    <div class="row" style="margin-top:2px">${chipRow}</div>
+    ${secs}
+    <label class="f" for="ed-note">メモ (全体)</label>
     <input type="text" id="ed-note" value="${esc(d.note)}">
-    <label class="f">起動コマンド プレビュー</label>
-    <pre class="cmdprev" id="ed-preview">…</pre>
     <div class="sheet-actions">
       <button class="grow" onclick="closeEditor()">キャンセル</button>
-      <button class="primary grow" id="ed-save" onclick="saveEditor()">保存</button>
+      <button class="primary grow" onclick="saveEditor()">保存</button>
     </div>`;
-  sheet.querySelectorAll("[data-fkey]").forEach(el => {
-    el.addEventListener("input", () => {
-      S.editing.values[el.dataset.fkey] = el.type === "checkbox" ? el.checked : el.value;
-      schedulePreview();
+  document.querySelectorAll(".ed-sec").forEach(sec => {
+    const bid = sec.dataset.bid;
+    sec.querySelectorAll("[data-fkey]").forEach(el => {
+      el.addEventListener("input", () => {
+        S.editing.cfg[bid].values[el.dataset.fkey] = el.type === "checkbox" ? el.checked : el.value;
+        schedulePreview(bid);
+      });
     });
-    el.addEventListener("change", () => {
-      if (el.type === "checkbox") S.editing.values[el.dataset.fkey] = el.checked;
+    sec.querySelectorAll("textarea,input").forEach(el => {
+      const role = el.dataset.role; if (!role) return;
+      el.addEventListener("input", () => {
+        const c = S.editing.cfg[bid];
+        if (role === "extra") c.extra_args = el.value;
+        if (role === "cwd") c.cwd = el.value;
+        if (role === "command") c.command = el.value;
+        if (role === "customonly") c.custom_only = el.checked;
+        if (role === "env") c.env = parseEnv(el.value);
+        schedulePreview(bid);
+      });
     });
+    schedulePreview(bid);
   });
-  ["ed-extra","ed-name"].forEach(id => $(`#${id}`).addEventListener("input", () => { collectDraft(); schedulePreview(); }));
-  schedulePreview();
-}
-function editorBody() {
-  collectDraft();
-  const d = S.editing;
-  return {name:d.name, backend:d.backend, values:d.values, extra_args:d.extra_args,
-          env:d.env, cwd:d.cwd, command:d.command, note:d.note};
-}
-async function schedulePreview() {
-  clearTimeout(previewTimer);
-  previewTimer = setTimeout(showPreview, 350);
-}
-async function showPreview() {
-  const el = $("#ed-preview"); if (!el || !S.editing) return;
-  try {
-    const r = await api("/api/preview", {method:"POST", body: editorBody()});
-    el.textContent = r.ok ? r.command : "⚠ " + r.error;
-    el.style.color = r.ok ? "#9fd3a8" : "var(--err)";
-  } catch (e) { el.textContent = "⚠ " + e.message; }
 }
 async function saveEditor() {
   const body = editorBody();
   if (!body.name.trim()) return toast("プロファイル名を入力してください");
+  if (!Object.keys(body.configs).length) return toast("バックエンドを1つ以上選択してください");
   try {
     if (S.editing.id) await api(`/api/profiles/${S.editing.id}`, {method:"PUT", body});
     else await api("/api/profiles", {method:"POST", body});
@@ -690,7 +775,6 @@ function renderBackends() {
         <button class="primary" onclick="saveBackend('${b.id}')">保存</button>
         <button class="ghost" onclick="resetBackend('${b.id}')">リセット</button>
         <span class="grow"></span>
-        <button class="ghost" onclick="newProfileFor('${b.id}')">このバックエンドで新規プロファイル</button>
       </div>
     </div>`;
   }).join("");
@@ -698,9 +782,9 @@ function renderBackends() {
 async function saveBackend(bid) {
   const b = backendById(bid);
   const body = {
-    command: inputVal(`#bk-cmd-${bid}`),
-    python: b.kind === "python" ? inputVal(`#bk-py-${bid}`) : null,
-    command_binary: b.kind !== "python" ? inputVal(`#bk-py-${bid}`) : null,
+    command: inputVal(`#bk-cmd-${bid}`) || "",
+    python: b.kind === "python" ? (inputVal(`#bk-py-${bid}`) || "") : null,
+    command_binary: b.kind !== "python" ? (inputVal(`#bk-py-${bid}`) || "") : null,
   };
   try { await api(`/api/backends/${bid}`, {method:"PUT", body}); toast("保存しました"); refresh(false); }
   catch (e) { toast("失敗: " + e.message); }
@@ -713,13 +797,6 @@ async function resetBackend(bid) {
 async function redetect(bid) {
   try { await api(`/api/backends/${bid}/detect`, {method:"POST"}); refresh(false); }
   catch (e) { toast("検出失敗: " + e.message); }
-}
-function newProfileFor(bid) {
-  const d = blankDraft(bid);
-  d.values = defaultsFor(backendById(bid) || {fields:[]});
-  S.editing = d;
-  $("#modal").style.display = "flex"; $("#modal-veil").style.display = "block";
-  renderEditor();
 }
 
 /* ============================================================= boot */

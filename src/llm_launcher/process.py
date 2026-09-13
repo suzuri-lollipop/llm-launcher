@@ -12,7 +12,8 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .backends import (BACKENDS, default_python, render_argv, resolve_binary,
+from .backends import (BACKENDS, default_python, profile_config,
+                       profile_default_backend, render_argv, resolve_binary,
                        resolve_port)
 from .store import JsonStore, new_id, now
 
@@ -73,34 +74,39 @@ class ProcessManager:
     def find_profile(self, profile_id: str) -> dict[str, Any] | None:
         return next((p for p in self.profiles.load() if p["id"] == profile_id), None)
 
-    def build_argv(self, profile: dict[str, Any]) -> list[str]:
-        backend = BACKENDS[profile["backend"]]
-        prof = dict(profile)
-        # バックエンド設定のデフォルトコマンドオーバーライドを反映
-        prof.setdefault("command", "")
-        command_override = self.base_command(profile["backend"])
-        if not prof["command"]:
-            prof["command"] = command_override
+    def build_argv(self, profile: dict[str, Any], backend_id: str | None = None) -> list[str]:
+        """v2 プロファイル (複数バックエンド設定) から指定バックエンドの argv を組み立てる。"""
+        bid = backend_id if backend_id in BACKENDS else profile_default_backend(profile)
+        if bid not in BACKENDS:
+            raise ValueError("このプロファイルにバックエンドが設定されていません")
+        backend = BACKENDS[bid]
+        cfg = profile_config(profile, bid)
+        command = (cfg.get("command") or "").strip() or self.base_command(bid)
         return render_argv(
-            backend, prof,
-            python=self.resolve_python(profile["backend"]),
-            binary=self.resolve_binary(profile["backend"]),
+            backend, {**cfg, "command": command},
+            python=self.resolve_python(bid),
+            binary=self.resolve_binary(bid),
             root=self.root,
         )
 
     # --------------------------------------------------------------- start
 
-    async def start(self, profile: dict[str, Any]) -> dict[str, Any]:
-        backend = BACKENDS[profile["backend"]]
-        argv = self.build_argv(profile)
-        port = resolve_port(backend, profile, argv)
+    async def start(self, profile: dict[str, Any],
+                    backend_id: str | None = None) -> dict[str, Any]:
+        bid = backend_id if backend_id in BACKENDS else profile_default_backend(profile)
+        if bid not in BACKENDS:
+            raise RuntimeError("このプロファイルにバックエンドが設定されていません")
+        backend = BACKENDS[bid]
+        cfg = profile_config(profile, bid)
+        argv = self.build_argv(profile, bid)
+        port = resolve_port(backend, cfg, argv)
 
         env = os.environ.copy()
-        for k, v in (profile.get("env") or {}).items():
+        for k, v in (cfg.get("env") or {}).items():
             if k.strip():
                 env[k.strip()] = str(v)
 
-        cwd = (profile.get("cwd") or "").strip() or str(self.root)
+        cwd = (cfg.get("cwd") or "").strip() or str(self.root)
         sid = new_id("s")
         log_path = self.log_dir / f"{sid}.log"
 
@@ -108,7 +114,7 @@ class ProcessManager:
             "id": sid,
             "profile_id": profile["id"],
             "profile_name": profile.get("name", ""),
-            "backend": profile["backend"],
+            "backend": bid,
             "backend_name": backend["name"],
             "argv": argv,
             "cwd": cwd,
