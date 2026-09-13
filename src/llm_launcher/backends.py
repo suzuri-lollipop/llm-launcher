@@ -63,9 +63,9 @@ BACKENDS: dict[str, dict[str, Any]] = {
             f_str("served_model_name", "--served-model-name", "提供モデル名 (任意)", placeholder="省略時は --model が使われる"),
             f_str("host", "--host", "ホスト", default="0.0.0.0"),
             f_num("port", "--port", "ポート", default="8000"),
-            f_num("tensor_parallel_size", "--tensor-parallel-size", "Tensor並列数 (TP)", placeholder="1"),
+            f_num("tensor_parallel_size", "--tensor-parallel-size", "Tensor並列数 (TP)", default="1"),
             f_num("pipeline_parallel_size", "--pipeline-parallel-size", "Pipeline並列数 (PP)", placeholder="1"),
-            f_num("gpu_memory_utilization", "--gpu-memory-utilization", "GPUメモリ使用率", numtype="float", placeholder="0.90"),
+            f_num("gpu_memory_utilization", "--gpu-memory-utilization", "GPUメモリ使用率", numtype="float", default="0.9"),
             f_num("max_model_len", "--max-model-len", "最大コンテキスト長", placeholder="8192"),
             f_select("dtype", "--dtype", "dtype", ["", "auto", "bfloat16", "float16", "half", "float32"], default="auto"),
             f_select("quantization", "--quantization", "量子化", ["", "awq", "gptq", "fp8", "bitsandbytes", "gguf"], help="量子化チェックポイントを指定する場合のみ設定"),
@@ -93,9 +93,9 @@ BACKENDS: dict[str, dict[str, Any]] = {
             f_str("served_model_name", "--served-model-name", "提供モデル名 (任意)"),
             f_str("host", "--host", "ホスト", default="0.0.0.0"),
             f_num("port", "--port", "ポート", default="30000"),
-            f_num("tp", "--tp", "Tensor並列数 (TP)", placeholder="1"),
+            f_num("tp", "--tp", "Tensor並列数 (TP)", default="1"),
             f_num("dp", "--dp", "Data並列数 (DP)", placeholder="1"),
-            f_num("mem_fraction_static", "--mem-fraction-static", "静的メモリ比率", numtype="float", placeholder="0.88"),
+            f_num("mem_fraction_static", "--mem-fraction-static", "静的メモリ比率", numtype="float", default="0.85"),
             f_num("context_length", "--context-length", "最大コンテキスト長", placeholder="8192"),
             f_select("dtype", "--dtype", "dtype", ["", "auto", "bfloat16", "float16", "float32"], default="auto"),
             f_select("quantization", "--quantization", "量子化", ["", "awq", "gptq", "fp8", "w8a8_int8"]),
@@ -124,11 +124,11 @@ BACKENDS: dict[str, dict[str, Any]] = {
             f_str("hf_repo", "--hf-repo", "HuggingFaceリポジトリ (任意)", placeholder="モデルを自動ダウンロードする場合のみ"),
             f_str("host", "--host", "ホスト", default="0.0.0.0"),
             f_num("port", "--port", "ポート", default="8080"),
-            f_num("ctx_size", "--ctx-size", "コンテキスト長", placeholder="4096"),
+            f_num("ctx_size", "--ctx-size", "コンテキスト長", default="4096"),
             f_num("n_gpu_layers", "--n-gpu-layers", "GPUに載せる層数 (ngl)", placeholder="0 でCPU実行, -1 で全て"),
             f_num("threads", "--threads", "スレッド数", placeholder="自動"),
-            f_num("parallel", "--parallel", "並列リクエスト数", placeholder="1"),
-            f_num("batch_size", "--batch-size", "バッチサイズ", placeholder="2048"),
+            f_num("parallel", "--parallel", "並列リクエスト数", default="1"),
+            f_num("batch_size", "--batch-size", "バッチサイズ", default="2048"),
             f_select("flash_attn", "--flash-attn", "Flash Attention", ["", "auto", "on", "off"]),
             f_str("api_key", "--api-key", "APIキー (任意)"),
             f_bool("jinja", "--jinja", "Jinjaチャットテンプレート"),
@@ -153,9 +153,9 @@ BACKENDS: dict[str, dict[str, Any]] = {
             f_str("served_model_name", "--served-model-name", "提供モデル名 (任意)"),
             f_str("host", "--host", "ホスト", default="0.0.0.0"),
             f_num("port", "--port", "ポート", default="8020"),
-            f_num("tp", "--tp-size", "Tensor並列数 (TP)", placeholder="1"),
+            f_num("tp", "--tp-size", "Tensor並列数 (TP)", default="1"),
             f_str("gpu", "--gpu", "GPUデバイス", placeholder="0 または 0,1"),
-            f_num("memory_ratio", "--memory-ratio", "メモリ比率", numtype="float", placeholder="0.9"),
+            f_num("memory_ratio", "--memory-ratio", "メモリ比率", numtype="float", default="0.9"),
             f_num("max_seq_len", "--max-seq-len-override", "最大コンテキスト長", placeholder=""),
             f_select("dtype", "--dtype", "dtype", ["", "auto", "bfloat16", "float16"], default="auto"),
             f_select("moe_strategy", "--moe-strategy", "MoE戦略", ["", "hybrid", "offload", "gpu"]),
@@ -214,34 +214,6 @@ def resolve_command_tokens(root: Path, template: str, *, python: str, binary: st
 
 
 TRUTHY = {"1", "true", "yes", "on", "はい"}
-
-
-def profile_backends(profile: dict[str, Any]) -> list[str]:
-    """プロファイルに含まれるバックエンド id の一覧 (v2: configs / v1: backend)。"""
-    cfgs = profile.get("configs")
-    if isinstance(cfgs, dict) and cfgs:
-        return [bid for bid in cfgs if bid in BACKENDS]
-    b = profile.get("backend")
-    return [b] if b in BACKENDS else []
-
-
-def profile_config(profile: dict[str, Any], backend_id: str) -> dict[str, Any]:
-    """指定バックエンドの設定塊を v1/v2 両対応で取り出す。"""
-    cfgs = profile.get("configs")
-    if isinstance(cfgs, dict) and backend_id in cfgs:
-        return dict(cfgs[backend_id] or {})
-    if profile.get("backend") == backend_id:  # 未マイグレーション v1
-        return {k: profile.get(k) for k in ("values", "extra_args", "env", "cwd", "command")
-                if k in profile}
-    return {}
-
-
-def profile_default_backend(profile: dict[str, Any]) -> str:
-    bids = profile_backends(profile)
-    d = profile.get("default_backend")
-    if d in bids:
-        return d
-    return profile.get("backend") if profile.get("backend") in bids else (bids[0] if bids else "")
 
 
 def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str,

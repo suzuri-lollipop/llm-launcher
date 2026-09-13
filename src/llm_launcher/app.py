@@ -18,8 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
-from .backends import (BACKENDS, profile_backends, profile_config,
-                       profile_default_backend, resolve_port)
+from .backends import BACKENDS, resolve_port
 from .process import ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 
@@ -28,36 +27,33 @@ STATIC_DIR = Path(__file__).parent / "static"
 DETECT_TTL = 20.0
 
 
-class ProfileConfigBody(BaseModel):
-    """1バックエンド分の起動設定 (特色の異なる引数はここに閉じ込める)。"""
+class ProfileBody(BaseModel):
+    """1プロファイル = 1バックエンド。バックエンドは編集フォームのプルダウンで選ぶ。"""
+    name: str = Field(min_length=1, max_length=80)
+    backend: str = ""
     values: dict[str, Any] = {}
     extra_args: str = ""
     env: dict[str, str] = {}
     cwd: str = ""
     command: str = ""
     custom_only: bool = False
-
-
-class ProfileBody(BaseModel):
-    name: str = Field(min_length=1, max_length=80)
-    # v2: バックエンド選択そのものをプロファイルに含める
-    configs: dict[str, ProfileConfigBody] = {}
-    default_backend: str = ""
     note: str = ""
-    # 互換: v1 形式 (単一バックエンド) のまま送信してきたクライアントの受け皿。
-    # /api/preview では「表示したいバックエンド」の指定にも使える。
-    backend: str = ""
+    # 旧 v2 (configs) 形式の互換受け: default_backend か最初の1件を展開する
+    configs: dict[str, Any] = {}
+    default_backend: str = ""
 
     @model_validator(mode="before")
     @classmethod
-    def _compat_v1(cls, data: Any) -> Any:
-        if isinstance(data, dict) and not data.get("configs") and data.get("backend"):
-            b = str(data["backend"])
-            data = {**data,
-                    "configs": {b: {k: data.get(k) or v for k, v in (
-                        ("values", {}), ("extra_args", ""), ("env", {}),
-                        ("cwd", ""), ("command", ""))}},
-                    "default_backend": data.get("default_backend") or b}
+    def _compat_v2(cls, data: Any) -> Any:
+        if isinstance(data, dict) and not data.get("backend") and data.get("configs"):
+            cfgs = data["configs"]
+            if cfgs:
+                bid = data.get("default_backend") if data.get("default_backend") in cfgs else next(iter(cfgs))
+                c = cfgs[bid] or {}
+                data = {**data, "backend": bid,
+                        "values": c.get("values") or {}, "extra_args": c.get("extra_args") or "",
+                        "env": c.get("env") or {}, "cwd": c.get("cwd") or "",
+                        "command": c.get("command") or "", "custom_only": bool(c.get("custom_only"))}
         return data
 
 
@@ -67,7 +63,6 @@ class StartBody(BaseModel):
 
 class SessionStartBody(StartBody):
     profile_id: str
-    backend: str = ""   # 空 = プロファイルの既定バックエンド
 
 
 class BackendBody(BaseModel):
@@ -86,23 +81,40 @@ def lan_ip() -> str:
         return socket.gethostbyname(socket.gethostname())
 
 
-def migrate_profiles_v1(store: JsonStore) -> None:
-    """v1 プロファイル (単一バックエンド) を v2 (configs) へ起動時に一度だけ変換する。"""
+def migrate_profiles(store: JsonStore) -> None:
+    """v2 プロファイル (configs マルチバックエンド) を 1プロファイル=1バックエンド へ分離する。
+
+    複数 configs を持つプロファイルはバックエンドごとに分裂し、2件目以降には
+    `[バックエンド名]` を接尾辞として付ける。v1/現行形式はそのままとする。"""
+    from .store import new_id as _new_id
     lst = store.load()
+    out: list[dict[str, Any]] = []
     changed = False
-    for i, p in enumerate(lst):
-        if isinstance(p, dict) and "configs" not in p and p.get("backend") in BACKENDS:
-            bid = p["backend"]
-            lst[i] = {
-                "id": p["id"], "name": p.get("name", ""), "note": p.get("note", ""),
-                "created_at": p.get("created_at"), "updated_at": p.get("updated_at"),
-                "default_backend": bid,
-                "configs": {bid: {k: p.get(k) or d for k, d in (
-                    ("values", {}), ("extra_args", ""), ("env", {}),
-                    ("cwd", ""), ("command", ""))}},
-            }
+    for p in lst:
+        if isinstance(p, dict) and "configs" in p:
             changed = True
+            cfgs = [(bid, c) for bid, c in (p.get("configs") or {}).items() if bid in BACKENDS]
+            for i, (bid, c) in enumerate(cfgs):
+                c = c or {}
+                name = p.get("name", "")
+                if len(cfgs) > 1:
+                    name = f"{name} [{BACKENDS[bid]['name']}]"
+                out.append({
+                    "id": p["id"] if i == 0 else _new_id("p"),
+                    "name": name, "backend": bid,
+                    "values": c.get("values") or {},
+                    "extra_args": c.get("extra_args") or "",
+                    "env": c.get("env") or {},
+                    "cwd": c.get("cwd") or "",
+                    "command": c.get("command") or "",
+                    "custom_only": bool(c.get("custom_only")),
+                    "note": p.get("note", ""),
+                    "created_at": p.get("created_at"), "updated_at": now(),
+                })
+        else:
+            out.append(p)
     if changed:
+        store._cache = out
         store.save()
 
 
@@ -178,7 +190,7 @@ def create_app(root: Path) -> FastAPI:
 
     @app.on_event("startup")
     async def _startup() -> None:
-        migrate_profiles_v1(profiles_store)
+        migrate_profiles(profiles_store)
         await manager.start_tick()
 
     @app.on_event("shutdown")
@@ -208,33 +220,25 @@ def create_app(root: Path) -> FastAPI:
     # ----------------------------------------------------------- profiles
 
     def validate_profile(body: ProfileBody) -> dict[str, Any]:
-        if not body.configs:
-            raise HTTPException(400, "バックエンドを1つ以上選択してください")
-        configs: dict[str, Any] = {}
-        for bid, cfg in body.configs.items():
-            if bid not in BACKENDS:
-                raise HTTPException(400, f"未知のバックエンドです: {bid}")
-            env = {}
-            for k, v in (cfg.env or {}).items():
-                k = str(k).strip()
-                if k and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
-                    raise HTTPException(400, f"[{BACKENDS[bid]['name']}] 環境変数名が無効です: {k}")
-                if k:
-                    env[k] = str(v)
-            configs[bid] = {
-                "values": {k: v for k, v in (cfg.values or {}).items()},
-                "extra_args": cfg.extra_args or "",
-                "env": env,
-                "cwd": cfg.cwd or "",
-                "command": cfg.command or "",
-                "custom_only": bool(cfg.custom_only),
-            }
-        default = body.default_backend if body.default_backend in configs else next(iter(configs))
+        if body.backend not in BACKENDS:
+            raise HTTPException(400, "バックエンドを選択してください")
+        env = {}
+        for k, v in (body.env or {}).items():
+            k = str(k).strip()
+            if k and not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", k):
+                raise HTTPException(400, f"環境変数名が無効です: {k}")
+            if k:
+                env[k] = str(v)
         return {
             "name": body.name.strip(),
+            "backend": body.backend,
+            "values": {k: v for k, v in (body.values or {}).items()},
+            "extra_args": body.extra_args or "",
+            "env": env,
+            "cwd": body.cwd or "",
+            "command": body.command or "",
+            "custom_only": bool(body.custom_only),
             "note": body.note or "",
-            "default_backend": default,
-            "configs": configs,
         }
 
     @app.get("/api/profiles")
@@ -282,10 +286,9 @@ def create_app(root: Path) -> FastAPI:
     async def preview_command(body: ProfileBody) -> dict[str, Any]:
         data = validate_profile(body)
         data["id"] = "preview"
-        bid = body.backend if body.backend in data["configs"] else data["default_backend"]
         try:
-            argv = manager.build_argv(data, bid)
-            return {"ok": True, "backend": bid, "argv": argv,
+            argv = manager.build_argv(data)
+            return {"ok": True, "backend": data["backend"], "argv": argv,
                     "command": " ".join(shlex.quote(a) for a in argv)}
         except ValueError as e:
             return {"ok": False, "error": str(e)}
@@ -297,17 +300,16 @@ def create_app(root: Path) -> FastAPI:
         profile = manager.find_profile(body.profile_id)
         if not profile:
             raise HTTPException(404, "プロファイルが見つかりません")
-        bid = body.backend or profile_default_backend(profile)
-        if bid not in profile_backends(profile):
-            raise HTTPException(400, f"このプロファイルに {BACKENDS[bid]['name'] if bid in BACKENDS else bid} の設定はありません")
+        bid = profile.get("backend")
+        if bid not in BACKENDS:
+            raise HTTPException(400, "このプロファイルにバックエンドが設定されていません")
         already = [s for s in manager.sessions.values()
-                   if s["profile_id"] == body.profile_id and s["backend"] == bid
+                   if s["profile_id"] == body.profile_id
                    and s["status"] in ("running", "starting", "stopping")]
         if already:
-            raise HTTPException(409, f"このプロファイルの {BACKENDS[bid]['name']} は起動済みです "
-                                     f"(session {already[0]['id']})")
-        argv = manager.build_argv(profile, bid)
-        port = resolve_port(BACKENDS[bid], profile_config(profile, bid), argv)
+            raise HTTPException(409, f"このプロファイルは起動済みです (session {already[0]['id']})")
+        argv = manager.build_argv(profile)
+        port = resolve_port(BACKENDS[bid], profile, argv)
         if port and port_in_use(port) and not body.force:
             dup = [s for s in manager.sessions.values()
                    if s.get("port") == port and s["status"] in ("running", "starting")]
@@ -315,7 +317,7 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(409, f"ポート {port} は {who} が使用中です。"
                                      "問題なければ force で起動してください。")
         try:
-            session = await manager.start(profile, bid)
+            session = await manager.start(profile)
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         return manager.session_public(session["id"])
@@ -335,10 +337,8 @@ def create_app(root: Path) -> FastAPI:
         profile = manager.find_profile(old["profile_id"])
         if not profile:
             raise HTTPException(400, "元のプロファイルが削除されています")
-        if old["backend"] not in profile_backends(profile):
-            raise HTTPException(400, f"元のプロファイルから {old['backend_name']} の設定が削除されています")
         await manager.stop(sid)
-        session = await manager.start(profile, old["backend"])
+        session = await manager.start(profile)
         return manager.session_public(session["id"])
 
     @app.delete("/api/sessions/{sid}")
