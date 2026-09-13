@@ -192,9 +192,10 @@ details.adv .inner{padding:0 12px 12px}
 /* ============================================================= state */
 const S = {
   state: null, tab: "launch", filter: "all",
-  editing: null,           // ドラフト: {name,backend,values,extra_args,env,cwd,command,custom_only,note}
+  editing: null,           // ドラフト: {name,backend,values,on,extra_args,env,cwd,command,custom_only,note}
   hf: undefined,           // HF Hub キャッシュスキャン結果 (遅延取得)
-  openLogs: new Set(), logCursor: {}, autoScroll: {}, busy: {},
+  openLogs: new Set(), logCursor: {}, logBuf: {},   // logBuf: sid -> 蓄積ログ文字列
+  autoScroll: {}, busy: {}, _ssSig: "",
 };
 const $ = (q, el=document) => el.querySelector(q);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -252,7 +253,7 @@ async function refresh(silent = true) {
     $("#live-dot").classList.add("on");
     const sys = S.state.system;
     $("#hdr-meta").innerHTML = `${esc(sys.hostname)}<br><span class="mono">${esc(sys.ip)}</span>`;
-    renderAll();
+    renderAll(!silent);
   } catch (e) {
     $("#live-dot").classList.remove("on");
     $("#hdr-meta").textContent = "接続エラー";
@@ -261,7 +262,7 @@ async function refresh(silent = true) {
 }
 function startTimers() {
   clearInterval(refreshTimer); clearInterval(logTimer);
-  refreshTimer = setInterval(refresh, 3000);
+  refreshTimer = setInterval(() => refresh(true), 3000);
   logTimer = setInterval(pumpLogs, 1500);
 }
 
@@ -278,11 +279,11 @@ function switchTab(tab) {
 }
 
 /* ============================================================= render */
-function renderAll() {
+function renderAll(force) {
   if (!S.state) return;
   renderTabBadges();
   if (S.tab === "launch") renderLaunch();
-  if (S.tab === "servers") renderServers();
+  if (S.tab === "servers") renderServers(force);
   if (S.tab === "profiles") renderProfiles();
   if (S.tab === "backends") renderBackends();
 }
@@ -345,7 +346,7 @@ function renderLaunch() {
 
 /* ---------------- actions ---------------- */
 async function startProfile(pid, force = false) {
-  S.busy[pid] = true; renderAll();
+  S.busy[pid] = true; renderAll(true);
   try {
     const s = await api("/api/sessions", {method:"POST", body:{profile_id: pid, force}});
     toast(`起動しました: ${s.profile_name} [${s.backend_name}] (pid ${s.pid})`);
@@ -355,20 +356,20 @@ async function startProfile(pid, force = false) {
     if (e.status === 409 && /force/.test(e.message)) {
       if (confirm(e.message + "\n\n強制的に起動しますか?")) return startProfile(pid, true);
     } else toast("起動失敗: " + e.message);
-  } finally { S.busy[pid] = false; renderAll(); }
+  } finally { S.busy[pid] = false; renderAll(true); }
 }
 async function stopSession(sid) {
-  S.busy[sid] = true; renderAll();
+  S.busy[sid] = true; renderAll(true);
   try { await api(`/api/sessions/${sid}/stop`, {method:"POST"}); toast("停止しました"); }
   catch (e) { toast("停止失敗: " + e.message); }
   finally { S.busy[sid] = false; refresh(false); }
 }
 async function restartSession(sid) {
-  S.busy[sid] = true; renderAll();
+  S.busy[sid] = true; renderAll(true);
   try {
     const s = await api(`/api/sessions/${sid}/restart`, {method:"POST"});
     toast("再起動しました");
-    if (S.openLogs.has(sid)) { S.openLogs.delete(sid); S.openLogs.add(s.id); delete S.logCursor[s.id]; }
+    if (S.openLogs.has(sid)) { S.openLogs.delete(sid); S.openLogs.add(s.id); delete S.logCursor[s.id]; delete S.logBuf[s.id]; }
   } catch (e) { toast("再起動失敗: " + e.message); }
   finally { S.busy[sid] = false; refresh(false); }
 }
@@ -376,18 +377,31 @@ async function deleteSession(sid) {
   if (!confirm("履歴とログを削除しますか?")) return;
   try {
     await api(`/api/sessions/${sid}`, {method:"DELETE"});
-    S.openLogs.delete(sid); toast("削除しました"); refresh(false);
+    S.openLogs.delete(sid); delete S.logBuf[sid]; delete S.logCursor[sid]; toast("削除しました"); refresh(false);
   } catch (e) { toast("削除失敗: " + e.message); }
 }
 
 /* ---------------- servers view ---------------- */
-function renderServers() {
+function sessionSig() {
+  return (S.state.sessions || []).map(s =>
+    [s.id, s.status, s.ready ? 1 : 0, s.pid, s.exit_code ?? "", s.error ?? "",
+     s.detached ? 1 : 0, s.port ?? ""].join(":")).join("|");
+}
+function renderServers(force) {
   const list = $("#servers-list");
   const ss = S.state.sessions || [];
   if (!ss.length) {
+    S._ssSig = "";
     list.innerHTML = `<div class="empty">起動中のサーバーはありません。<br>「起動」タブからプロファイルを選んでスタートしてください。</div>`;
     return;
   }
+  // 構造が変わらなければフル再構築をスキップ (ログの選択解除・「読み込み中…」化を防ぐ)
+  const sig = sessionSig();
+  if (!force && sig === S._ssSig && list.childElementCount) {
+    patchServersDynamic(ss);
+    return;
+  }
+  S._ssSig = sig;
   const live = ss.filter(isLive);
   const dead = ss.filter(s => !isLive(s));
   const card = s => {
@@ -401,7 +415,9 @@ function renderServers() {
       </div>
       <div class="kvs" style="margin-top:8px">
         <span>PID</span><span class="v mono">${s.pid}${s.detached ? ' <span class="muted">(前マネージャーから引き継ぎ)</span>' : ""}</span>
-        <span>稼働時間</span><span class="v">${isLive(s) ? fmtUp(s.uptime) : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-")}${s.exit_code != null ? ` (code ${s.exit_code})` : ""}</span>
+        <span>稼働時間</span><span class="v"><span class="upt" data-sid="${s.id}">${
+          isLive(s) ? fmtUp(s.uptime) : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-")
+        }</span>${s.exit_code != null ? ` (code ${s.exit_code})` : ""}</span>
         <span>API</span><span class="v mono">${url ? `<a href="${url}" target="_blank" rel="noopener">:${s.port} ↗</a>` : "-"}</span>
       </div>
       <pre class="cmdprev" style="max-height:44px">${esc(s.argv.join(" "))}</pre>
@@ -419,15 +435,32 @@ function renderServers() {
         <div class="row" style="margin-top:8px">
           <label class="switch" style="padding:4px 0;min-height:0"><input type="checkbox" ${S.autoScroll[s.id]!==false?"checked":""} onchange="S.autoScroll['${s.id}']=this.checked"><span class="track"></span><span class="lab" style="font-size:12px">自動スクロール</span></label>
           <span class="grow"></span>
+          <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="downloadLog('${s.id}')">⬇ DL</button>
+          <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="copyLog('${s.id}')">📋 コピー</button>
           <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="clearLogView('${s.id}')">画面クリア</button>
         </div>
-        <pre class="logbox" id="logbox-${s.id}">読み込み中…</pre>
+        <pre class="logbox" id="logbox-${s.id}"></pre>
       </div>
     </div>`;
   };
   list.innerHTML =
     (live.length ? `<h2 class="view-title">起動中 (${live.length})</h2>` + live.map(card).join("") : "") +
     (dead.length ? `<h2 class="view-title" style="margin-top:18px">履歴 (${dead.length})</h2>` + dead.slice(0, 20).map(card).join("") : "");
+  // ビルド直後: 各オープン中のログにバッファを復元 (選択・「読み込み中…」化対策)
+  for (const sid of S.openLogs) {
+    const el = $(`#logbox-${sid}`);
+    if (!el) continue;
+    el.textContent = S.logBuf[sid] ?? "読み込み中…";
+    el.dataset.len = (S.logBuf[sid] || "").length;
+    el.scrollTop = el.scrollHeight;
+  }
+}
+function patchServersDynamic(ss) {
+  for (const s of ss) {
+    const u = document.querySelector(`.upt[data-sid="${s.id}"]`);
+    if (u) u.textContent = isLive(s) ? fmtUp(s.uptime)
+                 : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-");
+  }
 }
 function rerunProfile(pid) {
   if (profileById(pid)) return startProfile(pid);
@@ -436,26 +469,62 @@ function rerunProfile(pid) {
 function toggleLog(sid) {
   if (S.openLogs.has(sid)) S.openLogs.delete(sid);
   else { S.openLogs.add(sid); pumpLogs(); }
-  renderServers();
+  renderServers(true);
 }
-function clearLogView(sid) { const el = $(`#logbox-${sid}`); if (el) el.textContent = ""; }
+function clearLogView(sid) {
+  S.logBuf[sid] = "";
+  const el = $(`#logbox-${sid}`);
+  if (el) { el.textContent = ""; el.dataset.len = 0; }
+}
+async function copyLog(sid) {
+  const txt = S.logBuf[sid] ?? "";
+  if (!txt) return toast("ログはまだ読み込まれていません");
+  try {
+    await navigator.clipboard.writeText(txt);
+    toast(`ログをコピーしました (${txt.length.toLocaleString()} 文字)`);
+  } catch {
+    // http(非安全)コンテキスト用フォールバック
+    const ta = document.createElement("textarea");
+    ta.value = txt; ta.style.position="fixed"; ta.style.top="-9999px";
+    document.body.appendChild(ta); ta.focus(); ta.setSelectionRange(0, txt.length);
+    let ok = false; try { ok = document.execCommand("copy"); } catch {}
+    ta.remove();
+    toast(ok ? `ログをコピーしました (${txt.length.toLocaleString()} 文字)` : "コピー権限がありません。画面クリア前に手動選択でお願いします");
+  }
+}
+async function downloadLog(sid) {
+  const s = (S.state.sessions||[]).find(x=>x.id===sid);
+  let txt = S.logBuf[sid];
+  if (txt == null) { try { txt = (await api(`/api/sessions/${sid}/log?cursor=0`)).text; } catch(e){ return toast("取得失敗: "+e.message);} }
+  const blob = new Blob([txt||""], {type:"text/plain;charset=utf-8"});
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${(s?.profile_name||"server")}_${sid}.log`;
+  a.click(); URL.revokeObjectURL(a.href);
+}
 async function pumpLogs() {
   for (const sid of S.openLogs) {
     try {
       const cur = S.logCursor[sid] || 0;
       const r = await api(`/api/sessions/${sid}/log?cursor=${cur}`);
+      let buf = S.logBuf[sid];
+      if (buf == null || r.cursor < cur) buf = r.text;          // 初回 / リセット
+      else if (r.text) buf += r.text;                            // 差分追記
+      S.logBuf[sid] = buf;
+      S.logCursor[sid] = r.cursor;
       const el = $(`#logbox-${sid}`);
       if (!el) continue;
-      if (r.cursor < cur) el.textContent = "";
-      if (r.text) {
-        if (el.textContent === "読み込み中…") el.textContent = "";
-        el.insertAdjacentText("beforeend", r.text);
-        if (S.autoScroll[sid] !== false &&
-            el.scrollHeight - el.scrollTop - el.clientHeight < 160) {
-          el.scrollTop = el.scrollHeight;
-        }
+      const written = el.dataset.len != null ? +el.dataset.len : -1;
+      if (written >= 0 && written <= buf.length) {
+        if (buf.length > written) el.insertAdjacentText("beforeend", buf.slice(written));  // 差分のみ (選択を壊さない)
+      } else {
+        el.textContent = buf;                                    // 復元 or 不等
       }
-      S.logCursor[sid] = r.cursor;
+      el.dataset.len = buf.length;
+      if (S.autoScroll[sid] !== false &&
+          el.scrollHeight - el.scrollTop - el.clientHeight < 160) {
+        el.scrollTop = el.scrollHeight;
+      }
     } catch { /* ignore */ }
   }
 }
