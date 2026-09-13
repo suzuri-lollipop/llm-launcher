@@ -169,7 +169,8 @@ def _spec(backend_id: str, flag: str) -> dict[str, Any]:
 
 def fld(backend_id: str, flag: str, label: str, *, section: str = "model",
         placeholder: str = "", help: str = "", default: str | None = None,
-        ftype: str | None = None, choices: list[str] | None = None) -> dict[str, Any]:
+        ftype: str | None = None, choices: list[str] | None = None,
+        default_on: bool = True, required: bool = False) -> dict[str, Any]:
     spec = _spec(backend_id, flag)
     ch = choices if choices is not None else spec.get("choices")
     t = ftype or spec.get("type") or "str"
@@ -189,7 +190,10 @@ def fld(backend_id: str, flag: str, label: str, *, section: str = "model",
             ch.insert(1, d)
     entry: dict[str, Any] = {"key": key, "flag": flag, "type": t, "label": label,
                              "section": section, "placeholder": placeholder,
-                             "default": str(d) if d != "" else "", "help": help or spec.get("help", "")[:160]}
+                             "default": str(d) if d != "" else "", "help": help or spec.get("help", "")[:160],
+                             "required": bool(required)}
+    # bool 以外の送信 ON/OFF 既定 (auto 決定を上書きしうる項目は False)
+    entry["default_on"] = bool(default_on) or bool(required)
     if t == "select":
         entry["options"] = ch
     return entry
@@ -447,8 +451,58 @@ def build_freetoken() -> dict[str, Any]:
     return _backend_meta(b, fields)
 
 
+# モジュール側が自動導出する項目: GUI 既定値で上書きしないよう既定 OFF (チェックで ON にすると送信)
+DEFAULT_OFF_KEYS: dict[str, set[str]] = {
+    "vllm": {"dtype", "load_format", "kv_cache_dtype", "generation_config",
+             "distributed_executor_backend", "seed", "max_model_len", "block_size",
+             "max_num_batched_tokens", "max_num_seqs", "max_logprobs", "max_loras",
+             "max_lora_rank", "tool_call_parser", "reasoning_parser",
+             "chat_template_content_format", "cpu_offload_gb"},
+    "sglang": {"dtype", "kv_cache_dtype", "load_format", "quantization",
+               "context_length", "json_model_override_args", "tp_size", "pp_size",
+               "dp_size", "ep_size", "mem_fraction_static", "max_running_requests",
+               "max_total_tokens", "chunked_prefill_size", "max_prefill_tokens",
+               "schedule_policy", "page_size", "watchdog_timeout", "radix_eviction_policy",
+               "hicache_ratio", "attention_backend", "sampling_backend", "grammar_backend",
+               "fp8_gemm_runner_backend", "cuda_graph_max_bs_decode", "cpu_offload_gb",
+               "base_gpu_id", "gpu_id_step", "random_seed", "tokenizer_worker_num",
+               "detokenizer_worker_num", "log_requests_level", "decode_log_interval",
+               "tool_call_parser", "reasoning_parser"},
+    "llamacpp": {"ctx_size", "n_gpu_layers", "batch_size", "ubatch_size", "parallel",
+                 "threads", "flash_attn", "load_mode", "defrag_thold", "cache_type_k",
+                 "cache_type_v", "temp", "top_k", "top_p", "min_p", "repeat_penalty",
+                 "presence_penalty", "frequency_penalty", "seed", "timeout_keep_alive",
+                 "reasoning", "spec_type", "chat_template", "lora", "alias"},
+    "freetoken": {"dtype", "model_source", "max_seq_len_override", "max_output_tokens",
+                  "sampling_defaults", "tp_size", "cuda_graph_max_bs", "num_tokenizer",
+                  "max_running_requests", "memory_ratio", "max_prefill_length", "page_size",
+                  "num_pages", "num_tokens", "kv_reserve_tokens", "cache_type",
+                  "moe_strategy", "expert_load", "quant_backend", "ple_backend",
+                  "nvfp4_backend", "moe_cache_size", "moe_cache_rate", "moe_cache_policy",
+                  "moe_cpu_threads", "moe_hybrid_max_fetch", "attention_backend",
+                  "decode_log_interval", "tool_call_parser", "reasoning_parser"},
+}
+
+# 常に送信する (無効化できない) 項目
+REQUIRED_KEYS: dict[str, set[str]] = {
+    "vllm": {"model", "host", "port"},
+    "sglang": {"model_path", "host", "port"},
+    "llamacpp": {"model", "host", "port"},
+    "freetoken": {"model_path", "host", "port"},
+}
+
+
 def _backend_meta(bid: str, fields: list[dict[str, Any]]) -> dict[str, Any]:
     meta = dict(_BACKEND_META[bid])
+    off = DEFAULT_OFF_KEYS.get(bid, set())
+    req = REQUIRED_KEYS.get(bid, set())
+    for f in fields:
+        if f["key"] in req:
+            f["required"] = True
+            f["default_on"] = True
+        elif f["type"] != "bool":
+            if f["key"] in off:
+                f["default_on"] = False
     meta["fields"] = fields
     return meta
 
@@ -558,6 +612,9 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
                 binary: str, root: Path) -> list[str]:
     """バックエンド + プロファイルから最終 argv を組み立てる。"""
     values: dict[str, Any] = profile.get("values") or {}
+    on = profile.get("on")
+    if not isinstance(on, dict):
+        on = None
     command = (profile.get("command") or "").strip() or backend["default_command"]
     resolved = resolve_command_tokens(root, command, python=python, binary=binary,
                                       values=values)
@@ -569,6 +626,10 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
     argv = shlex.split(resolved)
     for field in ([] if profile.get("custom_only") else backend.get("fields", [])):
         key = field["key"]
+        # 送信 ON/OFF: on dict が明示されたプロファイルのみ尊重 (無い=旧来動作=値があれば送信)
+        if on is not None and field["type"] != "bool" and not field.get("required"):
+            if not bool(on.get(key, field.get("default_on", True))):
+                continue
         val = values.get(key)
         if val is None:
             continue

@@ -57,9 +57,11 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 1. バックエンドのプルダウンを選択 (vLLM / SGLang / llama.cpp / FreeToken)
 2. 選んだ瞬間に、そのバックエンドの全起動パラメータがセクション別に並ぶ
    (モデル・提供設定 / 並列・分散 / スケジューリング・メモリ / 実行エンジン / サーバー・API / ツール呼び出し・LoRA / サンプリング / ログ)
-3. 各項目には実プロダクトの既定値が入力済み (--tp-size 1、--gpu-memory-utilization 0.9、--ctx-size 4096、--temp 0.80、--port 30000 …)。選択肢付き (dtype, quantization, attention backend, tool-call parser …) とフラグON/OFFもリストから操作
+3. 各項目には実プロダクトの**推奨値がプリフィル**され、さらに **☑「送信」チェックボックス**で各フラグを出す/出さないを切り替えられます。
+   OFF にした項目はコマンドに一切含まれず、**モジュール側の自動判定 (モデルの学習済みコンテキスト長、dtype auto、生成設定など) を上書きしません**。
+   特に自動導出されうる項目 (`--ctx-size` / `--max-model-len` / `--kv-cache-dtype` / `--mem-fraction-static` / attention バックエンド等) は既定 OFF+提案値表示、`--host`/`--port`/モデルなど必須項目は「必須」表示で常時 ON です
 4. **モデル欄には HF Hub キャッシュのプルダウンが付く**: `~/.cache/huggingface/hub` (または `HF_HUB_CACHE` / `HF_HOME`) をスキャンし、ダウンロード済みのモデルをパス直書きなしで選択できます (llama.cpp なら snapshot 内の .gguf ファイルまで選択可。「再スキャン」で更新)
-5. プレビューで最終コマンドを確認しながら編集。空欄にした項目はフラグ自体が付かないので、バックエンド本来の挙動に委ねられます
+5. プレビューで最終コマンドを確認しながら編集。ON かつ空欄でない項目だけが `--flag 値` として付きます
 
 ### コマンド組み立ての仕組み
 
@@ -76,7 +78,7 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 ## API (スクリプト等からも操作可能)
 
 - `GET /api/state` — 全体状態 (バックエンド / プロファイル / セッション)
-- `GET/POST/PUT/DELETE /api/profiles[/{id}]` — プロファイル CRUD。ボディは `{name, backend, values, extra_args, env, cwd, command, custom_only, note}` (旧 configs ボディは平坦化して互換受理)
+- `GET/POST/PUT/DELETE /api/profiles[/{id}]` — プロファイル CRUD。ボディは `{name, backend, values, on, extra_args, env, cwd, command, custom_only, note}`。`on` は各フラグの送信 ON/OFF (`{field_key: bool}`、**省略 = 旧来動作: 値があれば送信**)。旧 configs ボディは平坦化して互換受理
 - `POST /api/sessions` `{profile_id, force?}` — 起動 (バックエンドはプロファイルに従う。ポート衝突は 409、`force` で回避可)
 - `POST /api/sessions/{id}/stop` / `restart`、`GET /api/sessions/{id}/log?cursor=` — 停止 / 再起動 / ログ
 - `GET /api/backends/{id}` ... バックエンド設定・再検出

@@ -33,6 +33,8 @@ class ProfileBody(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     backend: str = ""
     values: dict[str, Any] = {}
+    # 各フラグの送信 ON/OFF (None = 旧来動作: 値があれば送信)
+    on: dict[str, bool] | None = None
     extra_args: str = ""
     env: dict[str, str] = {}
     cwd: str = ""
@@ -304,10 +306,13 @@ def create_app(root: Path) -> FastAPI:
                 raise HTTPException(400, f"環境変数名が無効です: {k}")
             if k:
                 env[k] = str(v)
+        togg = {f["key"] for f in BACKENDS[body.backend]["fields"] if f["type"] != "bool"}
+        on = None if body.on is None else {str(k): bool(v) for k, v in body.on.items() if k in togg}
         return {
             "name": body.name.strip(),
             "backend": body.backend,
             "values": {k: v for k, v in (body.values or {}).items()},
+            "on": on,
             "extra_args": body.extra_args or "",
             "env": env,
             "cwd": body.cwd or "",

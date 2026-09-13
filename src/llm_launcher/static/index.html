@@ -95,6 +95,14 @@ input:focus,select:focus,textarea:focus{outline:none;border-color:var(--acc)}
 .switch input:checked + .track{background:var(--ok)}
 .switch input:checked + .track::after{left:21px;background:#04101f}
 .switch .lab{font-size:13.5px}
+/* 項目ごとの送信 ON/OFF チップ */
+.fitem>label.f{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.onchip{margin-left:auto;display:inline-flex;align-items:center;gap:5px;font-size:10.5px;font-weight:700;
+  color:var(--sub);border:1px solid var(--line);border-radius:999px;padding:2px 9px;cursor:pointer;min-height:24px}
+.onchip input{width:14px;height:14px;accent-color:var(--ok);margin:0;cursor:pointer}
+.onchip.must{color:var(--acc);border-color:#254059;cursor:default}
+.fitem.off{opacity:.55}
+.fitem.off>label.f{opacity:1}
 .fgrid{display:grid}
 .sec-h{grid-column:1/-1;font-size:12px;font-weight:800;color:var(--acc);letter-spacing:.4px;
   border-top:1px solid var(--line);margin-top:14px;padding-top:10px}
@@ -503,7 +511,9 @@ async function delProfile(pid) {
 
 /* ============================================================= editor */
 /* バックエンドを選ぶと、そのプロジェクトの起動パラメータ一式が
-   既定値入りでフォームに表示される (引数をゼロから書く必要なし) */
+   既定値入りでフォームに表示される (引数をゼロから書く必要なし)
+   各項目の ☑ が「フラグ自体を送るか」のスイッチ。OFF の間はモジュール側の
+   auto / 生成設定判定に委ねられる (GUI 既定値で上書きしない)。 */
 function defaultsFor(b) {
   const v = {};
   (b?.fields || []).forEach(f => {
@@ -512,14 +522,30 @@ function defaultsFor(b) {
   });
   return v;
 }
+function defaultsOn(b, savedValues, savedOn) {
+  const on = {};
+  (b?.fields || []).forEach(f => {
+    if (f.type === "bool") return;
+    if (savedOn && f.key in savedOn) on[f.key] = !!savedOn[f.key];
+    else if (savedOn === null) on[f.key] = String((savedValues||{})[f.key] ?? "").trim() !== "" || !!f.default_on; // 旧プロファイル: 従来動作
+    else on[f.key] = !!f.default_on;
+  });
+  return on;
+}
 function openEditor(pid) {
   let draft;
   if (pid) {
     const p = profileById(pid); if (!p) return;
     draft = JSON.parse(JSON.stringify(p));
+    if (draft.on === undefined || draft.on === null) {
+      draft.on = defaultsOn(backendById(draft.backend), draft.values, null);
+    } else {
+      draft.on = defaultsOn(backendById(draft.backend), draft.values, draft.on);
+    }
   } else {
     const b = backendById("vllm");
-    draft = {name:"", backend:"vllm", values: defaultsFor(b), extra_args:"", env:{},
+    draft = {name:"", backend:"vllm", values: defaultsFor(b), on: defaultsOn(b, {}, {}),
+             extra_args:"", env:{},
              cwd:"", command:"", custom_only:false, note:""};
   }
   S.editing = draft;
@@ -537,6 +563,7 @@ function setBackend(bid) {
   collectDraft();                       // 現在の入力値は env/command 等を保持
   d.backend = bid;
   d.values = defaultsFor(b);            // パラメータはバックエンド既定値から出し直し
+  d.on = defaultsOn(b, {}, {});
   schedulePreview();
   renderEditor();
   toast(`${b.name} の起動パラメータを表示しました (既定値入り)`);
@@ -553,6 +580,9 @@ function collectDraft() {
   const e = inputVal("#ed-env");    if (e !== null) d.env = parseEnv(e);
   document.querySelectorAll("[data-fkey]").forEach(el => {
     d.values[el.dataset.fkey] = el.type === "checkbox" ? el.checked : el.value;
+  });
+  document.querySelectorAll("[data-onkey]").forEach(el => {
+    d.on[el.dataset.onkey] = el.checked;
   });
   return d;
 }
@@ -571,7 +601,7 @@ let previewTimer = null;
 function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeout(showPreview, 400); }
 function editorBody() {
   const d = collectDraft();
-  return {name:d.name, backend:d.backend, values:d.values, extra_args:d.extra_args,
+  return {name:d.name, backend:d.backend, values:d.values, on:d.on, extra_args:d.extra_args,
           env:d.env, cwd:d.cwd, command:d.command, custom_only:d.custom_only, note:d.note};
 }
 async function showPreview() {
@@ -638,15 +668,23 @@ function renderEditor() {
     if (f.type === "bool") return `
       <div><label class="switch"><input type="checkbox" id="${id}" data-fkey="${f.key}" ${val?"checked":""}>
       <span class="track"></span><span class="lab">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></span></label>${help}</div>`;
+    // 非 bool 項目: ☑=フラグを送る / ☐=モジュール側 auto 判定に委ねる
+    const on = d.on ? d.on[f.key] !== false : !!f.default_on;
+    const lock = f.required;
+    const toggle = lock
+      ? `<span class="onchip must">必須</span>`
+      : `<label class="onchip" title="このフラグを送信するか"><input type="checkbox" data-onkey="${f.key}" ${on?"checked":""}><span>送信</span></label>`;
+    const wrapCls = on || lock ? "fitem" : "fitem off";
     if (f.type === "select") return `
-      <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></label>
-      <select id="${id}" data-fkey="${f.key}">${(f.options||[]).map(o => `<option ${o===val?"selected":""} value="${esc(o)}">${o===""?"(指定しない)":esc(o)}</option>`).join("")}</select>${help}</div>`;
+      <div class="${wrapCls}"><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span>${toggle}</label>
+      <select id="${id}" data-fkey="${f.key}" ${on||lock?"":"disabled"}>${(f.options||[]).map(o => `<option ${o===val?"selected":""} value="${esc(o)}">${o===""?"(指定しない)":esc(o)}</option>`).join("")}</select>${help}${!on&&!lock?autoNote(f):""}</div>`;
     const t = f.type === "int" || f.type === "float" ? "number" : "text";
     const isModel = f.key === "model" || f.key === "model_path";
     return `
-      <div><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span></label>
-      <input type="${t}" ${f.type==="float"?'step="0.01"':""} inputmode="${t==="number"?"decimal":""}" id="${id}" data-fkey="${f.key}" value="${esc(val)}" placeholder="${esc(f.placeholder||"")}">${help}${isModel ? hfPickerHtml(f) : ""}</div>`;
+      <div class="${wrapCls}"><label class="f" for="${id}">${esc(f.label)} <span class="muted mono">${esc(f.flag)}</span>${toggle}</label>
+      <input type="${t}" ${f.type==="float"?'step="0.01"':""} inputmode="${t==="number"?"decimal":""}" id="${id}" data-fkey="${f.key}" value="${esc(val)}" placeholder="${esc(f.placeholder||"")}" ${on||lock?"":"disabled"}>${help}${!on&&!lock?autoNote(f):""}${isModel ? hfPickerHtml(f) : ""}</div>`;
   };
+  const autoNote = f => `<div class="muted" style="font-size:11px;margin-top:2px;color:var(--warn)">☐ 未送信 — ${esc(f.flag)} は ${esc(b?.name||"")} 側の自動判定に任せます</div>`;
   // バックエンドごとにパラメータをセクション別へリスト化 (既定値プリフィル済み)
   const sections = (b?.sections?.length ? b.sections : [{id:"model", label:"モデル"}]);
   const fieldsHtml = sections.map(sec => {
@@ -664,7 +702,7 @@ function renderEditor() {
       ${(S.state?.backends||[]).map(bb => `<option value="${bb.id}" ${bb.id===d.backend?"selected":""}>${esc(bb.name)}</option>`).join("")}
     </select>
     <div class="muted" style="margin-top:6px">${esc(b?.desc || "")}</div>
-    <h2 class="view-title" style="margin:16px 2px 0">起動パラメータ <span class="muted">(${esc(b?.name||"")} 全項目リスト化・既定値入り。変更する項目だけ編集してください)</span></h2>
+    <h2 class="view-title" style="margin:16px 2px 0">起動パラメータ <span class="muted">(${esc(b?.name||"")} 既定値入り・☑送信 の項目だけコマンドに付きます。☐の項目はモジュール側の自動判定に委ねられるため上書きされません)</span></h2>
     <div class="fgrid" style="margin-top:4px">${fieldsHtml}</div>
     ${legacyExtra ? `
     <details class="adv" open>
@@ -702,6 +740,14 @@ function renderEditor() {
     };
     el.addEventListener("input", upd);
     el.addEventListener("change", upd);
+  });
+  sheet.querySelectorAll("[data-onkey]").forEach(el => {
+    el.addEventListener("change", () => {
+      collectDraft();
+      S.editing.on[el.dataset.onkey] = el.checked;
+      renderEditor();            // 送信 OFF→ON で入力欄の disabled を解く
+      schedulePreview();
+    });
   });
   ["ed-extra","ed-env","ed-command","ed-cwd"].forEach(id => {
     const el = $(`#${id}`);
@@ -782,8 +828,8 @@ async function redetect(bid) {
 }
 function newProfileFor(bid) {
   const b = backendById(bid); if (!b) return;
-  S.editing = {name:"", backend:bid, values: defaultsFor(b), extra_args:"", env:{},
-               cwd:"", command:"", custom_only:false, note:""};
+  S.editing = {name:"", backend:bid, values: defaultsFor(b), on: defaultsOn(b, {}, {}),
+               extra_args:"", env:{}, cwd:"", command:"", custom_only:false, note:""};
   $("#modal").style.display = "flex"; $("#modal-veil").style.display = "block";
   renderEditor();
 }
