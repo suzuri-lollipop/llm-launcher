@@ -19,7 +19,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
-from .backends import (SECTIONS_JA, BACKENDS, resolve_port, sections_order)
+from .backends import (SECTIONS_JA, BACKENDS, python_candidates, resolve_port,
+                       sections_order)
 from .process import ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 
@@ -215,25 +216,46 @@ def create_app(root: Path) -> FastAPI:
             "detail": "",
         }
         if b["kind"] == "python":
-            python = manager.resolve_python(backend_id)
-            info["python"] = python
-            try:
-                proc = await asyncio.wait_for(
-                    asyncio.create_subprocess_exec(
-                        python, "-c",
-                        "import importlib.util,sys;"
-                        "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)",
-                        b["check_module"],
-                        stdout=asyncio.subprocess.DEVNULL,
-                        stderr=asyncio.subprocess.DEVNULL,
-                    ),
-                    timeout=5,
-                )
-                rc = await asyncio.wait_for(proc.wait(), timeout=15)
-                info["installed"] = rc == 0
-                info["detail"] = f"python: {python}"
-            except Exception as e:  # noqa: BLE001
-                info["detail"] = f"検出失敗: {e}"
+            # 候補 (module/.venv → GUI .venv → launcher) の順に実 import を試し、
+            # 実際に使える python を解決して次回起動から使う
+            override = (manager._backend_setting(backend_id).get("python") or "").strip()
+            cands = ([("明示設定", override)] if override else []) + \
+                python_candidates(root, b.get("module_path"))
+            chosen = None
+            tried: list[str] = []
+            for label, py in cands:
+                if not Path(py).exists():
+                    continue
+                tried.append(f"{label}: {py}")
+                try:
+                    proc = await asyncio.wait_for(
+                        asyncio.create_subprocess_exec(
+                            py, "-c",
+                            "import importlib.util,sys;"
+                            "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)",
+                            b["check_module"],
+                            stdout=asyncio.subprocess.DEVNULL,
+                            stderr=asyncio.subprocess.DEVNULL,
+                        ),
+                        timeout=5,
+                    )
+                    rc = await asyncio.wait_for(proc.wait(), timeout=20)
+                except Exception as e:  # noqa: BLE001
+                    tried[-1] += f" (検出失敗: {e})"
+                    continue
+                if rc == 0:
+                    chosen = py
+                    break
+            if chosen:
+                info["installed"] = True
+                info["python"] = chosen
+                manager.set_resolved_python(backend_id, chosen)
+                info["detail"] = f"python: {chosen}"
+            else:
+                py = manager.resolve_python(backend_id)
+                info["python"] = py
+                info["installed"] = False
+                info["detail"] = f"未検出 ({b['check_module']} import 不可)。試行: {' | '.join(tried) or '利用可能な python なし'}"
         else:
             binary = manager.resolve_binary(backend_id)
             info["installed"] = bool(binary)

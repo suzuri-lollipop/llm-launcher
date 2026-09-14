@@ -565,8 +565,22 @@ BACKENDS: dict[str, dict[str, Any]] = {
 # ---------------------------------------------------------------------------
 
 
+def python_candidates(root: Path, module_path: str | None = None) -> list[tuple[str, str]]:
+    """{python} トークンの解決候補 (優先順)。
+    1. バックエンド submodule 自身の .venv (module/<name>/.venv — uv sync の既定)
+    2. GUI(llm-launcher)の .venv
+    3. launcher 自身を実行中の python
+    """
+    out: list[tuple[str, str]] = []
+    if module_path:
+        out.append((f"module venv ({module_path})", str(root / module_path / ".venv" / "bin" / "python")))
+    out.append(("GUI venv", str(root / ".venv" / "bin" / "python")))
+    out.append(("launcher python", sys.executable))
+    return out
+
+
 def default_python(root: Path) -> str:
-    """プロジェクト .venv の python。無ければ launcher 自身の python。"""
+    """後方互換: GUI .venv か self。"""
     venv = root / ".venv" / "bin" / "python"
     return str(venv) if venv.exists() else sys.executable
 

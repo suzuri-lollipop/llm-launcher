@@ -36,7 +36,7 @@ uv run llm-launcher
 
 - `--host` / `--port` オプション、または `LLM_LAUNCHER_HOST` / `LLM_LAUNCHER_PORT` 環境変数で変更可能
 - バックエンド自体のインストールは各自の環境に依存します:
-  - vLLM / SGLang / FreeToken: `uv pip install vllm` など (既定ではプロジェクト `.venv` の python を使用。バックエンド画面で python パスを上書きできます)
+  - **vLLM / SGLang / FreeToken**: 各 `module/<name>` 内で `uv sync` (または `uv pip install -e .`) して作られる **`module/<name>/.venv` を自動検出**して使います。解決順は `明示設定 > module/<name>/.venv > GUI(llm-launcher)の .venv > launcher 自身`。検出時は各候補で実際の import を試し、成功した python を起動に使用します (バックエンド画面の「検出詳細」に試行結果を表示)
   - llama.cpp: `module/llama.cpp` をビルドすると `build/bin/llama-server` を自動検出。PATH 上の `llama-server` も対象。ビルド前でもバックエンド画面でパスを直接指定できます
 
 ```bash

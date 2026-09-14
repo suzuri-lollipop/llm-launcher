@@ -7,12 +7,13 @@ import json
 import os
 import signal
 import socket
+import sys
 import time
 import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .backends import (BACKENDS, default_python, render_argv, resolve_binary,
+from .backends import (BACKENDS, python_candidates, render_argv, resolve_binary,
                        resolve_port)
 from .store import JsonStore, new_id, now
 
@@ -45,6 +46,7 @@ class ProcessManager:
         self.log_dir = root / "data" / "logs"
         self.log_dir.mkdir(parents=True, exist_ok=True)
         self.sessions: dict[str, dict[str, Any]] = {s["id"]: s for s in runs_store.load()}
+        self._py_choice: dict[str, str] = {}   # 検出済みの実行可 python
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         self._log_handles: dict[str, Any] = {}
         self._monitors: dict[str, asyncio.Task] = {}
@@ -61,7 +63,22 @@ class ProcessManager:
         return dict((self.settings.load().get("backends") or {}).get(backend_id) or {})
 
     def resolve_python(self, backend_id: str) -> str:
-        return self._backend_setting(backend_id).get("python") or default_python(self.root)
+        """{python} 解決: 明示設定 > 検出済み実行可 python > module .venv > GUI .venv > self。"""
+        override = self._backend_setting(backend_id).get("python")
+        if override:
+            return override
+        cached = self._py_choice.get(backend_id)
+        if cached and Path(cached).exists():
+            return cached
+        b = BACKENDS.get(backend_id) or {}
+        for _, path in python_candidates(self.root, b.get("module_path")):
+            if Path(path).exists():
+                return path
+        return sys.executable
+
+    def set_resolved_python(self, backend_id: str, path: str) -> None:
+        """検出タスクが「実際に import できた python」を確定したらここに反映。"""
+        self._py_choice[backend_id] = path
 
     def resolve_binary(self, backend_id: str) -> str:
         b = BACKENDS[backend_id]

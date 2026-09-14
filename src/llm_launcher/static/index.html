@@ -1023,7 +1023,8 @@ function renderBackends() {
       <label class="f">コマンド上書き <span class="muted">(空 = 既定)</span></label>
       <input type="text" class="mono" id="bk-cmd-${b.id}" value="${esc(b.command !== b.default_command ? b.command : "")}" placeholder="${esc(b.default_command)}">
       <label class="f">${b.kind === "python" ? "Python パス ({python} に展開)" : "バイナリパス ({llama_server} に展開)"}</label>
-      <input type="text" class="mono" id="bk-py-${b.id}" value="${esc(b.kind==="python" ? (b.python_override || det.python || "") : (b.binary_override || ""))}" placeholder="${b.kind==="python" ? "既定: プロジェクト .venv" : "既定: 自動検出 (build/bin or PATH)"}">
+      <input type="text" class="mono" id="bk-py-${b.id}" value="${esc(b.kind==="python" ? (b.python_override || det.python || "") : (b.binary_override || ""))}" placeholder="${b.kind==="python" ? "既定: 自動検出 (module/.venv → GUI .venv → launcher)" : "既定: 自動検出 (build/bin or PATH)"}">
+      ${b.kind === "python" ? `<div class="muted" style="font-size:11px;margin-top:3px">既定の解決順: ${esc(b.module_path)}/.venv → GUI(llm-launcher)の .venv → launcher 自身。検出は各候補で実際の import を試し、成功したものを使用します</div>` : ""}
       <div class="row" style="margin-top:12px">
         <button class="primary" onclick="saveBackend('${b.id}')">保存</button>
         <button class="ghost" onclick="resetBackend('${b.id}')">リセット</button>
