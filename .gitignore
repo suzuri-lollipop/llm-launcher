@@ -15,3 +15,8 @@ wheels/
 module/*/build/
 module/*/build-*/
 *.egg-info/
+
+# フォーク専用クローン置き場 module/fork/
+# 追跡は module/fork/ フォルダまで (.gitkeep と README.md)。
+# 配下に clone したフォークリポジトリ自体は一切追跡しない (submodule 化もしない)
+module/fork/*/
