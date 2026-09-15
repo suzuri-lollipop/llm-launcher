@@ -1,6 +1,8 @@
 """バックエンド(vllm / sglang / llama.cpp / FreeToken)の定義と起動コマンド組み立て。
 
-各バックエンドは `module/` 配下の git submodule として登録されている。
+各バックエンドは通常 `module/` 配下の git submodule だが、
+フォーク (freetoken-fork) は `module/fork/` 配下の非追跡 clone を使う
+(フォルダの .gitkeep だけを追跡。詳しくは module/fork/README.md)。
 
 設計:
   - 起動引数の **型・choices・既定値** は `fields/<backend>.json` 正表が権威。
@@ -24,12 +26,20 @@ from typing import Any
 
 FIELDS_DIR = Path(__file__).parent / "fields"
 
+# 派生バックエンド (fork 等) は専用の fields/<id>.json があるまで基底の正表を流用する。
+# `python -m llm_launcher.gen_fields` で fork ソースから生成すればそれが優先される。
+TABLE_FALLBACK: dict[str, str] = {"freetoken-fork": "freetoken"}
+
 _tables: dict[str, dict[str, Any]] = {}
 
 
 def load_table(backend_id: str) -> dict[str, Any]:
     if backend_id not in _tables:
-        p = FIELDS_DIR / f"{backend_id}.json"
+        bid = backend_id
+        p = FIELDS_DIR / f"{bid}.json"
+        if not p.exists() and bid in TABLE_FALLBACK:
+            bid = TABLE_FALLBACK[bid]
+            p = FIELDS_DIR / f"{bid}.json"
         _tables[backend_id] = json.loads(p.read_text("utf-8")) if p.exists() else {}
     return _tables[backend_id]
 
@@ -148,8 +158,9 @@ def _spec(backend_id: str, flag: str) -> dict[str, Any]:
         spec = {**spec, **{k: v for k, v in LLAMA_SUPPLEMENT.get(flag, {}).items() if v not in (None, [])}}
     sup = (VLLM_SUPPLEMENT if backend_id == "vllm" else {})
     spec = {**sup.get(flag, {}), **{k: v for k, v in spec.items() if v not in (None, [])}} if backend_id == "vllm" else spec
-    if flag in CHOICE_SUPPLEMENT.get(backend_id, {}):
-        spec = {**spec, "choices": CHOICE_SUPPLEMENT[backend_id][flag]}
+    ch_key = backend_id if backend_id in CHOICE_SUPPLEMENT else TABLE_FALLBACK.get(backend_id, backend_id)
+    if flag in CHOICE_SUPPLEMENT.get(ch_key, {}):
+        spec = {**spec, "choices": CHOICE_SUPPLEMENT[ch_key][flag]}
     d = spec.get("default")
     if isinstance(d, str) and (d.strip().lower() in _JUNK_DEFAULTS or d.strip() in ("()", "[]", "{}")):
         spec.pop("default")
@@ -396,8 +407,8 @@ def build_llamacpp() -> dict[str, Any]:
     return _backend_meta(b, fields)
 
 
-def build_freetoken() -> dict[str, Any]:
-    b = "freetoken"
+def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
+    b = bid
     F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
     fields = [
         F("--model-path", "モデル", placeholder="deepseek-ai/DeepSeek-V4 など"),
@@ -448,6 +459,24 @@ def build_freetoken() -> dict[str, Any]:
         F("--reasoning-parser", "reasoningパーサ", section="tools"),
         F("--decode-log-interval", "decodeログ間隔", section="logs"),
     ]
+    if bid == "freetoken-fork":
+        # fork ソース (suzuri/develop) の server/args.py に実在する fork 独自の追加項目。
+        # 型・choices・既定値は fields/freetoken-fork.json 正表 (gen_fields 生成) から解決される。
+        fields += [
+            F("--image-max-tokens", "画像最大トークン", placeholder="自動"),
+            F("--image-min-tokens", "画像最小トークン", placeholder="自動"),
+            F("--kv-cache-dtype", "KVキャッシュ量子化", section="cache",
+              help="fp8 系で KV メモリを削減"),
+            F("--kv-cache-quant-scale", "KV量子化スケール", section="cache", ftype="float", placeholder="1.0"),
+            F("--mm-embed-cache-device", "画像埋め込みキャッシュDEV", section="cache"),
+            F("--mm-encoder-weights", "エンコーダ重み配置", section="cache"),
+            F("--allowed-local-media-path", "ローカルメディア許可DIR", section="server",
+              help="file:// 画像参照の読み込み許可ディレクトリ"),
+            F("--allowed-media-domains", "メディアURL許可domain", section="server",
+              placeholder="カンマ区切り", help="クライアント指定の画像URLのホスト許可リスト"),
+        ]
+        DEFAULT_OFF_KEYS[bid] |= {"image_max_tokens", "image_min_tokens", "kv_cache_dtype",
+                                  "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights"}
     return _backend_meta(b, fields)
 
 
@@ -490,6 +519,10 @@ REQUIRED_KEYS: dict[str, set[str]] = {
     "llamacpp": {"model", "host", "port"},
     "freetoken": {"model_path", "host", "port"},
 }
+
+# fork バックエンドは基底 (freetoken) と同じ送信ポリシー (コピーして派生 = 個別追加可)
+DEFAULT_OFF_KEYS["freetoken-fork"] = set(DEFAULT_OFF_KEYS["freetoken"])
+REQUIRED_KEYS["freetoken-fork"] = set(REQUIRED_KEYS["freetoken"])
 
 
 def _backend_meta(bid: str, fields: list[dict[str, Any]]) -> dict[str, Any]:
@@ -550,6 +583,17 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["Uvicorn running", "Application startup complete"],
         "default_port": "1919",
     },
+    "freetoken-fork": {
+        "id": "freetoken-fork", "name": "FreeToken (fork)",
+        "repo": "https://github.com/suzuri-lollipop/FreeToken",
+        "module_path": "module/fork/freetoken", "kind": "python",
+        "desc": "FreeToken フォーク。module/fork/freetoken の clone を直接使用する"
+                " (llm-launcher 側ではフォルダのみ追跡、内容は追跡しない)。",
+        "default_command": "{python} -m freetoken",
+        "check_module": "freetoken", "health_path": "/health",
+        "ready_markers": ["Uvicorn running", "Application startup complete"],
+        "default_port": "1919",
+    },
 }
 
 BACKENDS: dict[str, dict[str, Any]] = {
@@ -557,6 +601,7 @@ BACKENDS: dict[str, dict[str, Any]] = {
     "sglang": build_sglang(),
     "llamacpp": build_llamacpp(),
     "freetoken": build_freetoken(),
+    "freetoken-fork": build_freetoken("freetoken-fork"),
 }
 
 

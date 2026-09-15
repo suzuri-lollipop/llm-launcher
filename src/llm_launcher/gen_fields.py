@@ -25,9 +25,9 @@ def _repo(root: Path, mod: str) -> Path:
 
 
 # ---------------------------------------------------------------- FreeToken
-def gen_freetoken(root: Path) -> dict[str, Any]:
+def gen_freetoken(root: Path, mod: str = "freetoken") -> dict[str, Any]:
     from .util_ast import collect_dataclass_defaults, collect_module_constants
-    base = _repo(root, "freetoken") / "python/freetoken"
+    base = _repo(root, mod) / "python/freetoken"
     args_py = base / "server/args.py"
     src = args_py.read_text()
     tree = ast.parse(src)
@@ -317,12 +317,19 @@ def _choices(node: ast.AST, defaults: dict, consts: dict | None = None) -> list[
 
 
 def build(root: Path) -> dict[str, dict[str, Any]]:
-    return {
+    tables = {
         "freetoken": gen_freetoken(root),
         "sglang": gen_sglang(root),
         "vllm": gen_vllm(root),
         "llamacpp": gen_llamacpp(root),
     }
+    # フォーク (module/fork/freetoken): clone 済みなら fork ソースから正表を生成。
+    # 未 clone 時は skip し、backends.py の TABLE_FALLBACK で基底表が流用される。
+    if (_repo(root, "fork/freetoken") / "python/freetoken/server/args.py").exists():
+        tables["freetoken-fork"] = gen_freetoken(root, "fork/freetoken")
+    else:
+        print("freetoken-fork: module/fork/freetoken が未クローンのため skip", flush=True)
+    return tables
 
 
 def main() -> None:
