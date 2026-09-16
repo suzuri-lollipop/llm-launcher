@@ -20,3 +20,6 @@ module/*/build-*/
 # 追跡は module/fork/ フォルダまで (.gitkeep と README.md)。
 # 配下に clone したフォークリポジトリ自体は一切追跡しない (submodule 化もしない)
 module/fork/*/
+
+# 開発用スクラッチ (検証スクリプト・テスト一時ファイル)
+.scratch/
