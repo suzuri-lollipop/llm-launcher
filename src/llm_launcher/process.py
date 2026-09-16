@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import shutil
 import signal
 import socket
 import sys
@@ -115,6 +116,20 @@ class ProcessManager:
         port = resolve_port(backend, profile, argv)
 
         env = os.environ.copy()
+        # venv の python を絶対パスで直接起動しても bin/ は PATH に入らない
+        # (追加するのは activate スクリプトの仕事)。flashinfer JIT のように
+        # venv 内ツール (ninja 等) を PATH 経由で呼ぶ処理が落ちるため補う。
+        extra_paths: list[str] = []
+        launch_bin = Path(argv[0]).parent
+        if (launch_bin.parent / "pyvenv.cfg").exists():
+            extra_paths.append(str(launch_bin))
+        # nvcc が PATH のどこにも無いとき flashinfer は JIT を諦めるため、
+        # PyTorch 本体と同じ /usr/local/cuda フォールバックを先回しで補う。
+        if shutil.which("nvcc", path=env.get("PATH")) is None \
+                and Path("/usr/local/cuda/bin/nvcc").exists():
+            extra_paths.append("/usr/local/cuda/bin")
+        if extra_paths:
+            env["PATH"] = os.pathsep.join([*extra_paths, env.get("PATH", "")])
         for k, v in (profile.get("env") or {}).items():
             if k.strip():
                 env[k.strip()] = str(v)
