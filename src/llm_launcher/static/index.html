@@ -18,7 +18,8 @@ html,body{margin:0;padding:0}
 body{
   background:var(--bg); color:var(--text);
   font-family:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
-  font-size:15px; line-height:1.55; padding-bottom:calc(72px + env(safe-area-inset-bottom));
+  font-size:15px; line-height:1.55;
+  padding-left:56px; padding-bottom:calc(20px + env(safe-area-inset-bottom));
 }
 a{color:var(--acc); text-decoration:none}
 header{
@@ -52,7 +53,7 @@ button.danger{color:var(--err);border-color:#4c2a30}
 button.ghost{background:transparent}
 button:disabled{opacity:.45;cursor:default}
 .badge{display:inline-flex;align-items:center;gap:5px;font-size:11.5px;font-weight:700;
-  padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--sub);background:var(--bg2)}
+  padding:3px 9px;border-radius:999px;border:1px solid var(--line);color:var(--sub);background:var(--bg2);white-space:nowrap;flex:none}
 .badge .dot{width:7px;height:7px;border-radius:50%;background:currentColor}
 .badge.ok{color:var(--ok);border-color:#274d38;background:#12251c}
 .badge.warn{color:var(--warn);border-color:#4d3d1f;background:#241d10}
@@ -62,25 +63,39 @@ button:disabled{opacity:.45;cursor:default}
 .chip{font-size:11.5px;font-weight:700;padding:2.5px 8px;border-radius:6px;color:#04101f;display:inline-flex;align-items:center;gap:5px}
 .chip.vllm{background:var(--vllm)} .chip.sglang{background:var(--sglang)}
 .chip.llamacpp{background:var(--llamacpp)} .chip.freetoken{background:var(--purple);color:#1a1626}
+.chip.freetoken-fork{background:var(--freetoken);color:#1a1626}
 .filters{display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;scrollbar-width:none}
 .filters::-webkit-scrollbar{display:none}
 .fchip{border:1px solid var(--line);background:var(--bg2);color:var(--sub);border-radius:999px;
   padding:7px 14px;font-size:13px;white-space:nowrap;cursor:pointer;min-height:36px}
 .fchip.on{background:var(--acc);border-color:var(--acc);color:#04101f;font-weight:700}
-nav#tabbar{
-  position:fixed;left:0;right:0;bottom:0;z-index:30;
-  background:rgba(21,26,34,.95);backdrop-filter:blur(12px);
-  border-top:1px solid var(--line);
-  display:flex;padding-bottom:env(safe-area-inset-bottom);
+/* ---------------- 左サイドバー: ハンバーガーメニュー ---------------- */
+nav#sidemen{
+  position:fixed;left:0;top:0;bottom:0;z-index:30;width:56px;
+  background:rgba(21,26,34,.97);backdrop-filter:blur(12px);
+  border-right:1px solid var(--line);
+  display:flex;flex-direction:column;gap:2px;
+  padding:calc(8px + env(safe-area-inset-top)) 8px calc(8px + env(safe-area-inset-bottom));
+  transition:width .22s ease,box-shadow .22s ease;
 }
-nav#tabbar button{
-  flex:1;background:transparent;border:0;border-radius:0;min-height:58px;
-  flex-direction:column;gap:2px;font-size:11px;color:var(--sub);position:relative;
+nav#sidemen.open{width:268px;box-shadow:10px 0 30px rgba(0,0,0,.55)}
+#menu-btn{width:40px;height:40px;min-height:40px;padding:0;flex:none;
+  background:transparent;border:0;border-radius:var(--r2);font-size:20px;color:var(--text);justify-content:center}
+#menu-btn:hover{background:var(--card2)}
+.menu-items{display:flex;flex-direction:column;gap:2px;margin-top:10px;overflow-x:hidden}
+nav#sidemen:not(.open) .menu-items{display:none}
+nav#sidemen .mitem{
+  width:100%;background:transparent;border:0;border-radius:var(--r2);
+  min-height:44px;padding:0 10px;justify-content:flex-start;gap:12px;
+  font-size:14px;color:var(--sub);white-space:nowrap;flex:none;
 }
-nav#tabbar button .ico{font-size:20px;line-height:1}
-nav#tabbar button.on{color:var(--acc)}
-nav#tabbar button .nbadge{position:absolute;top:8px;right:calc(50% - 26px);
-  background:var(--err);color:#fff;font-size:10px;font-weight:800;border-radius:999px;padding:1px 5px}
+nav#sidemen .mitem:hover{background:var(--card2)}
+nav#sidemen .mitem.on{color:var(--acc);background:var(--bg2);font-weight:700}
+nav#sidemen .mitem .ico{font-size:19px;line-height:1;width:24px;text-align:center;flex:none}
+nav#sidemen .mitem .nbadge{margin-left:auto;background:var(--err);color:#fff;
+  font-size:10.5px;font-weight:800;border-radius:999px;padding:1px 7px}
+#menu-veil{position:fixed;inset:0;background:rgba(4,7,11,.55);z-index:29;display:none}
+#menu-veil.on{display:block}
 label.f{display:block;font-size:12.5px;color:var(--sub);margin:12px 0 4px;font-weight:600}
 input[type=text],input[type=number],select,textarea{
   width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r2);
@@ -128,7 +143,7 @@ details.adv .inner{padding:0 12px 12px}
 #modal .sheet h3{margin:2px 0 6px;font-size:16px}
 .sheet-actions{display:flex;gap:10px;margin-top:18px;position:sticky;bottom:-16px;background:var(--card);padding:10px 0 0}
 #toast{
-  position:fixed;left:50%;transform:translateX(-50%);bottom:calc(84px + env(safe-area-inset-bottom));
+  position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom));
   background:#252d38;border:1px solid var(--line);color:var(--text);
   padding:10px 18px;border-radius:999px;font-size:13.5px;z-index:60;display:none;max-width:92vw;
   box-shadow:0 8px 24px rgba(0,0,0,.5);white-space:pre-wrap;
@@ -139,6 +154,56 @@ details.adv .inner{padding:0 12px 12px}
 .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--sub);border-top-color:transparent;border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
 .hidden{display:none!important}
+/* ---------------- dashboard (ホーム) ---------------- */
+a.btn,a.btn:hover{color:var(--text);text-decoration:none}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px}
+button.tile{display:flex;flex-direction:column;align-items:flex-start;border-radius:var(--r);background:var(--card);padding:12px 14px;min-height:0;gap:0}
+button.tile .t-k{font-size:12px;color:var(--sub);white-space:nowrap}
+button.tile .t-v{font-size:25px;font-weight:800;line-height:1.25;font-variant-numeric:tabular-nums}
+button.tile .t-s{font-size:11.5px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+button.tile.ok .t-v{color:var(--ok)} button.tile.warn .t-v{color:var(--warn)}
+button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
+.dash-2col{display:grid;gap:12px;align-items:start}
+@media(min-width:760px){.dash-2col{grid-template-columns:1fr 1.15fr}}
+.card-h{font-size:12px;font-weight:800;color:var(--acc);letter-spacing:.4px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
+.meter{margin:10px 0}
+.m-hd{display:flex;align-items:baseline;gap:8px;font-size:12.5px;color:var(--sub);min-width:0}
+.m-hd b{color:var(--text);font-size:13px;font-weight:700}
+.m-hd .r{margin-left:auto;color:var(--text);font-variant-numeric:tabular-nums;font-size:12px;white-space:nowrap}
+.mbar{height:8px;border-radius:999px;background:var(--bg2);border:1px solid var(--line);overflow:hidden;margin-top:5px}
+.mbar i{display:block;height:100%;border-radius:999px;background:var(--acc);transition:width .5s}
+.mbar i.ok{background:var(--ok)} .mbar i.warn{background:var(--warn)} .mbar i.err{background:var(--err)}
+.gpu-item{margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}
+.mini{display:flex;align-items:center;gap:8px;padding:8px 2px;border-bottom:1px solid var(--line);font-size:13.5px;min-width:0}
+.mini:last-child{border-bottom:0}
+/* ---------------- playground ---------------- */
+#pg-msgs{max-height:56vh;min-height:130px;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:2px 2px 6px}
+.pg-msg{max-width:86%;padding:9px 12px;border-radius:12px;border:1px solid var(--line);font-size:14px;overflow-wrap:break-word;word-break:normal}
+.pg-msg.me{align-self:flex-end;background:#16283e;border-color:#254059;border-bottom-right-radius:4px}
+.pg-msg.ai{align-self:flex-start;background:var(--card2);border-bottom-left-radius:4px}
+.pg-msg .who{font-size:11px;font-weight:800;color:var(--sub);letter-spacing:.4px;margin-bottom:2px;display:flex;gap:8px;align-items:center}
+.pg-msg.me .who{color:var(--acc)}
+.pg-meta{display:flex;gap:8px;font-size:11px;color:var(--sub);margin-top:6px;align-items:center;flex-wrap:wrap}
+.pg-body p{margin:0 0 6px}
+.pg-body p:last-child{margin-bottom:0}
+.pg-pre{background:#0a0d12;border:1px solid var(--line);border-radius:8px;margin:8px 0;overflow:hidden}
+.pg-pre code{display:block;padding:10px 12px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px;white-space:pre;overflow:auto;color:#9fd3a8}
+.pg-pre-hd{display:flex;justify-content:space-between;align-items:center;padding:3px 8px;background:var(--bg2);border-bottom:1px solid var(--line);font-size:11px;color:var(--sub)}
+.pg-ic{background:var(--bg2);border:1px solid var(--line);border-radius:4px;padding:0 5px;font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12.5px;color:#9fd3a8}
+.pg-reason{margin:0 0 8px;padding:6px 10px;border:1px dashed var(--line);border-radius:8px;color:var(--sub);font-size:12.5px}
+.pg-reason summary{cursor:pointer;color:var(--purple);font-weight:700;font-size:12px}
+.pg-reason .rb{white-space:pre-wrap;margin-top:6px;overflow-wrap:anywhere}
+.pg-cursor::after{content:"▍";color:var(--acc);animation:pgblink 1s steps(1) infinite}
+@keyframes pgblink{50%{opacity:0}}
+#pg-input{resize:vertical;min-height:58px;font-family:inherit;font-size:14px}
+.pg-err{color:var(--err)}
+/* ---------------- benchmarks ---------------- */
+.bm-wrap{overflow-x:auto;margin-top:10px}
+table.bm{border-collapse:collapse;width:100%;font-size:12.5px;white-space:nowrap}
+table.bm th,table.bm td{padding:6px 9px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums}
+table.bm th:first-child,table.bm td:first-child{text-align:left}
+table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
+.nbadge.run{background:var(--acc);color:#04101f}
 </style>
 </head>
 <body>
@@ -149,7 +214,41 @@ details.adv .inner{padding:0 12px 12px}
 </header>
 
 <main>
-  <section id="view-launch" class="view">
+  <section id="view-home" class="view">
+    <h2 class="view-title">ダッシュボード <span class="muted" id="home-clock">--:--:--</span></h2>
+    <div id="home-notices"></div>
+    <div class="tiles" id="home-tiles"></div>
+    <div class="dash-2col" style="margin-top:12px">
+      <div class="card">
+        <div class="card-h">ホスト</div>
+        <div class="kvs" id="home-host"></div>
+      </div>
+      <div class="card">
+        <div class="card-h">リソース使用率</div>
+        <div id="home-meters"><span class="muted"><span class="spin"></span> 読み込み中…</span></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-h">GPU</div>
+      <div id="home-gpus"></div>
+    </div>
+    <div class="dash-2col" style="margin-top:12px">
+      <div class="card" style="margin:0">
+        <div class="card-h">稼働中サーバー <span class="badge" id="home-live-count" style="margin-left:auto"></span></div>
+        <div id="home-live"></div>
+      </div>
+      <div class="card" style="margin:0">
+        <div class="card-h">バックエンド状態</div>
+        <div id="home-backends"></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-h">最近のセッション <button class="ghost" style="margin-left:auto;min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('servers')">すべて見る →</button></div>
+      <div id="home-recent"></div>
+    </div>
+  </section>
+
+  <section id="view-launch" class="view hidden">
     <div id="running-strip"></div>
     <h2 class="view-title">起動するサーバーを選ぶ</h2>
     <div class="filters" id="launch-filters"></div>
@@ -198,14 +297,94 @@ details.adv .inner{padding:0 12px 12px}
     <h2 class="view-title">バックエンド設定 <span class="muted">(module/ のサブモジュール)</span></h2>
     <div class="grid c2" id="backends-grid"></div>
   </section>
+
+  <section id="view-playground" class="view hidden">
+    <h2 class="view-title">プレイグラウンド <span class="muted">起動中のサーバーとチャット (OpenAI 互換 API 透過プロキシ)</span></h2>
+    <div class="card" style="padding:10px 12px">
+      <div class="row" style="gap:8px">
+        <select id="pg-srv" class="grow" style="min-width:180px" onchange="pgPickSession(this.value)"></select>
+        <select id="pg-model" style="max-width:240px" onchange="pgPickModel(this.value)"></select>
+        <button class="ghost" onclick="pgLoadModels(true)" title="モデル一覧を再読込">⟳</button>
+        <span class="grow"></span>
+        <button class="ghost" onclick="pgClear()">🗑 クリア</button>
+      </div>
+      <details class="adv" id="pg-adv">
+        <summary>パラメータ / システムプロンプト</summary>
+        <div class="inner">
+          <label class="f" for="pg-sys">システムプロンプト</label>
+          <textarea id="pg-sys" placeholder="任意: 全ターンに付与される指示"></textarea>
+          <div class="row" style="gap:12px;flex-wrap:wrap">
+            <div><label class="f" for="pg-temp">temperature</label><input type="number" id="pg-temp" step="0.05" min="0" max="2" placeholder="0.7" style="width:96px"></div>
+            <div><label class="f" for="pg-topp">top_p</label><input type="number" id="pg-topp" step="0.01" min="0" max="1" placeholder="0.95" style="width:96px"></div>
+            <div><label class="f" for="pg-mtok">max_tokens</label><input type="number" id="pg-mtok" min="1" placeholder="(既定)" style="width:96px"></div>
+            <label class="switch" style="align-self:flex-end"><input type="checkbox" id="pg-stream" checked><span class="track"></span><span class="lab" style="font-size:12.5px">ストリーム</span></label>
+          </div>
+        </div>
+      </details>
+    </div>
+    <div class="card">
+      <div id="pg-msgs"></div>
+      <div style="margin-top:8px">
+        <textarea id="pg-input" placeholder="メッセージを入力… (Enter で送信 / Shift+Enter で改行)" rows="2"></textarea>
+        <div class="row" style="margin-top:8px">
+          <span class="muted ellip" id="pg-status" style="max-width:55%"></span>
+          <span class="grow"></span>
+          <button class="ghost" id="pg-stop" onclick="pgStop()" disabled>⏹ Stop</button>
+          <button class="primary" id="pg-send" onclick="pgSend()">送信 ➤</button>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-bench" class="view hidden">
+    <h2 class="view-title">ベンチマーク <span class="muted">作成済みプロファイルのサーバー (OpenAI 互換 API) を直接計測</span></h2>
+    <div id="bm-active"></div>
+    <div class="card">
+      <div class="row" style="gap:8px">
+        <select id="bm-profile" class="grow" style="min-width:180px" onchange="bmPersist()"></select>
+        <span class="badge" id="bm-prof-state"><span class="dot"></span>-</span>
+      </div>
+      <div class="muted" id="bm-prof-note" style="margin-top:6px"></div>
+      <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:4px">
+        <div><label class="f" for="bm-conc">並列度 (カンマ区切り)</label><input type="text" id="bm-conc" value="1,8" style="width:110px"></div>
+        <div><label class="f" for="bm-num">リクエスト数/段</label><input type="number" id="bm-num" min="1" value="24" style="width:96px"></div>
+        <div><label class="f" for="bm-warm">warmup</label><input type="number" id="bm-warm" min="0" value="1" style="width:76px"></div>
+        <div><label class="f" for="bm-inlen">prompt 語数≈</label><input type="number" id="bm-inlen" min="8" value="128" style="width:90px"></div>
+        <div><label class="f" for="bm-outlen">max_tokens</label><input type="number" id="bm-outlen" min="1" value="128" style="width:96px"></div>
+        <div><label class="f" for="bm-temp">temperature</label><input type="number" id="bm-temp" min="0" max="2" step="0.05" value="0" style="width:88px"></div>
+        <div><label class="f" for="bm-endpoint">エンドポイント</label><select id="bm-endpoint" style="width:170px"><option value="chat">/v1/chat/completions</option><option value="completions">/v1/completions</option></select></div>
+        <label class="switch" style="align-self:flex-end"><input type="checkbox" id="bm-stream" checked><span class="track"></span><span class="lab" style="font-size:12.5px">stream (TTFT計測)</span></label>
+      </div>
+      <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:2px">
+        <label class="switch"><input type="checkbox" id="bm-autostart" checked><span class="track"></span><span class="lab" style="font-size:12.5px">未起動ならサーバーを自動起動</span></label>
+        <label class="switch"><input type="checkbox" id="bm-stopafter"><span class="track"></span><span class="lab" style="font-size:12.5px">完了後、自動起動したサーバーを停止</span></label>
+      </div>
+      <label class="f" for="bm-model">モデル名 <span class="muted">(空 = /v1/models の先頭 id を自動使用)</span></label>
+      <input type="text" id="bm-model" class="mono" placeholder="(自動)">
+      <div class="muted" style="font-size:11.5px;margin-top:6px">プロンプトは launcher が生成するランダム文章 (≈語数。リクエスト毎に重複なしで prefix cache を抑制)。トークン数は API の usage 優先、未取得時は文字数推定 (≈)。同一機上で複数実行すると結果が相互に狂うため同時実走は 1 件です。</div>
+      <div class="row" style="margin-top:10px">
+        <button class="primary" id="bm-start" onclick="bmStart()">▶ ベンチ開始</button>
+        <span class="grow"></span>
+        <span class="muted" id="bm-note"></span>
+      </div>
+    </div>
+    <div id="bm-history"></div>
+  </section>
 </main>
 
-<nav id="tabbar">
-  <button data-tab="launch" class="on"><span class="ico">🚀</span>起動</button>
-  <button data-tab="servers"><span class="ico">🖥️</span>サーバー<span class="nbadge hidden" id="nb-servers"></span></button>
-  <button data-tab="profiles"><span class="ico">📋</span>プロファイル</button>
-  <button data-tab="backends"><span class="ico">⚙️</span>バックエンド</button>
+<nav id="sidemen">
+  <button id="menu-btn" aria-label="メニューを開く" aria-expanded="false" aria-controls="menu-items">☰</button>
+  <div class="menu-items" id="menu-items">
+    <button class="mitem on" data-tab="home"><span class="ico">🏠</span>ホーム</button>
+    <button class="mitem" data-tab="launch"><span class="ico">🚀</span>起動</button>
+    <button class="mitem" data-tab="servers"><span class="ico">🖥️</span>サーバー<span class="nbadge hidden" id="nb-servers"></span></button>
+    <button class="mitem" data-tab="playground"><span class="ico">🧪</span>プレイグラウンド</button>
+    <button class="mitem" data-tab="bench"><span class="ico">📊</span>ベンチマーク<span class="nbadge hidden" id="nb-bench"></span></button>
+    <button class="mitem" data-tab="profiles"><span class="ico">📋</span>プロファイル</button>
+    <button class="mitem" data-tab="backends"><span class="ico">⚙️</span>バックエンド</button>
+  </div>
 </nav>
+<div id="menu-veil" onclick="setMenu(false)"></div>
 
 <div id="modal-veil" onclick="closeEditor()"></div>
 <div id="modal"><div class="sheet" id="editor-sheet"></div></div>
@@ -215,12 +394,15 @@ details.adv .inner{padding:0 12px 12px}
 "use strict";
 /* ============================================================= state */
 const S = {
-  state: null, tab: "launch", filter: "all",
+  state: null, tab: "home", filter: "all",
+  sys: undefined,          // /api/system 結果 (undefined=未取得 null=失敗  object=OK)
   editing: null,           // ドラフト: {name,backend,values,on,extra_args,env,cwd,command,custom_only,note}
   hf: undefined,           // HF Hub キャッシュスキャン結果 (遅延取得)
   openLogs: new Set(), logCursor: {}, logBuf: {},   // logBuf: sid -> 蓄積ログ文字列
   autoScroll: {}, busy: {}, _ssSig: "",
   pm: {q:"", sort:"updated", backend:"all", batch:false, sel:new Set()},   // 管理画面の状態
+  pg: null,              // プレイグラウンド状態 (pgInit() で遅延初期化)
+  bench: null,           // ベンチマーク状態 (bmInit() で初期化)
 };
 const $ = (q, el=document) => el.querySelector(q);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -271,7 +453,7 @@ function statusBadge(s) {
 }
 
 /* ============================================================= polling */
-let refreshTimer = null, logTimer = null;
+let refreshTimer = null, logTimer = null, sysTimer = null, clockTimer = null, benchTimer = null;
 async function refresh(silent = true) {
   try {
     S.state = await api("/api/state");
@@ -285,19 +467,38 @@ async function refresh(silent = true) {
     if (!silent) toast("状態取得に失敗: " + e.message);
   }
 }
+async function refreshSystem() {
+  try { S.sys = await api("/api/system"); }
+  catch { S.sys = null; }
+  if (S.tab === "home") renderHome();
+}
 function startTimers() {
-  clearInterval(refreshTimer); clearInterval(logTimer);
+  clearInterval(refreshTimer); clearInterval(logTimer); clearInterval(sysTimer); clearInterval(benchTimer);
   refreshTimer = setInterval(() => refresh(true), 3000);
   logTimer = setInterval(pumpLogs, 1500);
+  sysTimer = setInterval(refreshSystem, 4000);
+  benchTimer = setInterval(bmPoll, 2500);
+  refreshSystem();
+  bmPoll();
 }
 
-/* ============================================================= tabs */
-document.querySelectorAll("nav#tabbar button").forEach(b => {
-  b.addEventListener("click", () => switchTab(b.dataset.tab));
+/* ============================================================= side menu (ハンバーガー) */
+function setMenu(open) {
+  const nav = $("#sidemen");
+  nav.classList.toggle("open", open);
+  $("#menu-veil").classList.toggle("on", open);
+  const btn = $("#menu-btn");
+  btn.textContent = open ? "✕" : "☰";
+  btn.setAttribute("aria-expanded", open ? "true" : "false");
+  btn.setAttribute("aria-label", open ? "メニューを閉じる" : "メニューを開く");
+}
+$("#menu-btn").addEventListener("click", () => setMenu(!$("#sidemen").classList.contains("open")));
+document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => {
+  b.addEventListener("click", () => { switchTab(b.dataset.tab); setMenu(false); });
 });
 function switchTab(tab) {
   S.tab = tab;
-  document.querySelectorAll("nav#tabbar button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   document.querySelectorAll("section.view").forEach(v => v.classList.add("hidden"));
   $("#view-" + tab).classList.remove("hidden");
   renderAll();
@@ -307,10 +508,13 @@ function switchTab(tab) {
 function renderAll(force) {
   if (!S.state) return;
   renderTabBadges();
+  if (S.tab === "home") renderHome();
   if (S.tab === "launch") renderLaunch();
   if (S.tab === "servers") renderServers(force);
   if (S.tab === "profiles") renderProfiles();
   if (S.tab === "backends") renderBackends();
+  if (S.tab === "playground") renderPlayground();
+  if (S.tab === "bench") renderBench();
 }
 function renderTabBadges() {
   const n = liveSessions().length;
@@ -318,7 +522,175 @@ function renderTabBadges() {
   nb.classList.toggle("hidden", n === 0); nb.textContent = n;
 }
 
-/* ---------------- launch view ---------------- */
+/* ---------------- dashboard (ホーム) ---------------- */
+function fmtGB(b){ if(b==null) return "-"; const g=b/1073741824; return g>=10?Math.round(g)+"GB":g.toFixed(1)+"GB"; }
+function fmtClock(){ const d=new Date(); $("#home-clock").textContent =
+  d.toLocaleTimeString("ja-JP") + "  " + d.toLocaleDateString("ja-JP",{month:"numeric",day:"numeric","weekday":"short"}); }
+function meterPct(p){ return p>=90?"err":p>=70?"warn":"ok"; }
+function meter(label, used, total, unitFn){
+  const pct = total ? Math.min(100, used/total*100) : 0;
+  return `<div class="meter"><div class="m-hd"><b>${esc(label)}</b>
+    <span class="r">${unitFn?unitFn(used,total):(Math.round(pct)+"%")}</span></div>
+    <div class="mbar"><i class="${meterPct(pct)}" style="width:${pct}%"></i></div></div>`;
+}
+function renderHome(){
+  if (!S.state) return;
+  tickHomeClock();
+  renderHomeNotices();
+  renderHomeTiles();
+  renderHomeHost();
+  renderHomeMeters();
+  renderHomeGpus();
+  renderHomeLive();
+  renderHomeBackends();
+  renderHomeRecent();
+}
+function renderHomeNotices(){
+  const el = $("#home-notices"); const notes = [];
+  const broken = (S.state.backends||[]).filter(b => !b.detection.installed);
+  if (broken.length) notes.push(`<div class="card" style="border-color:#4d2323;background:#241213">
+    <div class="row"><b style="color:var(--err)">⚠ ${broken.length} 個のバックエンドが未検出</b><span class="grow"></span>
+    <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('backends')">設定へ →</button></div>
+    <div class="muted" style="margin-top:4px">${broken.map(b=>esc(b.name)).join(", ")} — インポート/ビルドが見つかりません</div></div>`);
+  const failed = (S.state.sessions||[]).filter(s => s.status === "failed").slice(0,1);
+  for (const s of failed) notes.push(`<div class="card" style="border-color:#4d2323;background:#241213">
+    <div class="row"><b style="color:var(--err)">⛔ 異常終了: ${esc(s.profile_name)}</b><span class="grow"></span>
+    <span class="muted">${fmtAgo(s.finished_at)}</span>
+    <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('servers')">ログ確認 →</button></div>
+    ${s.error?`<div class="muted mono" style="margin-top:4px;color:var(--err);word-break:break-all">${esc(s.error)}</div>`:""}</div>`);
+  if (!S.state.profiles.length) notes.push(`<div class="card" style="border-color:#254059">
+    <div class="row"><b>👋 ようこそ</b><span class="grow"></span>
+    <button class="primary" style="min-height:32px;padding:4px 12px;font-size:12.5px" onclick="openEditor()">＋ プロファイル作成</button></div>
+    <div class="muted" style="margin-top:4px">まずプロファイルを作成して、起動するサーバーを設定しましょう。</div></div>`);
+  el.innerHTML = notes.join("");
+}
+function renderHomeTiles(){
+  const live = liveSessions();
+  const ready = live.filter(s=>s.ready).length;
+  const running = live.filter(s=>["running","starting","stopping"].includes(s.status)).length;
+  const installed = (S.state.backends||[]).filter(b=>b.detection.installed).length;
+  const totalB = (S.state.backends||[]).length;
+  const recentFails = (S.state.sessions||[]).filter(s=>s.status==="failed").length;
+  const h = S.sys && S.sys.host;
+  const gpuLoad = S.sys && S.sys.gpus && S.sys.gpus.length
+    ? Math.round(S.sys.gpus.reduce((a,g)=>a+(g.util||0),0)/S.sys.gpus.length) : null;
+  const tiles = [
+    {k:"ok", ic:"🟢", v:`${ready}`, s:`稼働中 / 起動含め ${running}`, t:"サーバー", go:"servers"},
+    {k:"acc", ic:"📋", v:`${S.state.profiles.length}`, s:"プロファイル", t:"起動画面", go:"launch"},
+    {k: installed===totalB?"ok":"warn", ic:"🧩", v:`${installed}/${totalB}`, s:"バックエンド検出", t:"バックエンド", go:"backends"},
+    {k: gpuLoad==null?"":(gpuLoad>=90?"err":gpuLoad>=70?"warn":"ok"), ic:"🎮", v: gpuLoad==null?"-":gpuLoad+"%", s:"GPU 平均使用率", t:"", go:""},
+    {k: recentFails?"err":"", ic:"⛔", v:`${recentFails}`, s:"異常終了履歴", t:"サーバー", go:"servers"},
+    {k:"", ic:"⏱", v: h&&h.uptime?upHuman(h.uptime):"-", s:"ホスト稼働時間", t:"", go:""},
+  ];
+  $("#home-tiles").innerHTML = tiles.map(t=>
+    `<button class="tile ${t.k}" ${t.go?`onclick="switchTab('${t.go}')"`:""} title="${esc(t.t||"")}">
+      <div class="t-k">${t.ic} ${esc(t.s)}</div><div class="t-v">${esc(String(t.v))}</div>
+      ${t.go?`<div class="t-s">${esc(t.t)} へ →</div>`:`<div class="t-s">&nbsp;</div>`}</button>`).join("");
+}
+function upHuman(sec){ sec=Math.floor(sec); const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);
+  return d?`${d}d${h}h`:h?`${h}h${m}m`:`${m}m`; }
+function renderHomeHost(){
+  const sys = S.state.system; const h = S.sys && S.sys.host;
+  const rows = [
+    ["ホスト名", esc(sys.hostname)],
+    ["LAN IP", `<span class="mono">${esc(sys.ip)}</span> <a class="btn" style="min-height:0;padding:2px 8px;font-size:12px" href="http://${esc(sys.ip)}:${location.port||8036}" target="_blank" rel="noopener">この画面 ↗</a>`],
+    ["OS", esc(sys.platform)],
+    ["バージョン", `v${esc(sys.version)}`],
+    ["プロジェクト", `<span class="mono" style="font-size:11px">${esc(sys.root)}</span>`],
+  ];
+  if (h){
+    rows.push(["CPU", `${h.cpu_count} cores · load ${(h.load||[]).map(x=>x.toFixed(2)).join(" ")||"-"}`]);
+    if (h.uptime!=null) rows.push(["稼働時間", upHuman(h.uptime)]);
+  }
+  $("#home-host").innerHTML = rows.map(([k,v])=>`<span>${k}</span><span class="v">${v}</span>`).join("");
+}
+function renderHomeMeters(){
+  const el = $("#home-meters"); const s = S.sys;
+  if (s === undefined){ el.innerHTML = `<span class="muted"><span class="spin"></span> 読み込み中…</span>`; return; }
+  if (s === null){ el.innerHTML = `<span class="muted" style="color:var(--err)">システム統計を取得できません</span>`; return; }
+  const h = s.host||{}; let html = "";
+  if (h.memory){
+    html += meter("メモリ", h.memory.used, h.memory.total, (u,t)=>`${fmtGB(u)} / ${fmtGB(t)}`);
+    if (h.memory.swap_total) html += meter("スワップ", h.memory.swap_used, h.memory.swap_total, (u,t)=>`${fmtGB(u)} / ${fmtGB(t)}`);
+  }
+  if (h.disk) html += meter("ディスク", h.disk.used, h.disk.total, (u,t)=>`${fmtGB(u)} / ${fmtGB(t)}`);
+  if (h.load && h.cpu_count){
+    const pct = Math.min(100, h.load[0]/h.cpu_count*100);
+    html += `<div class="meter"><div class="m-hd"><b>CPU負荷</b><span class="r">${h.load[0].toFixed(2)} / ${h.cpu_count} cores</span></div>
+      <div class="mbar"><i class="${meterPct(pct)}" style="width:${pct}%"></i></div></div>`;
+  }
+  el.innerHTML = html || `<span class="muted">計測項目なし</span>`;
+}
+function renderHomeGpus(){
+  const el = $("#home-gpus"); const s = S.sys;
+  if (s === undefined){ el.innerHTML = `<span class="muted"><span class="spin"></span> GPU 検出中…</span>`; return; }
+  if (s === null || !s.gpus || !s.gpus.length){
+    el.innerHTML = `<span class="muted">${esc((s&&s.error)||"GPU がありません")}</span>`; return;
+  }
+  el.innerHTML = `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">` + s.gpus.map(g=>{
+    const memPct = g.mem_total_mib? (g.mem_used_mib/g.mem_total_mib*100):0;
+    return `<div style="border:1px solid var(--line);border-radius:var(--r2);padding:10px 12px">
+      <div class="row" style="gap:6px"><b style="font-size:13px">GPU ${esc(g.index)}</b>
+        <span class="grow ellip muted" style="font-size:11.5px">${esc(g.name)}</span></div>
+      <div class="meter" style="margin-top:8px"><div class="m-hd"><b>使用率</b><span class="r">${g.util??0}%</span></div>
+        <div class="mbar"><i class="${meterPct(g.util||0)}" style="width:${g.util||0}%"></i></div></div>
+      <div class="meter"><div class="m-hd"><b>VRAM</b><span class="r">${Math.round(memPct)}% · ${Math.round((g.mem_used_mib||0)/1024*10)/10}/${Math.round((g.mem_total_mib||0)/1024*10)/10}GB</span></div>
+        <div class="mbar"><i class="${meterPct(memPct)}" style="width:${memPct}%"></i></div></div>
+      <div class="row muted" style="gap:10px;margin-top:6px;font-size:11.5px">
+        <span>🌡 ${g.temp??'-'}°C</span>
+        <span>⚡ ${g.power??'-'}${g.power_limit?'/'+g.power_limit:''}W</span>
+      </div></div>`;
+  }).join("") + `</div>`;
+}
+function renderHomeLive(){
+  const el = $("#home-live"); const live = liveSessions();
+  const c = $("#home-live-count"); c.className = "badge " + (live.some(s=>s.ready)?"ok":"info");
+  c.innerHTML = `<span class="dot"></span>${live.length}`;
+  if (!live.length){ el.innerHTML = `<div class="empty" style="padding:16px 12px">起動中のサーバーはありません。<br>
+    <button class="primary" style="margin-top:10px" onclick="switchTab('launch')">▶ 起動する</button></div>`; return; }
+  el.innerHTML = live.map(s=>{
+    const url = s.port?`http://${esc(S.state.system.ip)}:${s.port}`:"";
+    return `<div class="mini">
+      ${statusBadge(s)}
+      <span class="grow ellip"><b style="font-size:13.5px">${esc(s.profile_name)}</b>
+        <span class="chip ${esc(s.backend)}" style="margin-left:6px">${esc(s.backend_name)}</span></span>
+      ${url?`<a class="btn" style="min-height:0;padding:4px 8px;font-size:12px" href="${url}" target="_blank" rel="noopener">:${s.port}↗</a>`:""}
+      ${s.ready?`<button class="ghost" style="min-height:0;padding:4px 8px;font-size:12px" title="プレイグラウンドでチャット" onclick="openPlayground('${s.id}')">🧪</button>`:""}
+      ${s.ready?`<button class="ghost" style="min-height:0;padding:4px 8px;font-size:12px" title="ベンチマーク" onclick="openBench('${s.profile_id}')">📊</button>`:""}
+      <span class="muted upt mono" data-sid="${s.id}" style="font-size:11.5px">${fmtUp(s.uptime)}</span>
+      <button class="danger" style="min-height:0;padding:4px 10px;font-size:12px" onclick="stopSession('${s.id}')">⏹</button>
+    </div>`;
+  }).join("");
+}
+function renderHomeBackends(){
+  const el = $("#home-backends");
+  el.innerHTML = (S.state.backends||[]).map(b=>{
+    const det=b.detection; const live=(S.state.sessions||[]).filter(s=>s.backend===b.id&&isLive(s)).length;
+    const cls = det.installed?"ok":"err";
+    return `<div class="mini">
+      <span class="chip ${esc(b.id)}">${esc(b.name)}</span>
+      <span class="grow ellip muted" style="font-size:11.5px">${esc(det.python||det.detail||b.module_path)}</span>
+      ${live?`<span class="badge info"><span class="dot"></span>稼働 ${live}</span>`:""}
+      <span class="badge ${cls}"><span class="dot"></span>${det.installed?"検出":"未検出"}</span>
+    </div>`;
+  }).join("");
+}
+function renderHomeRecent(){
+  const el = $("#home-recent"); const ss = (S.state.sessions||[]).slice(0,6);
+  if (!ss.length){ el.innerHTML = `<div class="muted" style="padding:8px 2px">まだ起動履歴がありません。</div>`; return; }
+  el.innerHTML = ss.map(s=>`<div class="mini">
+    ${statusBadge(s)}
+    <span class="grow ellip" style="font-size:13px">${esc(s.profile_name)}</span>
+    <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
+    <span class="muted" style="font-size:11.5px">${
+      isLive(s)?("稼働 "+fmtUp(s.uptime)) : (s.finished_at? fmtAgo(s.finished_at)+" に"+(s.status==="failed"?"異常終了":"終了") : "-")
+    }</span>
+  </div>`).join("");
+}
+let clockInterval = null;
+function tickHomeClock(){ fmtClock(); if(!clockInterval) clockInterval=setInterval(fmtClock,1000); }
+
+
 function renderLaunch() {
   const strip = $("#running-strip");
   const live = liveSessions();
@@ -360,8 +732,11 @@ function renderLaunch() {
       <div class="row" style="margin-top:12px">
         ${s
           ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹'} 停止</button>
-             <button onclick="switchTab('servers');openLog('${s.id}')">ログ</button>`
-          : `<button class="primary" onclick="startProfile('${p.id}')" ${S.busy[p.id]?"disabled":""}>${S.busy[p.id]?'<span class="spin"></span>':'▶ 起動'}</button>`}
+             <button onclick="switchTab('servers');openLog('${s.id}')">ログ</button>
+             ${s.ready?`<button onclick="openPlayground('${s.id}')">🧪 Play</button>`:""}
+             ${s.ready?`<button onclick="openBench('${p.id}')">📊 Bench</button>`:""}`
+          : `<button class="primary" onclick="startProfile('${p.id}')" ${S.busy[p.id]?"disabled":""}>${S.busy[p.id]?'<span class="spin"></span>':'▶ 起動'}</button>
+             <button onclick="openBench('${p.id}')">📊 Bench</button>`}
         <span class="grow"></span>
         <button class="ghost" onclick="openEditor('${p.id}')">編集</button>
       </div>
@@ -453,6 +828,8 @@ function renderServers(force) {
              <button onclick="restartSession('${s.id}')">↻ 再起動</button>`
           : `<button onclick="rerunProfile('${s.profile_id}')">▶ 再起動</button>`}
         <button onclick="toggleLog('${s.id}')">${open ? "ログ閉じる" : "📜 ログ"}</button>
+        ${isLive(s) && s.ready && s.port ? `<button onclick="openPlayground('${s.id}')">🧪 プレイグラウンド</button>` : ""}
+        ${isLive(s) && s.ready && s.port ? `<button onclick="openBench('${s.profile_id}')">📊 ベンチ</button>` : ""}
         <span class="grow"></span>
         ${!isLive(s) ? `<button class="ghost" onclick="deleteSession('${s.id}')">削除</button>` : ""}
       </div>
@@ -633,6 +1010,7 @@ function renderProfiles() {
         ${s ? `<button class="danger" onclick="stopSession('${s.id}')">⏹ 停止</button>`
             : `<button class="primary" onclick="startProfile('${p.id}')">▶ 起動</button>`}
         <button onclick="openEditor('${p.id}')">編集</button>
+        <button onclick="openBench('${p.id}')">📊 Bench</button>
         <button class="ghost" onclick="dupProfile('${p.id}')">複製</button>
         <button class="ghost" onclick="exportProfiles(['${p.id}'])">エクスポート</button>
         <span class="grow"></span>
@@ -993,7 +1371,11 @@ async function saveEditor() {
     toast("保存しました"); closeEditor(); refresh(false);
   } catch (e) { toast("保存失敗: " + e.message); }
 }
-document.addEventListener("keydown", e => { if (e.key === "Escape") closeEditor(); });
+document.addEventListener("keydown", e => {
+  if (e.key !== "Escape") return;
+  if ($("#sidemen").classList.contains("open")) setMenu(false);
+  else closeEditor();
+});
 
 /* ============================================================= backends view */
 function renderBackends() {
@@ -1061,7 +1443,617 @@ function newProfileFor(bid) {
   renderEditor();
 }
 
+/* ============================================================= playground */
+/* 起動中サーバー (OpenAI 互換 API) とのチャット。リクエストは launcher の
+   /api/playground/{sid}/* 透過プロキシ経由 (同一オリジンなので CORS 不要)。
+   会話はブラウザの localStorage にサーバー毎 (profile_id 毎) に保存される。 */
+const PG_KEY = "llm-laun…d.v1";
+function pgInit() {
+  let d = {};
+  try { d = JSON.parse(localStorage.getItem(PG_KEY) || "{}") || {}; } catch { d = {}; }
+  S.pg = {
+    sid: d.sid || "", model: d.model || "", convos: d.convos || {},
+    models: [], modelsBusy: false, modelsErr: "",
+    streaming: false, ctrl: null, _mSig: "", _sSig: "", _modSig: "",
+  };
+  // 送信中にページを閉じた等で localStorage に残った streaming フラグは実体なしなので片付ける
+  for (const list of Object.values(d.convos || {}))
+    for (const m of list || []) if (m.streaming) { m.streaming = false; m.aborted = true; delete m._live; }
+  const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") el.value = v; };
+  set("#pg-sys", d.sys); set("#pg-temp", d.temp); set("#pg-topp", d.topp); set("#pg-mtok", d.mtok);
+  if (d.stream === false) $("#pg-stream").checked = false;
+}
+function pgPersist() {
+  if (!S.pg) return;
+  const convos = {};
+  Object.entries(S.pg.convos).slice(-8).forEach(([k, v]) => convos[k] = (v || []).slice(-60));
+  const v = id => $(id) ? $(id).value : "";
+  try {
+    localStorage.setItem(PG_KEY, JSON.stringify({
+      sid: S.pg.sid, model: S.pg.model, convos,
+      sys: v("#pg-sys"), temp: v("#pg-temp"), topp: v("#pg-topp"), mtok: v("#pg-mtok"),
+      stream: $("#pg-stream") ? $("#pg-stream").checked : true,
+    }));
+  } catch { /* 保存容量超過などは無視 */ }
+}
+const pgSession = () => (S.state?.sessions || []).find(s => s.id === S.pg.sid) || null;
+const pgPid = () => { const s = pgSession(); return s ? s.profile_id : (S.pg.sid || ""); };
+const pgMsgs = () => {
+  const pid = pgPid(); if (!pid) return [];
+  if (!S.pg.convos[pid]) S.pg.convos[pid] = [];
+  return S.pg.convos[pid];
+};
+function openPlayground(sid) {
+  if (!S.pg) pgInit();
+  if (S.pg.streaming) return toast("送信中です。停止してから切り替えてください");
+  S.pg.sid = sid; S.pg.model = ""; S.pg._modSig = "";
+  switchTab("playground");
+  pgLoadModels();
+}
+function renderPlayground() {
+  if (!S.state) return;
+  if (!S.pg) pgInit();
+  const d = S.pg;
+  const live = liveSessions();
+  if (d.sid && !live.some(s => s.id === d.sid) && !d.streaming) d.sid = "";
+  if (!d.sid && live.length && !d.streaming) { d.sid = live[0].id; d.model = ""; pgLoadModels(); }
+  const srv = $("#pg-srv");
+  const sSig = live.map(s => [s.id, s.profile_name, s.backend_name, s.port, s.ready ? 1 : 0].join(":")).join("|");
+  if (sSig !== d._sSig) {
+    d._sSig = sSig;
+    srv.innerHTML = live.length
+      ? live.map(s => `<option value="${s.id}" ${s.id === d.sid ? "selected" : ""}>${esc(s.profile_name)} · ${esc(s.backend_name)} · :${s.port || "-"}${s.ready ? "" : " (起動中)"}</option>`).join("")
+      : `<option value="">起動中のサーバーがありません</option>`;
+    srv.disabled = !live.length || d.streaming;
+  }
+  const mod = $("#pg-model");
+  const mSig = d.models.join("|") + "#" + d.model;
+  if (mSig !== d._modSig) {
+    d._modSig = mSig;
+    mod.innerHTML = d.models.length
+      ? d.models.map(m => `<option ${m === d.model ? "selected" : ""} value="${esc(m)}">${esc(m)}</option>`).join("")
+      : `<option value="">${d.modelsBusy ? "モデル読み込み中…" : (d.modelsErr ? "モデル取得失敗" : "モデル指定なし")}</option>`;
+  }
+  mod.disabled = d.streaming || !d.models.length;
+  const s = pgSession();
+  updatePgStatus();
+  if (d.modelsErr) $("#pg-status").innerHTML += ` <span class="pg-err">· ${esc(d.modelsErr)}</span>`;
+  $("#pg-send").disabled = d.streaming || !s;
+  $("#pg-stop").disabled = !d.streaming;
+  $("#pg-input").disabled = !s;
+  pgRenderMsgs();
+}
+function pgPickSession(sid) {
+  if (S.pg.streaming) { toast("送信中です"); renderPlayground(); return; }
+  S.pg.sid = sid; S.pg.model = ""; S.pg._modSig = "";
+  pgLoadModels(); pgPersist();
+}
+function pgPickModel(m) { S.pg.model = m; pgPersist(); }
+async function pgLoadModels() {
+  const d = S.pg;
+  if (!d.sid) { d.models = []; d.modelsErr = ""; renderPlayground(); return; }
+  if (d.modelsBusy) return;
+  d.modelsBusy = true; d.modelsErr = ""; renderPlayground();
+  try {
+    const j = await api(`/api/playground/${d.sid}/models`);
+    d.models = (j.data || []).map(m => m.id || m.model).filter(Boolean);
+    if (!d.models.includes(d.model)) d.model = d.models[0] || "";
+  } catch (e) {
+    d.models = []; d.model = ""; d.modelsErr = e.message;
+  } finally {
+    d.modelsBusy = false; pgPersist(); renderPlayground();
+  }
+}
+/* ---- 軽量レンダラ: コードフェンス / インラインコード / 太字 のみ ---- */
+function pgMd(src) {
+  const parts = String(src).split("```");
+  return parts.map((p, i) => {
+    if (i % 2 === 1) {
+      let lang = "", code = p;
+      const nl = p.indexOf("\n");
+      if (nl >= 0 && nl < 30) { lang = p.slice(0, nl).trim(); code = p.slice(nl + 1); }
+      if (code.endsWith("\n")) code = code.slice(0, -1);
+      return `<pre class="pg-pre"><div class="pg-pre-hd"><span>${esc(lang || "code")}</span>`
+           + `<button class="ghost" style="min-height:0;padding:1px 8px;font-size:11px" onclick="pgCopyCode(this)">コピー</button></div>`
+           + `<code>${esc(code)}</code></pre>`;
+    }
+    return esc(p)
+      .replace(/`([^`\n]+)`/g, '<code class="pg-ic">$1</code>')
+      .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+      .replace(/\n/g, "<br>");
+  }).join("");
+}
+function pgCopyCode(btn) {
+  const code = btn.closest("pre").querySelector("code");
+  (navigator.clipboard?.writeText(code.textContent) ?? Promise.reject())
+    .then(() => toast("コードをコピーしました")).catch(() => toast("コピー権限がありません"));
+}
+/* ---- トークン推定 / 生成速度 ---- */
+/* API が usage を返さないサーバー向けに内容からトークン数を推定する。
+   CJK 等 ≈0.6 tok/字、その他の語 ≈1 tok/語。表示用の近似値 (⚡ の数値は usage 優先)。 */
+function estTok(s) {
+  const str = String(s || "");
+  if (!str) return 0;
+  const cjkRe = /[\u1100-\u115f\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/g;
+  const cjk = str.match(cjkRe) || [];
+  const rest = str.replace(cjkRe, " ");
+  return Math.max(1, Math.round(cjk.length * 0.6 + (rest.match(/[A-Za-z0-9_'-]+/g) || []).length));
+}
+function pgMsgHtml(m, i) {
+  const me = m.role === "user";
+  const t = m.ts ? new Date(m.ts * 1000).toLocaleTimeString("ja-JP", {hour: "2-digit", minute: "2-digit"}) : "";
+  let src = m.content || "";
+  if (m.streaming && (src.match(/```/g) || []).length % 2) src += "\n```";   // 配信中の未閉フェンス対策
+  const body = m.error
+    ? `<span class="pg-err">⚠ ${esc(m.error)}</span>` + (src ? pgMd(src) : "")
+    : (src ? pgMd(src) : (m.streaming ? `<span class="muted">考え中…</span>` : "<i class=\"muted\">(空)</i>"));
+  const reason = m.reasoning
+    ? `<details class="pg-reason"><summary>💭 推論 (${m.reasoning.length.toLocaleString()} 字)</summary><div class="rb">${esc(m.reasoning)}</div></details>` : "";
+  const bits = [];
+  if (!me && m.streaming && m._live) {
+    // 配信中: 生成速度をリアルタイム表示
+    const lv = m._live, now = performance.now();
+    if (lv.tFirst == null) {
+      bits.push(`⏳ first token 待ち… ${((now - lv.t0) / 1000).toFixed(1)}s`);
+    } else {
+      if (lv.tps != null) bits.push(`⚡ ${lv.tps.toFixed(1)} tok/s`);
+      if (lv.n > 0) bits.push(`${lv.n} tok${lv.est ? " ≈" : ""}`);
+      bits.push(`gen ${((now - lv.tFirst) / 1000).toFixed(1)}s`);
+    }
+  } else if (!me && m.stats) {
+    // 終了後: 総所要 + TTFT + トークン数 + 生成速度 (TTFT 除いた生成時間ベース)
+    bits.push(m.stats.secs.toFixed(1) + "s");
+    if (m.stats.ttft != null) bits.push("first " + m.stats.ttft.toFixed(2) + "s");
+    if (m.usage && m.usage.completion_tokens != null) {
+      const pt = m.usage.prompt_tokens != null ? m.usage.prompt_tokens + "→" : "";
+      bits.push(`${pt}${m.usage.completion_tokens} tok`);
+    } else if (m.stats.tok != null) {
+      bits.push(`≈${m.stats.tok} tok`);
+    } else {
+      bits.push(`${(m.content || "").length.toLocaleString()} 字`);
+    }
+    if (m.stats.tps != null) bits.push(`⚡ ${m.stats.tps.toFixed(1)} tok/s`);
+  }
+  if (m.aborted) bits.push("中断");
+  return `<div class="pg-msg ${me ? "me" : "ai"}">
+    <div class="who">${esc(me ? "あなた" : (pgSession()?.backend_name || "model"))}<span style="font-weight:400">${t}</span></div>
+    ${reason}<div class="pg-body${m.streaming ? " pg-cursor" : ""}">${body}</div>
+    ${bits.length ? `<div class="pg-meta">${bits.map(b => esc(b)).join(" · ")}`
+        + (!me ? `<button class="ghost" style="min-height:0;padding:0 8px;font-size:11px" onclick="pgCopyMsg(${i})">コピー</button>` : "")
+        + `</div>` : ""}
+  </div>`;
+}
+function pgRenderMsgs(force) {
+  const el = $("#pg-msgs"); if (!el) return;
+  const msgs = pgMsgs();
+  const last = msgs[msgs.length - 1] || {};
+  const sig = [pgPid(), msgs.length, (last.content || "").length + "/" + (last.reasoning || "").length,
+               last.streaming ? "s" : "", last.error || ""].join("~");
+  if (!force && sig === S.pg._mSig) return;
+  S.pg._mSig = sig;
+  const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
+  if (!msgs.length) {
+    el.innerHTML = `<div class="empty">まだ会話がありません。メッセージを送ると、このサーバーに直接話しかけられます。<br>
+      <span class="muted">会話はこのブラウザ (サーバー毎) に保存されます。</span></div>`;
+  } else {
+    el.innerHTML = msgs.map((m, i) => pgMsgHtml(m, i)).join("");
+  }
+  if (nearBottom) el.scrollTop = el.scrollHeight;
+  if (S.pg && S.pg.streaming) updatePgStatus();
+}
+/* ステータスバー: 配信中は生成速度をリアルタイム表示、それ以外はサーバー状態 */
+function updatePgStatus() {
+  const st = $("#pg-status"); if (!st || !S.pg) return;
+  const last = (pgMsgs().slice(-1)[0] || {});
+  const lv = last._live;
+  let html;
+  if (S.pg.streaming) {
+    if (lv && lv.tFirst != null && lv.tps != null)
+      html = `⚡ ${lv.tps.toFixed(1)} tok/s · ${lv.n} tok${lv.est ? " ≈" : ""} · ${((performance.now() - lv.t0) / 1000).toFixed(1)}s`;
+    else if (lv) html = `⏳ first token 待ち… ${((performance.now() - lv.t0) / 1000).toFixed(1)}s`;
+    else html = "送信中…";
+  } else {
+    const s = pgSession();
+    html = !s ? `<span class="pg-err">チャットできるサーバーがありません。「起動」タブでサーバーをスタートしてください</span>`
+              : (s.ready ? `稼働中 · :${s.port}`
+                         : `<span style="color:var(--warn)">起動中… 応答するまでもう少しかかるかも</span>`);
+  }
+  st.innerHTML = html;
+}
+let pgRaf = 0;
+function pgScheduleRender() {
+  if (pgRaf) return;
+  pgRaf = requestAnimationFrame(() => { pgRaf = 0; pgRenderMsgs(); });
+}
+async function pgCopyMsg(i) {
+  const txt = (pgMsgs()[i] || {}).content || "";
+  if (!txt) return;
+  try { await navigator.clipboard.writeText(txt); toast("コピーしました"); }
+  catch { toast("コピー権限がありません"); }
+}
+async function pgSend() {
+  const d = S.pg; if (!d || d.streaming) return;
+  const inp = $("#pg-input"); const text = (inp.value || "").trim();
+  if (!d.sid) return toast("サーバーを選択してください");
+  if (!text) return;
+  const msgs = pgMsgs();
+  const history = [];
+  const sys = $("#pg-sys").value.trim(); if (sys) history.push({role: "system", content: sys});
+  for (const m of msgs) if (m.content) history.push({role: m.role, content: m.content});
+  history.push({role: "user", content: text});
+  msgs.push({role: "user", content: text, ts: Date.now() / 1000});
+  const asst = {role: "assistant", content: "", reasoning: "", ts: Date.now() / 1000, streaming: true};
+  msgs.push(asst);
+  inp.value = "";
+  d.streaming = true; d.ctrl = new AbortController();
+  renderPlayground(); pgPersist();
+  const body = {messages: history, stream: $("#pg-stream").checked};
+  if (d.model) body.model = d.model;
+  const num = id => { const v = $(id).value.trim(); return v === "" ? null : parseFloat(v); };
+  const temp = num("#pg-temp"), topp = num("#pg-topp"), mtok = num("#pg-mtok");
+  if (temp != null && !isNaN(temp)) body.temperature = temp;
+  if (topp != null && !isNaN(topp)) body.top_p = topp;
+  if (mtok != null && !isNaN(mtok)) body.max_tokens = Math.floor(mtok);
+  const t0 = performance.now(); let tFirst = null;
+  // リアルタイム生成速度の追跡 (lv.n = 累積トークン数, lv.win = 直近4秒のサンプル)
+  const lv = {t0, tFirst: null, n: 0, est: true, win: [], tps: null};
+  asst._live = lv;
+  try {
+    const r = await fetch(`/api/playground/${d.sid}/chat`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body), signal: d.ctrl.signal,
+    });
+    if (!r.ok) {
+      let detail = "HTTP " + r.status;
+      try { const j = await r.json(); if (j && (j.detail || j.error)) detail = j.detail || JSON.stringify(j.error); } catch { /* ignore */ }
+      throw new Error(String(detail).slice(0, 400));
+    }
+    if (body.stream) {
+      const reader = r.body.getReader(), dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        if (tFirst === null && value && value.length) tFirst = performance.now();
+        buf += dec.decode(value, {stream: true});
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
+          let evt; try { evt = JSON.parse(data); } catch { continue; }
+          if (evt.usage) {
+            asst.usage = evt.usage;
+            const ut = evt.usage.completion_tokens;
+            if (ut != null) { lv.n = Math.max(lv.n, ut); lv.est = false; }   // usage 到着後は実数に切替
+          }
+          const ch = (evt.choices || [])[0];
+          const dl = ch && ch.delta || {};
+          const re = dl.reasoning_content || dl.reasoning;   // vLLM: reasoning / SGLang・llama.cpp: reasoning_content
+          let grew = false;
+          if (re) { asst.reasoning += re; lv.n += estTok(re); grew = true; }
+          if (dl.content) { asst.content += dl.content; lv.n += estTok(dl.content); grew = true; }
+          if (grew) {
+            const now = performance.now();
+            if (lv.tFirst == null) lv.tFirst = now;
+            lv.win.push({t: now, n: lv.n});
+            while (lv.win.length > 2 && now - lv.win[0].t > 4000) lv.win.shift();
+            const genS = (now - lv.tFirst) / 1000;
+            const s0 = lv.win[0];
+            const winS = (now - s0.t) / 1000;
+            const oTps = genS > 0.3 ? lv.n / genS : null;
+            lv.tps = winS >= 1.2 ? (lv.n - s0.n) / winS : oTps;   // 1.2秒以上は滑動窓平均、それ前は全体平均
+            pgScheduleRender();
+          }
+        }
+      }
+    } else {
+      const j = await r.json();
+      const ch = (j.choices || [])[0] || {};
+      asst.content = (ch.message && ch.message.content) || "";
+      asst.reasoning = (ch.message && (ch.message.reasoning_content || ch.message.reasoning)) || "";
+      if (j.usage) asst.usage = j.usage;
+      if (!asst.content && ch.error) asst.error = JSON.stringify(ch.error);
+    }
+  } catch (e) {
+    if (e.name === "AbortError") asst.aborted = true;
+    else { asst.error = e.message; toast("送信失敗: " + e.message); }
+  } finally {
+    asst.streaming = false;
+    const secs = (performance.now() - t0) / 1000;
+    // トークン数: API の usage が最優先、無い場合は推定値
+    let tok = null;
+    if (asst.usage && asst.usage.completion_tokens != null) tok = asst.usage.completion_tokens;
+    else if (lv.n > 0) tok = lv.n;
+    else if (asst.content || asst.reasoning) tok = estTok(asst.content + asst.reasoning);
+    // 生成速度: 最初のトークン到着から (TTFT を除く) の生成時間ベース
+    const genS = lv.tFirst != null ? (performance.now() - lv.tFirst) / 1000 : null;
+    let tps = null;
+    if (tok != null) {
+      const denom = (genS != null && genS > 0.2) ? genS : (secs > 0.2 ? secs : null);
+      if (denom != null) tps = tok / denom;
+    }
+    asst.stats = {secs, ttft: tFirst != null ? (tFirst - t0) / 1000 : null,
+                  tok, est: tok != null && !asst.usage, tps};
+    delete asst._live;
+    d.streaming = false; d.ctrl = null;
+    pgPersist(); renderPlayground();
+  }
+}
+function pgStop() { if (S.pg && S.pg.ctrl) S.pg.ctrl.abort(); }
+function pgClear() {
+  const msgs = pgMsgs();
+  if (!msgs.length) return toast("会話は空です");
+  if (S.pg.streaming) return toast("送信中はクリアできません");
+  if (!confirm("このサーバーとの会話を削除しますか?")) return;
+  S.pg.convos[pgPid()] = []; pgPersist(); renderPlayground();
+}
+
+/* ============================================================= benchmarks */
+/* 作成済みプロファイルのサーバーを launcher 内蔵ランナーで計測する。
+   実行はバックエンド (POST /api/benchmarks) が裏で走らせ、这里是 2.5 秒ポーリングで
+   progress / 履歴を描画する。並列度リスト (例 "1,8,32") の各値が 1 ステージ。 */
+const BM_KEY = "llm-laun…h.v1";
+const BM_INPUTS = ["bm-profile","bm-conc","bm-num","bm-warm","bm-inlen","bm-outlen",
+                   "bm-temp","bm-endpoint","bm-stream","bm-autostart","bm-stopafter","bm-model"];
+function bmInit() {
+  let d = {};
+  try { d = JSON.parse(localStorage.getItem(BM_KEY) || "{}") || {}; } catch { d = {}; }
+  S.bench = { runs: [], active: null, busy: false, open: "", _pSig: "", _recv: 0 };
+  const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") {
+    if (el.type === "checkbox") el.checked = !!v; else el.value = v; } };
+  set("#bm-profile", d.profile); set("#bm-conc", d.conc); set("#bm-num", d.num);
+  set("#bm-warm", d.warm); set("#bm-inlen", d.inlen); set("#bm-outlen", d.outlen);
+  set("#bm-temp", d.temp); set("#bm-endpoint", d.endpoint);
+  set("#bm-model", d.model);
+  if (d.stream === false) $("#bm-stream").checked = false;
+  if (d.autostart === false) $("#bm-autostart").checked = false;
+  if (d.stopafter === true) $("#bm-stopafter").checked = true;
+  BM_INPUTS.forEach(id => $(`#${id}`).addEventListener("change", bmPersist));
+}
+function bmPersist() {
+  if (!S.bench) return;
+  const v = id => $(id) ? $(id).value : "";
+  try {
+    localStorage.setItem(BM_KEY, JSON.stringify({
+      profile: v("#bm-profile"), conc: v("#bm-conc"), num: v("#bm-num"), warm: v("#bm-warm"),
+      inlen: v("#bm-inlen"), outlen: v("#bm-outlen"), temp: v("#bm-temp"),
+      endpoint: v("#bm-endpoint"), model: v("#bm-model"),
+      stream: $("#bm-stream").checked, autostart: $("#bm-autostart").checked,
+      stopafter: $("#bm-stopafter").checked,
+    }));
+  } catch { /* 容量超過等は無視 */ }
+}
+function openBench(pid) {
+  if (!S.bench) bmInit();
+  if (pid) { $("#bm-profile").value = pid; bmPersist(); }
+  switchTab("bench");
+  bmPoll(true);
+}
+function bmFormBody() {
+  const v = id => ($(id).value || "").trim();
+  const num = (id, d) => { const x = parseInt(v(id), 10); return isNaN(x) ? d : x; };
+  const conc = [...new Set(v("#bm-conc").split(/[,，\s]+/)
+    .map(x => parseInt(x, 10)).filter(x => x >= 1 && x <= 256))].sort((a, b) => a - b).slice(0, 8);
+  const temp = parseFloat(v("#bm-temp"));
+  const body = {
+    profile_id: v("#bm-profile"),
+    model: v("#bm-model"),
+    endpoint: v("#bm-endpoint"),
+    stream: $("#bm-stream").checked,
+    concurrency: conc.length ? conc : [8],
+    num_prompts: num("#bm-num", 24),
+    input_len: num("#bm-inlen", 128),
+    output_len: num("#bm-outlen", 128),
+    warmup: num("#bm-warm", 1),
+    auto_start: $("#bm-autostart").checked,
+    stop_after: $("#bm-stopafter").checked,
+  };
+  if (!isNaN(temp)) body.temperature = temp; else body.temperature = null;
+  return body;
+}
+async function bmStart() {
+  const d = S.bench;
+  if (d.busy || d.active) return;
+  const body = bmFormBody();
+  if (!body.profile_id) return toast("プロファイルを選択してください");
+  d.busy = true; renderBench(); bmPersist();
+  try {
+    const run = await api("/api/benchmarks", {method: "POST", body});
+    toast(`ベンチ開始: ${run.profile_name} (並列 ${body.concurrency.join("/")} · ${body.num_prompts} req/段)`);
+    d.active = run.id;
+    bmPoll(true);
+  } catch (e) { toast("ベンチ開始失敗: " + e.message); }
+  finally { d.busy = false; bmPoll(true); }
+}
+async function bmPoll(force) {
+  try {
+    const j = await api("/api/benchmarks");
+    S.bench.runs = j.runs || []; S.bench.active = j.active; S.bench._recv = Date.now() / 1000;
+    bmBadge();
+    if (S.tab === "bench" || force) renderBench();
+  } catch { /* ignore */ }
+}
+function bmBadge() {
+  const nb = $("#nb-bench"); if (!nb) return;
+  const on = !!S.bench.active;
+  nb.classList.toggle("hidden", !on);
+  nb.classList.toggle("run", on);
+  nb.textContent = on ? "▶" : "";
+}
+async function bmCancel(id) {
+  if (!confirm("ベンチマークを中断しますか? 実行中のリクエストは完了まで待たれます")) return;
+  try { await api(`/api/benchmarks/${id}/cancel`, {method: "POST"}); toast("中断要求を送信しました"); bmPoll(true); }
+  catch (e) { toast("失敗: " + e.message); }
+}
+async function bmDelete(id) {
+  if (!confirm("このベンチ履歴を削除しますか?")) return;
+  try { await api(`/api/benchmarks/${id}`, {method: "DELETE"}); toast("削除しました"); bmPoll(true); }
+  catch (e) { toast("失敗: " + e.message); }
+}
+function bmExport(id) {
+  const r = S.bench.runs.find(x => x.id === id);
+  if (r) downloadJson(r, `llm-bench_${r.id}.json`);
+}
+function bmRerun(id) {
+  const r = S.bench.runs.find(x => x.id === id); if (!r) return;
+  const p = r.params || {};
+  const set = (sel, v2) => { const el = $(sel); if (el && v2 != null) {
+    if (el.type === "checkbox") el.checked = !!v2; else el.value = v2; } };
+  set("#bm-profile", r.profile_id); set("#bm-conc", (p.concurrency || []).join(","));
+  set("#bm-num", p.num_prompts); set("#bm-warm", p.warmup); set("#bm-inlen", p.input_len);
+  set("#bm-outlen", p.output_len); set("#bm-temp", p.temperature); set("#bm-endpoint", p.endpoint);
+  set("#bm-stream", p.stream); set("#bm-autostart", p.auto_start); set("#bm-stopafter", p.stop_after);
+  set("#bm-model", p.model || "");
+  bmPersist(); renderBench();
+  toast("パラメータを読み込みました (▶ ベンチ開始で実行)");
+}
+function bmToggle(id) { S.bench.open = S.bench.open === id ? "" : id; renderBench(); }
+const bmF1 = x => x == null ? "-" : (+x).toFixed(1);
+const bmF2 = x => x == null ? "-" : (+x).toFixed(2);
+const bmTps = x => x == null ? "-" : (+x >= 100 ? String(Math.round(x)) : (+x).toFixed(1));
+function bmStatusBadge(r) {
+  const map = {queued: ["info", "待機"], running: ["warn", "実行中"], completed: ["ok", "完了"],
+               failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["purple", "切断記録"]};
+  const [cls, label] = map[r.status] || ["", r.status];
+  return `<span class="badge ${cls}"><span class="dot"></span>${label}</span>`;
+}
+function bmParamsSummary(p) {
+  const c = (p.concurrency || []).join("/") || "-";
+  return `${p.num_prompts}req × ${c}並列 · in≈${p.input_len}語 · out≤${p.output_len}t · ` +
+    `${p.endpoint === "chat" ? "chat" : "completions"}${p.stream ? "+stream" : ""}` +
+    (p.temperature ? ` · temp${p.temperature}` : " · greedy");
+}
+function bmStageTable(stages) {
+  return `<div class="bm-wrap"><table class="bm"><tr>` +
+    `<th>並列度</th><th>OK</th><th>req/s</th><th>出力 tok/s</th><th>合計 tok/s</th>` +
+    `<th>TTFT avg</th><th>TTFT p99</th><th>遅延 p50</th><th>遅延 p99</th><th>decode tok/s</th></tr>` +
+    stages.map(st => `<tr>
+      <td>${st.concurrency}p</td>
+      <td>${st.ok}/${st.ok + st.fail}${st.aborted ? " ⏹" : ""}</td>
+      <td>${bmF2(st.rps)}</td><td><b>${bmTps(st.out_tps)}</b></td><td>${bmTps(st.total_tps)}</td>
+      <td>${bmF2(st.ttft && st.ttft.avg)}s</td><td>${bmF2(st.ttft && st.ttft.p99)}s</td>
+      <td>${bmF2(st.latency && st.latency.p50)}s</td><td>${bmF2(st.latency && st.latency.p99)}s</td>
+      <td>${bmTps(st.decode_tps && st.decode_tps.avg)}</td></tr>`).join("") +
+    `</table></div>` +
+    (stages.some(s => s.tokens_estimated)
+      ? `<div class="muted" style="font-size:11px;margin-top:4px">※ usage を返さない応答があるためトークン数に文字数推定を含みます</div>` : "") +
+    (stages.some(s => (s.errors || []).length)
+      ? `<details class="adv" style="margin-top:8px"><summary>エラー例</summary><div class="inner mono" style="font-size:11px;color:var(--err)">${
+          stages.filter(s => (s.errors || []).length)
+                .map(s => `<div>${s.concurrency}p: ${esc(s.errors[0])}</div>`).join("")}</div></details>` : "");
+}
+function renderBench() {
+  if (!S.bench) bmInit();
+  const ps = S.state?.profiles || [];
+  const sel = $("#bm-profile");
+  const sig = ps.map(p => p.id + ":" + p.name).join("|");
+  const cur = sel.value;
+  if (sig !== S.bench._pSig || ![...sel.options].some(o => o.value === cur)) {
+    S.bench._pSig = sig;
+    sel.innerHTML = ps.length
+      ? ps.map(p => `<option value="${p.id}">${esc(p.name)} · ${esc(backendById(p.backend)?.name || p.backend)}</option>`).join("")
+      : `<option value="">プロファイルがありません (作成してください)</option>`;
+    if (cur) sel.value = cur;
+  }
+  const p = ps.find(x => x.id === cur) || null;
+  const sess = p ? liveOf(p.id) : null;
+  const st = $("#bm-prof-state");
+  st.className = "badge " + (sess ? (sess.ready ? "ok" : "warn") : "");
+  st.innerHTML = `<span class="dot"></span>` + (sess ? (sess.ready ? `稼働中 :${sess.port || "-"}` : "起動中…") : "未起動");
+  $("#bm-prof-note").textContent = !p ? "先にプロファイルを作成してください。"
+    : sess ? "起動中サーバーをそのまま使用します (再起動はしません)。"
+    : ($("#bm-autostart").checked ? "未起動 → ベンチ開始時に自動起動して API 応答を待ちます。"
+                                  : "未起動 → 「自動起動」を ON にするか、起動タブでスタートしてください。");
+  $("#bm-start").disabled = S.bench.busy || !!S.bench.active || !p;
+  $("#bm-note").textContent = S.bench.busy ? "開始中…"
+    : (S.bench.active ? "ベンチマーク実行中です (同時に 1 件)" : "");
+  renderBenchActive(S.bench.runs.find(r => r.id === S.bench.active) || null);
+  renderBenchHistory();
+}
+function renderBenchActive(run) {
+  const el = $("#bm-active");
+  if (!run) { el.innerHTML = ""; return; }
+  const pr = run.progress || {};
+  const skew = run.status === "running" || run.status === "queued" ? (Date.now() / 1000) - (S.bench._recv || 0) : 0;
+  const secs = (pr.elapsed || 0) + skew;
+  const total = pr.total || 1;
+  const pctw = pr.phase === "measure" ? Math.min(100, (pr.done || 0) / total * 100)
+             : (pr.phase === "warmup" ? 4 : 0);
+  const tps = pr.phase === "measure" && secs > 0.5 ? (pr.out_tokens || 0) / secs : null;
+  const chips = (pr.stages || []).map((c, i) => {
+    const st = (run.stages || [])[i];
+    if (st) return `<span class="badge ok" title="${st.ok} req / ${bmF1(st.wall_secs)}s">${c}p ✓ ${bmTps(st.out_tps)} t/s</span>`;
+    if (i === pr.stage && (run.status === "running" || run.status === "queued"))
+      return `<span class="badge warn"><span class="dot"></span>${c}p 実行中</span>`;
+    return `<span class="badge">${c}p 待機</span>`;
+  }).join(" ");
+  const phase = {queued: "待機中…", launching: "サーバー起動中… (数分かかります)", waiting: "サーバーの API 応答を待っています…",
+                 warmup: "ウォームアップ中 (統計外)", measure: "計測中", done: "完了"}[pr.phase] || pr.phase || "";
+  const doneNote = pr.phase === "measure"
+    ? `リクエスト ${pr.done || 0}/${pr.total} (OK ${pr.ok || 0}${pr.fail ? ` / NG ${pr.fail}` : ""})` : "";
+  const tpsNote = tps != null ? ` · ⚡ ${bmTps(tps)} tok/s 累積` : "";
+  const modelNote = run.model ? `model: ${run.model}` : bmParamsSummary(run.params || {});
+  el.innerHTML = `<div class="card" style="border-color:#254059">
+    <div class="row">
+      ${bmStatusBadge(run)}
+      <b class="grow ellip" style="font-size:15px">${esc(run.profile_name)}</b>
+      <span class="chip ${esc(run.backend)}">${esc(run.backend_name)}</span>
+      <button class="danger" style="min-height:34px;font-size:12.5px" onclick="bmCancel('${run.id}')">⏹ 中断</button>
+    </div>
+    <div class="muted mono ellip" style="margin-top:4px;font-size:11px">${esc(modelNote)}</div>
+    <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">${chips}</div>
+    <div class="meter" style="margin:10px 0 4px"><div class="m-hd"><b>${esc(phase)}</b>
+      <span class="r">${esc(doneNote)}${esc(tpsNote)} · ${bmF1(secs)}s</span></div>
+      <div class="mbar"><i class="warn" style="width:${pctw}%"></i></div></div>
+    ${(run.stages || []).length ? bmStageTable(run.stages) : ""}
+  </div>`;
+}
+function renderBenchHistory() {
+  const el = $("#bm-history");
+  const runs = (S.bench.runs || []).filter(r => r.id !== S.bench.active);
+  if (!runs.length) {
+    el.innerHTML = `<div class="empty" style="margin-top:12px">ベンチ履歴はまだありません。上で条件をセットして ▶ ベンチ開始。</div>`;
+    return;
+  }
+  el.innerHTML = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
+    const open = S.bench.open === r.id;
+    const best = Math.max(0, ...(r.stages || []).map(s => s.out_tps || 0));
+    return `<div class="card">
+      <div class="row">
+        ${bmStatusBadge(r)}
+        <b class="grow ellip" style="font-size:14.5px;cursor:pointer" onclick="bmToggle('${r.id}')">${esc(r.profile_name)}</b>
+        <span class="chip ${esc(r.backend)}">${esc(r.backend_name)}</span>
+      </div>
+      <div class="muted" style="margin-top:5px;font-size:12px">${esc(bmParamsSummary(r.params || {}))}
+        ${(r.stages || []).length ? ` · peak 出力 <b style="color:var(--text)">${bmTps(best)}</b> tok/s` : ""}
+        ${r.error ? ` · <span style="color:var(--err)">${esc(String(r.error).slice(0, 90))}</span>` : ""}
+        · ${r.finished_at ? fmtAgo(r.finished_at) : "-"}</div>
+      <div class="row" style="margin-top:8px">
+        <button onclick="bmToggle('${r.id}')">${open ? "▲ 閉じる" : "📊 結果"}</button>
+        <button onclick="bmRerun('${r.id}')">↻ 設定再実行</button>
+        <button class="ghost" onclick="bmExport('${r.id}')">⬇ JSON</button>
+        <span class="grow"></span>
+        <button class="ghost danger" onclick="bmDelete('${r.id}')">削除</button>
+      </div>
+      ${open && (r.stages || []).length ? bmStageTable(r.stages) : ""}
+      ${open ? `<div class="muted mono" style="margin-top:6px;font-size:11px;overflow-wrap:anywhere">
+        model: ${esc(r.model || "-")} · session: ${esc(r.session_id || "-")}${r.auto_started ? " (自動起動)" : ""}${r.stopped_after ? " · 停止済み" : ""}${r.port ? ` · :${r.port}` : ""}</div>` : ""}
+    </div>`;
+  }).join("");
+}
+
 /* ============================================================= boot */
+pgInit();
+bmInit();
+$("#pg-input").addEventListener("keydown", e => {
+  if (e.key !== "Enter" || e.shiftKey) return;
+  if (e.isComposing || e.keyCode === 229) return;   // IME 変換中の Enter では送信しない
+  e.preventDefault(); pgSend();
+});
+["pg-sys", "pg-temp", "pg-topp", "pg-mtok", "pg-stream"].forEach(id =>
+  $(`#${id}`).addEventListener("change", pgPersist));
 refresh(false).then(startTimers);
 setInterval(renderTabBadges, 1000);
 </script>

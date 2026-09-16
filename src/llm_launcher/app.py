@@ -4,17 +4,20 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import platform
 import re
 import shlex
 import socket
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
@@ -23,6 +26,8 @@ from .backends import (SECTIONS_JA, BACKENDS, python_candidates, resolve_port,
                        sections_order)
 from .process import ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
+from .bench import BenchError, BenchManager
+from . import sysinfo
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -74,6 +79,116 @@ class BackendBody(BaseModel):
     python: str | None = None
     command_binary: str | None = None
     reset: bool = False
+
+
+class BenchBody(BaseModel):
+    """組み込みベンチマーク設定。profile_id のサーバー (未起動なら自動起動可) へ
+    OpenAI 互換 API で負荷をかけ、並列度リストの各値を 1 ステージとして計測する。"""
+    profile_id: str = Field(min_length=1)
+    model: str = ""
+    endpoint: str = "chat"            # chat | completions
+    stream: bool = True               # ON で TTFT も計測
+    concurrency: list[int] = Field(default_factory=lambda: [1, 8])
+    num_prompts: int = Field(default=24, ge=1, le=10000)
+    input_len: int = Field(default=128, ge=8, le=16384)    # プロンプト語数(≈語=token)
+    output_len: int = Field(default=128, ge=1, le=8192)    # max_tokens
+    temperature: float | None = Field(default=0.0, ge=0.0, le=2.0)
+    warmup: int = Field(default=1, ge=0, le=16)
+    request_timeout: int = Field(default=180, ge=10, le=3600)
+    ready_timeout: int = Field(default=600, ge=10, le=3600)
+    auto_start: bool = True
+    stop_after: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _compat_int_concurrency(cls, data: Any) -> Any:
+        if isinstance(data, dict) and isinstance(data.get("concurrency"), int):
+            data = {**data, "concurrency": [data["concurrency"]]}
+        return data
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "BenchBody":
+        if self.endpoint not in ("chat", "completions"):
+            raise ValueError("endpoint は chat または completions を指定してください")
+        self.concurrency = sorted({max(1, min(256, int(c))) for c in self.concurrency})[:8]
+        if not self.concurrency:
+            self.concurrency = [8]
+        return self
+
+    def to_params(self) -> dict[str, Any]:
+        d = self.model_dump()
+        d.pop("profile_id")
+        d["model"] = self.model.strip()
+        return d
+
+
+class PlaygroundChatBody(BaseModel):
+    """プレイグラウンドのチャット要求。起動中セッションの OpenAI 互換 API へ透過転送する。"""
+    messages: list[dict[str, Any]] = Field(min_length=1)
+    model: str = ""
+    stream: bool = True
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
+    top_p: float | None = Field(default=None, gt=0.0, le=1.0)
+    max_tokens: int | None = Field(default=None, ge=1)
+
+
+def sse_aggregate(raw: str) -> dict[str, Any]:
+    """stream=false を無視して SSE を返すサーバー向けに、SSE 本文を
+    OpenAI 非ストリーム応答と同等の JSON に集約する。"""
+    parts: list[str] = []
+    reasons: list[str] = []
+    usage: dict[str, Any] = {}
+    model = ""
+    for line in raw.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            evt = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(evt, dict):
+            continue
+        if isinstance(evt.get("usage"), dict):
+            usage = evt["usage"]
+        if evt.get("model"):
+            model = str(evt["model"])
+        ch = (evt.get("choices") or [{}])[0] if evt.get("choices") else {}
+        delta = ch.get("delta") if isinstance(ch.get("delta"), dict) else {}
+        if isinstance(delta.get("content"), str):
+            parts.append(delta["content"])
+        rsn = delta.get("reasoning_content") or delta.get("reasoning")
+        if isinstance(rsn, str):
+            reasons.append(rsn)
+    msg: dict[str, Any] = {"role": "assistant", "content": "".join(parts)}
+    if reasons:
+        msg["reasoning_content"] = "".join(reasons)
+    out: dict[str, Any] = {"model": model,
+                           "choices": [{"index": 0, "message": msg, "finish_reason": "stop"}]}
+    if usage:
+        out["usage"] = usage
+    return out
+
+
+def json_as_sse(obj: dict[str, Any]) -> bytes:
+    """逆ケース (stream=true を無視して JSON を返すサーバー) 向けに、
+    非ストリーム応答を delta 形式の SSE 1 チャンク + [DONE] に変換する。"""
+    ch = (obj.get("choices") or [{}])[0] if obj.get("choices") else {}
+    msg = ch.get("message") if isinstance(ch.get("message"), dict) else {}
+    delta: dict[str, Any] = {}
+    if msg.get("content") or ch.get("text"):
+        delta["content"] = msg.get("content") or ch.get("text")
+    rsn = msg.get("reasoning_content") or msg.get("reasoning")
+    if rsn:
+        delta["reasoning_content"] = rsn
+    chunk = {"model": obj.get("model", ""), "choices": [{"index": 0, "delta": delta}]}
+    if isinstance(obj.get("usage"), dict):
+        chunk["usage"] = obj["usage"]
+    return (f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+            "data: [DONE]\n\n").encode("utf-8")
 
 
 def hf_hub_cache_dir() -> Path:
@@ -200,7 +315,9 @@ def create_app(root: Path) -> FastAPI:
     profiles_store = JsonStore(data_dir / "profiles.json", [])
     settings_store = JsonStore(data_dir / "settings.json", {"backends": {}})
     runs_store = JsonStore(data_dir / "runs.json", [])
+    bench_store = JsonStore(data_dir / "bench.json", [])
     manager = ProcessManager(root, runs_store, profiles_store, settings_store)
+    bench = BenchManager(bench_store, profiles_store, manager)
 
     detect_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -290,11 +407,21 @@ def create_app(root: Path) -> FastAPI:
     @app.on_event("startup")
     async def _startup() -> None:
         migrate_profiles(profiles_store)
+        bench.on_startup()
         await manager.start_tick()
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        await bench.shutdown()
         await manager.shutdown(kill=False)
+
+    # -------------------------------------------------------------- system
+
+    @app.get("/api/system")
+    async def get_system() -> dict[str, Any]:
+        host = await asyncio.to_thread(sysinfo.host_snapshot, str(root))
+        gpu = await sysinfo.gpu_snapshot()
+        return {"host": host, **gpu}
 
     # ------------------------------------------------------------- state
 
@@ -502,6 +629,166 @@ def create_app(root: Path) -> FastAPI:
             hf_cache_state["data"] = await asyncio.to_thread(scan_hf_cache)
             hf_cache_state["ts"] = time.monotonic()
         return hf_cache_state["data"]
+
+    # ---------------------------------------------------------- playground
+    # 起動中セッション (OpenAI 互換 API) への透過プロキシ。ブラウザから直接だと
+    # vLLM 等は CORS ヘッダを返さずブラウザから直叩きできないため、
+    # launcher 同一オリジン経由で中継する (127.0.0.1 のセッションポートへ)。
+
+    def playground_base(sid: str) -> str:
+        s = manager.sessions.get(sid)
+        if not s:
+            raise HTTPException(404, "セッションが見つかりません")
+        port = s.get("port")
+        if not port:
+            raise HTTPException(400, "このセッションはポートを解決できていません (プロファイルの port を確認してください)")
+        return f"http://127.0.0.1:{port}"
+
+    def playground_open(req: urllib.request.Request):
+        """接続確立までを同期実行。失敗は HTTPException に変換する。"""
+        try:
+            return urllib.request.urlopen(req, timeout=600)
+        except urllib.error.HTTPError as e:
+            with contextlib.suppress(OSError):
+                raise HTTPException(e.code, f"バックエンドエラー (HTTP {e.code}): "
+                                            f"{e.read().decode('utf-8', 'replace')[:500]}")
+            raise HTTPException(e.code, f"バックエンドエラー (HTTP {e.code})")
+        except OSError as e:
+            raise HTTPException(502, f"サーバーに接続できません (起動中ですか?): {e}")
+
+    @app.get("/api/playground/{sid}/models")
+    async def playground_models(sid: str) -> dict[str, Any]:
+        base = playground_base(sid)
+
+        def _get() -> dict[str, Any]:
+            with urllib.request.urlopen(f"{base}/v1/models", timeout=8) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        try:
+            return await asyncio.to_thread(_get)
+        except HTTPException:
+            raise
+        except urllib.error.HTTPError as e:
+            raise HTTPException(e.code, f"モデル一覧の取得に失敗しました (HTTP {e.code})")
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"サーバーに接続できません (起動中ですか?): {e}")
+
+    @app.post("/api/playground/{sid}/chat")
+    async def playground_chat(sid: str, body: PlaygroundChatBody) -> Any:
+        base = playground_base(sid)
+        payload: dict[str, Any] = {"messages": body.messages, "stream": body.stream}
+        if body.stream:
+            # OpenAI 標準の stream_options を付与し、ストリームの最終チャンクに
+            # usage (トークン数) を含めさせる。プレイグラウンドの生成速度 (tok/s)
+            # 統計が正確なトークン数で描画されるようになる。
+            payload["stream_options"] = {"include_usage": True}
+        if body.model:
+            payload["model"] = body.model
+        for key in ("temperature", "top_p", "max_tokens"):
+            v = getattr(body, key)
+            if v is not None:
+                payload[key] = v
+        req = urllib.request.Request(
+            f"{base}/v1/chat/completions",
+            data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+            headers={"Content-Type": "application/json",
+                     "Accept": "text/event-stream" if body.stream else "application/json"},
+            method="POST",
+        )
+        if not body.stream:
+            def _once() -> dict[str, Any]:
+                resp = playground_open(req)
+                with resp:
+                    ctype = (resp.headers.get("Content-Type") or "").lower()
+                    raw = resp.read().decode("utf-8", "replace")
+                try:
+                    return json.loads(raw)
+                except json.JSONDecodeError:
+                    if "text/event-stream" in ctype:
+                        # stream=false を無視して SSE を返すサーバーのフォールバック
+                        return sse_aggregate(raw)
+                    raise HTTPException(502, "バックエンド応答を解析できません (JSON ではありません)")
+            return await asyncio.to_thread(_once)
+
+        resp = await asyncio.to_thread(playground_open, req)
+        if "text/event-stream" not in (resp.headers.get("Content-Type") or "").lower():
+            # stream=true を無視して JSON を返すサーバーは SSE に組み替えて中継する
+            def _wrap() -> bytes:
+                with resp:
+                    raw = resp.read().decode("utf-8", "replace")
+                try:
+                    return json_as_sse(json.loads(raw))
+                except json.JSONDecodeError:
+                    raise HTTPException(502, "バックエンド応答を解析できません (SSE でも JSON でもありません)")
+            data = await asyncio.to_thread(_wrap)
+            return StreamingResponse(iter([data]), media_type="text/event-stream",
+                                     headers={"Cache-Control": "no-cache",
+                                              "X-Accel-Buffering": "no"})
+        read = getattr(resp, "read1", None) or resp.read
+
+        def _chunks():
+            with resp:
+                while True:
+                    data = read(65536)
+                    if not data:
+                        break
+                    yield data
+        return StreamingResponse(_chunks(), media_type="text/event-stream",
+                                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+    # ---------------------------------------------------------- benchmarks
+    # プロファイル指定のサーバー (OpenAI 互換 API) へ launcher 内蔵の負荷ランナーで
+    # 計測する。server 起動 (未起動時・自動) → health 待ち → 並列度ステージ実行。
+    # 進行状況は /api/benchmarks の live progress として/ref に返す。
+
+    @app.get("/api/benchmarks")
+    async def list_benchmarks() -> dict[str, Any]:
+        return {"runs": bench.list_runs(), "active": bench.active_id}
+
+    @app.post("/api/benchmarks", status_code=201)
+    async def start_benchmark(body: BenchBody) -> dict[str, Any]:
+        profile = manager.find_profile(body.profile_id)
+        if not profile:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        bid = profile.get("backend")
+        if bid not in BACKENDS:
+            raise HTTPException(400, "このプロファイルにバックエンドが設定されていません")
+        if not body.auto_start and not any(
+                s["profile_id"] == body.profile_id and s["status"] in ("running", "starting")
+                for s in manager.sessions.values()):
+            raise HTTPException(409, "プロファイルが起動していません。"
+                                     "起動タブでスタートするか、auto_start を ON にしてください")
+        try:
+            run = await bench.start(profile, body.to_params(), BACKENDS[bid]["name"])
+        except BenchError as e:
+            raise HTTPException(409, str(e))
+        return run
+
+    @app.get("/api/benchmarks/{rid}")
+    async def get_benchmark(rid: str) -> dict[str, Any]:
+        run = bench.get(rid)
+        if not run:
+            raise HTTPException(404, "ベンチマークが見つかりません")
+        return run
+
+    @app.post("/api/benchmarks/{rid}/cancel")
+    async def cancel_benchmark(rid: str) -> dict[str, Any]:
+        try:
+            bench.cancel(rid)
+        except KeyError:
+            raise HTTPException(404, "ベンチマークが見つかりません")
+        except BenchError as e:
+            raise HTTPException(409, str(e))
+        return bench.get(rid) or {"ok": True}
+
+    @app.delete("/api/benchmarks/{rid}")
+    async def delete_benchmark(rid: str) -> dict[str, Any]:
+        try:
+            bench.delete(rid)
+        except KeyError:
+            raise HTTPException(404, "ベンチマークが見つかりません")
+        except BenchError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
 
     # -------------------------------------------------------------- static
 
