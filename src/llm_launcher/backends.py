@@ -704,7 +704,7 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
             if sval.lower() in TRUTHY:
                 argv.append(field["flag"])
         else:
-            if sval:
+            if sval and field["flag"]:
                 argv += [field["flag"], sval]
     extra = (profile.get("extra_args") or "").strip()
     if extra:
