@@ -130,7 +130,7 @@ class ProcessManager:
             extra_paths.append("/usr/local/cuda/bin")
         if extra_paths:
             env["PATH"] = os.pathsep.join([*extra_paths, env.get("PATH", "")])
-        for k, v in (profile.get("env") or {}).items():
+        for k, v in (profile.get("_resolved_env") or profile.get("env") or {}).items():
             if k.strip():
                 env[k.strip()] = str(v)
 

@@ -474,9 +474,17 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
               help="file:// 画像参照の読み込み許可ディレクトリ"),
             F("--allowed-media-domains", "メディアURL許可domain", section="server",
               placeholder="カンマ区切り", help="クライアント指定の画像URLのホスト許可リスト"),
+            # カーネル最適化選択 (fork独自)
+            {"key": "kernel_optimization", "flag": "", "type": "select",
+             "label": "カーネル最適化", "section": "exec",
+             "placeholder": "", "default": "",
+             "help": "デコード時のカーネル最適化を選択。fp8_decode_linear: 大きな線形射影をfp8 GEMMで高速化 (+17% TPS)",
+             "required": False, "default_on": False,
+             "options": ["", "none", "fp8_decode_linear"]},
         ]
         DEFAULT_OFF_KEYS[bid] |= {"image_max_tokens", "image_min_tokens", "kv_cache_dtype",
-                                  "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights"}
+                                  "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights",
+                                  "kernel_optimization"}
     return _backend_meta(b, fields)
 
 
@@ -705,6 +713,17 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
             argv += shlex.split(extra, posix=sys.platform != "win32")
         except ValueError as e:
             raise ValueError(f"追加引数の解析に失敗しました: {e}")
+
+    # カーネル最適化の環境変数を設定
+    kernel_opt = str(values.get("kernel_optimization", "")).strip()
+    env = profile.get("env") or {}
+    if kernel_opt == "fp8_decode_linear":
+        env = {**env, "FREETOKEN_FP8_DECODE_LINEAR": "1"}
+    elif kernel_opt == "none":
+        env = {k: v for k, v in env.items() if k != "FREETOKEN_FP8_DECODE_LINEAR"}
+    # 更新されたenvをprofileに反映 (呼び出し側で使う)
+    profile["_resolved_env"] = env
+
     return argv
 
 
