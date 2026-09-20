@@ -479,12 +479,11 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
              "label": "カーネル最適化", "section": "exec",
              "placeholder": "", "default": "",
              "help": "デコード時のカーネル最適化を選択。fp8_decode_linear: 大きな線形射影をfp8 GEMMで高速化 (+17% TPS)",
-             "required": False, "default_on": False,
+             "required": False, "default_on": True,
              "options": ["", "none", "fp8_decode_linear"]},
         ]
         DEFAULT_OFF_KEYS[bid] |= {"image_max_tokens", "image_min_tokens", "kv_cache_dtype",
-                                  "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights",
-                                  "kernel_optimization"}
+                                  "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights"}
     return _backend_meta(b, fields)
 
 
