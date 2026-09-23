@@ -474,6 +474,8 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
               help="file:// 画像参照の読み込み許可ディレクトリ"),
             F("--allowed-media-domains", "メディアURL許可domain", section="server",
               placeholder="カンマ区切り", help="クライアント指定の画像URLのホスト許可リスト"),
+            F("--prefill-decode-interval", "prefill/decode交互間隔", section="sched", placeholder="0=無効",
+              help="連続prefill N回で1ステップ稼働中decodeに譲る。0=従来動作 (サーバー既定値は4)"),
             # カーネル最適化選択 (fork独自)
             {"key": "kernel_optimization", "flag": "", "type": "select",
              "label": "カーネル最適化", "section": "exec",
@@ -483,7 +485,8 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
              "options": ["", "none", "fp8_decode_linear"]},
         ]
         DEFAULT_OFF_KEYS[bid] |= {"image_max_tokens", "image_min_tokens", "kv_cache_dtype",
-                                  "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights"}
+                                  "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights",
+                                  "prefill_decode_interval"}
     return _backend_meta(b, fields)
 
 

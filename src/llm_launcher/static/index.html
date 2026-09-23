@@ -1570,14 +1570,21 @@ function pgCopyCode(btn) {
 }
 /* ---- トークン推定 / 生成速度 ---- */
 /* API が usage を返さないサーバー向けに内容からトークン数を推定する。
-   CJK 等 ≈0.6 tok/字、その他の語 ≈1 tok/語。表示用の近似値 (⚡ の数値は usage 優先)。 */
-function estTok(s) {
+   CJK 等 ≈0.6 tok/字、その他の語 ≈1 tok/語。表示用の近似値 (⚡ の数値は usage 優先)。
+   配信中の累計は小数を足す estTokFrac を使う。多くのサーバーは 1 token を 1 delta
+   で送るため、delta 毎に Math.round/max(1,..) すると端数が毎回切り上げられ、
+   CJK 主体の文章で速度が過大になる (実測: 日本語で +12%、瞬間値で 1.4 倍)。 */
+function estTokFrac(s) {
   const str = String(s || "");
   if (!str) return 0;
   const cjkRe = /[\u1100-\u115f\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/g;
   const cjk = str.match(cjkRe) || [];
   const rest = str.replace(cjkRe, " ");
-  return Math.max(1, Math.round(cjk.length * 0.6 + (rest.match(/[A-Za-z0-9_'-]+/g) || []).length));
+  return cjk.length * 0.6 + (rest.match(/[A-Za-z0-9_'-]+/g) || []).length;
+}
+function estTok(s) {
+  if (!String(s || "")) return 0;
+  return Math.max(1, Math.round(estTokFrac(s)));
 }
 function pgMsgHtml(m, i) {
   const me = m.role === "user";
@@ -1695,8 +1702,8 @@ async function pgSend() {
   if (topp != null && !isNaN(topp)) body.top_p = topp;
   if (mtok != null && !isNaN(mtok)) body.max_tokens = Math.floor(mtok);
   const t0 = performance.now(); let tFirst = null;
-  // リアルタイム生成速度の追跡 (lv.n = 累積トークン数, lv.win = 直近4秒のサンプル)
-  const lv = {t0, tFirst: null, n: 0, est: true, win: [], tps: null};
+  // リアルタイム生成速度の追跡 (lv.n = 累積トークン数, lv.frac = 推定時の小数累積, lv.win = 直近4秒のサンプル)
+  const lv = {t0, tFirst: null, n: 0, frac: 0, est: true, win: [], tps: null};
   asst._live = lv;
   try {
     const r = await fetch(`/api/playground/${d.sid}/chat`, {
@@ -1732,9 +1739,10 @@ async function pgSend() {
           const dl = ch && ch.delta || {};
           const re = dl.reasoning_content || dl.reasoning;   // vLLM: reasoning / SGLang・llama.cpp: reasoning_content
           let grew = false;
-          if (re) { asst.reasoning += re; lv.n += estTok(re); grew = true; }
-          if (dl.content) { asst.content += dl.content; lv.n += estTok(dl.content); grew = true; }
+          if (re) { asst.reasoning += re; lv.frac += estTokFrac(re); grew = true; }
+          if (dl.content) { asst.content += dl.content; lv.frac += estTokFrac(dl.content); grew = true; }
           if (grew) {
+            if (lv.est) lv.n = Math.round(lv.frac);   // 小数累積を一度だけ丸める (delta 毎の丸めは過大)
             const now = performance.now();
             if (lv.tFirst == null) lv.tFirst = now;
             lv.win.push({t: now, n: lv.n});

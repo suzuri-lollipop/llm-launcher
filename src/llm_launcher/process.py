@@ -98,12 +98,19 @@ class ProcessManager:
             raise ValueError("このプロファイルにバックエンドが設定されていません")
         backend = BACKENDS[bid]
         command = (profile.get("command") or "").strip() or self.base_command(bid)
-        return render_argv(
-            backend, {**profile, "command": command},
+        rendered = {**profile, "command": command}
+        argv = render_argv(
+            backend, rendered,
             python=self.resolve_python(bid),
             binary=self.resolve_binary(bid),
             root=self.root,
         )
+        # render_argv は kernel_optimization を rendered["_resolved_env"] に解決するが、
+        # rendered は浅いコピーなので、そのままでは start() が読む元の profile に
+        # 伝わらない (env が黙って失われる)。呼び出し元の profile へ書き戻す。
+        if "_resolved_env" in rendered:
+            profile["_resolved_env"] = rendered["_resolved_env"]
+        return argv
 
     # --------------------------------------------------------------- start
 
