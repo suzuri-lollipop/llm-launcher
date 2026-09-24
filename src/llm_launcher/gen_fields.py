@@ -4,7 +4,8 @@
 生成先: src/llm_launcher/fields/<backend>.json
   { "<canonical-flag>": {"type","choices","default","help","aliases":[...]} }
 backends.py は UI 用のラベル/セクションだけを管理し、選択肢・既定値は必ずこの正表から引く。
-submodule を更新したら `python -m llm_launcher.gen_fields` で再生成する。
+submodule を更新したら `python -m llm_launcher.gen_fields` で再生成する
+(`--only freetoken-fork` で単一バックエンドだけ再生成可)。
 """
 from __future__ import annotations
 
@@ -336,15 +337,30 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default=str(ROOT), help="llm-launcher プロジェクトルート")
     ap.add_argument("--out", default="src/llm_launcher/fields")
+    ap.add_argument("--only", default="", help="生成するバックエンド (カンマ区切り)。空=全て")
     a = ap.parse_args()
     root = Path(a.root).resolve()
     tables = build(root)
+    want = {x.strip() for x in a.only.split(",") if x.strip()}
+    if want:
+        unknown = want - set(tables)
+        if unknown:
+            raise SystemExit(f"未知のバックエンド: {', '.join(sorted(unknown))} "
+                             f"(生成可能: {', '.join(sorted(tables))})")
+        tables = {k: v for k, v in tables.items() if k in want}
     outdir = root / a.out
     outdir.mkdir(parents=True, exist_ok=True)
     for name, tbl in tables.items():
-        (outdir / f"{name}.json").write_text(
+        # 正表は CLI 引数の生成物。"--" で始まらない行は backends.py 側で literal 定義した
+        # GUI 項目 (kernel_optimization 等) の記録なので、再生成でも失わないよう引き継ぐ。
+        prev = outdir / f"{name}.json"
+        if prev.exists():
+            for key, spec in json.loads(prev.read_text("utf-8")).items():
+                if not key.startswith("--"):
+                    tbl.setdefault(key, spec)
+        prev.write_text(
             json.dumps(tbl, ensure_ascii=False, indent=1, sort_keys=True), encoding="utf-8")
-        print(f"{name}: {len(tbl)} flags -> {outdir/f'{name}.json'}")
+        print(f"{name}: {len(tbl)} flags -> {prev}")
 
 
 if __name__ == "__main__":

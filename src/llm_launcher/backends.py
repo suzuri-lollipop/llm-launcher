@@ -163,7 +163,9 @@ def _spec(backend_id: str, flag: str) -> dict[str, Any]:
         spec = {**spec, "choices": CHOICE_SUPPLEMENT[ch_key][flag]}
     d = spec.get("default")
     if isinstance(d, str) and (d.strip().lower() in _JUNK_DEFAULTS or d.strip() in ("()", "[]", "{}")):
-        spec.pop("default")
+        # ただし choices に実在する値 (--speculative の "none" 等) は junk ではなく正当な既定値
+        if not (isinstance(spec.get("choices"), list) and d in spec["choices"]):
+            spec.pop("default")
     if isinstance(d, bool):
         # bool 既定は store_true 意味 → bool 型へ正規化し既定値は空にする
         spec.setdefault("type", "bool")
@@ -476,6 +478,9 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
               placeholder="カンマ区切り", help="クライアント指定の画像URLのホスト許可リスト"),
             F("--prefill-decode-interval", "prefill/decode交互間隔", section="sched", placeholder="0=無効",
               help="連続prefill N回で1ステップ稼働中decodeに譲る。0=従来動作 (サーバー既定値は4)"),
+            F("--speculative", "推測的デコード (MTP)", section="exec",
+              help="mtp = チェックポイントの MTP ヘッドで1トークン先読みし単一リクエスト時のデコードを高速化"
+                   " (同時リクエストが増えると自動無効化)。対応は qwen4_exp のみ、none/空=無効"),
             # カーネル最適化選択 (fork独自)
             {"key": "kernel_optimization", "flag": "", "type": "select",
              "label": "カーネル最適化", "section": "exec",
@@ -486,7 +491,7 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
         ]
         DEFAULT_OFF_KEYS[bid] |= {"image_max_tokens", "image_min_tokens", "kv_cache_dtype",
                                   "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights",
-                                  "prefill_decode_interval"}
+                                  "prefill_decode_interval", "speculative"}
     return _backend_meta(b, fields)
 
 

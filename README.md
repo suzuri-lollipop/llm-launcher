@@ -60,7 +60,7 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 | 🖥️ サーバー | 起動中 + 履歴の一覧。ステータス (起動中 / 稼働中 / 停止 / 異常終了)、PID・稼働時間・API URL、停止 / 再起動、ライブログ表示 (追従・自動スクロール) |
 | 🧪 プレイグラウンド | **起動中のサーバーと直接チャットできる Playground**。サーバー / モデル選択 (`/v1/models`)、システムプロンプト、temperature / top_p / max_tokens、SSE ストリーム描画 (思考内容 = reasoning の折りたたみ表示、所要時間 / first token 遅延 (TTFT) / **生成速度 tok/s をストリーミング中にリアルタイム表示** / トークン数 (prompt→completion) の統計)、Enter 送信 / Shift+Enter 改行 / Stop ボタンで中断、会話はブラウザ (localStorage・サーバー毎) に自動保存。コードフェンスのシンタックス風表示とコピーボタン付き。稼働中サーバーのカード / ホーム / サーバー画面の 🧪 ボタンからも入室可 |
 | 📊 ベンチマーク | **作成済みプロファイルのサーバーを直接計測する組み込みベンチ**。対象プロファイルを選択 (未起動なら自動起動、完了後の自動停止も可) し、並列度リスト (例 `1,8,32`) を各 1 ステージとして逐次実行。リクエスト数 / prompt 語数 / max_tokens / temperature / エンドポイント (chat・completions) / stream / warmup を設定でき、プロンプトはリクエスト毎に重複しないランダム文章で prefix cache を抑制。ステージごとに **出力 tok/s・合計 tok/s・req/s・TTFT (avg/p99)・遅延分布 (p50/p99)・decode tok/s** を算出し、実行中はライブ進行バー (フェーズ・累積 tok/s)。履歴は `data/bench.json` に最大 50 件保存され、結果テーブル展開 / 設定の再読込 / JSON エクスポート / 削除 / 中断が可能。トークン数は API の `usage` 優先、非対応サーバーは文字数推定 (結果テーブルに注記)。同時実走は 1 件 (GPU 計測の互干渉防止)。追加依存なしの標準ライブラリのみで動作 |
-| 📋 プロファイル | **プロファイル管理画面**。一覧に検索 (名前/モデル/バックエンド/メモ)、並び替え (更新/名前/バックエンド/使用回数)、バックエンド別フィルタ (件数表示)。カードで有効パラメータ数・使用履歴 (起動回数/最終利用/異常終了数) を確認でき、起動/編集/複製/削除/JSON エクスポートを実行。**一括選択モード**でのまとめて削除/エクスポート、**JSON インポート** (他マシンへの移行・バックアップ) も可。編集画面はプルダウンでバックエンドを選ぶと起動パラメータが全項目リスト化・既定値入りで表示され、☑ で各フラグの送出 ON/OFF を制御 (vLLM 44項目 / SGLang 62項目 / llama.cpp 40項目 / FreeToken 45項目) |
+| 📋 プロファイル | **プロファイル管理画面**。一覧に検索 (名前/モデル/バックエンド/メモ)、並び替え (更新/名前/バックエンド/使用回数)、バックエンド別フィルタ (件数表示)。カードで有効パラメータ数・使用履歴 (起動回数/最終利用/異常終了数) を確認でき、起動/編集/複製/削除/JSON エクスポートを実行。**一括選択モード**でのまとめて削除/エクスポート、**JSON インポート** (他マシンへの移行・バックアップ) も可。編集画面はプルダウンでバックエンドを選ぶと起動パラメータが全項目リスト化・既定値入りで表示され、☑ で各フラグの送出 ON/OFF を制御 (vLLM 44項目 / SGLang 62項目 / llama.cpp 40項目 / FreeToken 45項目 / FreeToken (fork) 56項目。fork は MTP 投機的デコード `--speculative` やカーネル最適化など fork 独自項目を含む) |
 | ⚙️ バックエンド | 各 submodule の状態 (取得済み / インストール検出)、起動コマンドテンプレートや python / バイナリパスの上書き設定、再検出 |
 
 ### プロファイル作成画面の流れ
@@ -79,8 +79,8 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 最終 argv = コマンドテンプレート (プロファイル上書き > バックエンド設定 > 既定)
 + リスト項目 (フォーム値) から生成した `--flag 群` (+ 古いプロファイルに残った追加引数)
 
-- 各フラグの **型・選択肢・既定値は `src/llm_launcher/fields/<backend>.json` 正表が権威**で、これは `python -m llm_launcher.gen_fields --root .` で submodule の実ソース (vllm の tool_parsers/reasoning レジストリ・config dataclass の Literal、sglang の arg_groups/fields AST、freetoken の argparse、llama.cpp の common/arg.cpp) から生成されます。**submodule を `git submodule update` したら再生成してください**
-- 生成器が追いきれない箇所 (llama.cpp の一部、sglang の動的 choices 等) は `backends.py` の補完表にソース照合済み値を持っています
+- 各フラグの **型・選択肢・既定値は `src/llm_launcher/fields/<backend>.json` 正表が権威**で、これは `python -m llm_launcher.gen_fields --root .` で submodule の実ソース (vllm の tool_parsers/reasoning レジストリ・config dataclass の Literal、sglang の arg_groups/fields AST、freetoken の argparse、llama.cpp の common/arg.cpp) から生成されます。**submodule を `git submodule update` したら再生成してください**。`--only freetoken-fork` を付けると 1 バックエンド分だけ再生成できます (fork 版正表は `module/fork/freetoken` のソースから生成。未 clone 時は基底 FreeToken 表を流用)
+- 生成器が追いきれない箇所 (llama.cpp の一部、sglang の動的 choices 等) は `backends.py` の補完表にソース照合済み値を持っています。CLI に無い GUI 独自項目 (例: FreeToken (fork) の「カーネル最適化」= 環境変数マッピング) は、正表に `--` 始まり以外の key (例: `kernel_optimization`) で記録しておけば再生成後も自動で引き継がれます
 - テンプレート内トークン: `{python}` `{llama_server}` `{module}` `{root}`、および `{model}` `{port}` などプロファイル変数
 - 「追加引数」textarea は廃止しました。既存プロファイルに値が入っていた場合のみ、編集画面の「レガシー項目」として自動表示され保持されます
 - 「コマンドのみモード」(高度な設定): ON にするとリスト項目のフラグ自動付与を止めます (カスタム起動の最終手段)

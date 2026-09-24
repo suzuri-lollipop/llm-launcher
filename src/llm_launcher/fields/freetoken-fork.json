@@ -403,6 +403,15 @@
   "help": "Run the server in shell mode.",
   "type": "bool"
  },
+ "--speculative": {
+  "aliases": [],
+  "choices": [
+   "none",
+   "mtp"
+  ],
+  "default": "none",
+  "help": "Speculative decoding backend. 'mtp' builds the checkpoint's MTP head (qwen4_exp only for now) and drafts one extra token per step at small batch sizes; the scheduler disables it automatically when mor"
+ },
  "--tensor-parallel-size": {
   "aliases": [
    "--tp-size"
