@@ -27,6 +27,11 @@ from .store import JsonStore, new_id, now
 MAX_RUNS = 50        # 履歴として保持する最大件数 (完了分のみ整理)
 SAVE_THROTTLE = 2.0  # 進行状況の永続化間隔 (秒)
 
+# 生成中の「人間の体感停止」の閾値: ストリームのチャンク間隔がこれを超えたら
+# 1 回と数える (stall_count)。最長停止 (stall_worst_s / gap_max) は閾値と無関係に
+# 常に記録する。目標は「人間が関知できない待ち時間」= これを 0 に保つこと。
+STALL_S = 0.5
+
 
 class BenchError(Exception):
     """ユーザーに提示するベンチマーク失敗。"""
@@ -124,6 +129,12 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
     ttf: float | None = None
     usage: dict[str, Any] = {}
     text_parts: list[str] = []
+    # ストリーム停止の計測: 直前の content チャンク到着からの間隔を追い、
+    # 最長間隔 (gap_max) と STALL_S 以上の間隔の回数 (stalls) を記録する。
+    # 送信->最初のトークンは TTFT として別途記録されるため含めない。
+    last_piece_t: float | None = None
+    gap_max: float | None = None
+    stalls = 0
     with resp:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         if not stream or "text/event-stream" not in ctype:
@@ -142,6 +153,7 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
             return {"ok": True, "secs": time.perf_counter() - t0, "ttft": None,
                     "out_tokens": int(out) if out is not None else est,
                     "in_tokens": usage.get("prompt_tokens"),
+                    "gap_max": None, "stalls": 0,
                     "estimated": "completion_tokens" not in usage or "prompt_tokens" not in usage}
         for raw in resp:  # SSE 行読み (タイムアウトはソケット読み取りに適用)
             line = raw.strip()
@@ -164,8 +176,16 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
             else:
                 piece = ch.get("text") if isinstance(ch.get("text"), str) else ""
             if piece:
+                t_now = time.perf_counter()
                 if ttf is None:
-                    ttf = time.perf_counter() - t0
+                    ttf = t_now - t0
+                else:
+                    gap = t_now - (last_piece_t if last_piece_t is not None else t_now)
+                    if gap_max is None or gap > gap_max:
+                        gap_max = gap
+                    if gap >= STALL_S:
+                        stalls += 1
+                last_piece_t = t_now
                 text_parts.append(piece)
     est = est_tokens("".join(text_parts))
     out = usage.get("completion_tokens")
@@ -174,6 +194,8 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
         out = est
     return {"ok": True, "secs": time.perf_counter() - t0, "ttft": ttf,
             "out_tokens": out, "in_tokens": usage.get("prompt_tokens"),
+            "gap_max": round(gap_max, 4) if gap_max is not None else None,
+            "stalls": stalls,
             "estimated": "completion_tokens" not in usage or "prompt_tokens" not in usage}
 
 
@@ -520,6 +542,8 @@ class BenchManager:
                    and r.get("out_tokens")]
         e2e = [r["out_tokens"] / r["secs"] for r in okres
                if r.get("out_tokens") and r["secs"] > 0]
+        gaps = [float(r["gap_max"]) for r in okres if r.get("gap_max") is not None]
+        stall_count = sum(int(r.get("stalls") or 0) for r in okres)
         out_tok = sum(int(r.get("out_tokens") or 0) for r in okres)
         in_tok = sum(int(r.get("in_tokens") or 0) for r in okres)
         return {
@@ -533,5 +557,9 @@ class BenchManager:
             "tokens_estimated": any(r.get("estimated") for r in okres),
             "latency": _stats(lat), "ttft": _stats(ttfts),
             "decode_tps": _stats(decodes), "e2e_tps": _stats(e2e),
+            "gaps": _stats(gaps),
+            "stall_worst_s": round(max(gaps), 3) if gaps else None,
+            "stall_count": stall_count,
+            "stall_threshold_s": STALL_S,
             "errors": errors,
         }

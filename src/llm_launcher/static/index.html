@@ -1933,18 +1933,33 @@ function bmParamsSummary(p) {
     `${p.endpoint === "chat" ? "chat" : "completions"}${p.stream ? "+stream" : ""}` +
     (p.temperature ? ` · temp${p.temperature}` : " · greedy");
 }
+function bmStallCell(st) {
+  // 最長停止 = 生成開始後のチャンク間ギャップのワースト。目標は「人間が関知
+  // できない」= 閾値 (stall_threshold_s, 既定 0.5s) 以下なので緑/黄/赤で色分け。
+  // 計測追加前の古い履歴にはフィールドが無い。
+  const w = st.stall_worst_s;
+  if (w == null) return `<td title="stall 計測前の記録">-</td>`;
+  const th = st.stall_threshold_s || 0.5;
+  const color = w <= th ? "var(--ok)" : (w <= 2.0 ? "var(--warn)" : "var(--err)");
+  return `<td><b style="color:${color}">${bmF2(w)}s</b></td>`;
+}
 function bmStageTable(stages) {
   return `<div class="bm-wrap"><table class="bm"><tr>` +
     `<th>並列度</th><th>OK</th><th>req/s</th><th>出力 tok/s</th><th>合計 tok/s</th>` +
-    `<th>TTFT avg</th><th>TTFT p99</th><th>遅延 p50</th><th>遅延 p99</th><th>decode tok/s</th></tr>` +
+    `<th>TTFT avg</th><th>TTFT p99</th><th>遅延 p50</th><th>遅延 p99</th><th>decode tok/s</th>` +
+    `<th title="生成開始後、チャンクが最も長く途切れた秒数 (ステージ中の全リクエストのワースト)">最大停止</th>` +
+    `<th title="0.5s 以上の停止が発生した延べ回数 (全リクエスト合計)">停止数</th></tr>` +
     stages.map(st => `<tr>
       <td>${st.concurrency}p</td>
       <td>${st.ok}/${st.ok + st.fail}${st.aborted ? " ⏹" : ""}</td>
       <td>${bmF2(st.rps)}</td><td><b>${bmTps(st.out_tps)}</b></td><td>${bmTps(st.total_tps)}</td>
       <td>${bmF2(st.ttft && st.ttft.avg)}s</td><td>${bmF2(st.ttft && st.ttft.p99)}s</td>
       <td>${bmF2(st.latency && st.latency.p50)}s</td><td>${bmF2(st.latency && st.latency.p99)}s</td>
-      <td>${bmTps(st.decode_tps && st.decode_tps.avg)}</td></tr>`).join("") +
+      <td>${bmTps(st.decode_tps && st.decode_tps.avg)}</td>` +
+      bmStallCell(st) +
+      `<td>${st.stall_count == null ? "-" : st.stall_count + "回"}</td></tr>`).join("") +
     `</table></div>` +
+    `<div class="muted" style="font-size:11px;margin-top:4px">最大停止: 緑 = 人間の体感閾値 (0.5s) 以下 / 黄 = 2s 以下 / 赤 = それ以上。最初のトークンまでの待ちは TTFT 列を参照</div>` +
     (stages.some(s => s.tokens_estimated)
       ? `<div class="muted" style="font-size:11px;margin-top:4px">※ usage を返さない応答があるためトークン数に文字数推定を含みます</div>` : "") +
     (stages.some(s => (s.errors || []).length)
