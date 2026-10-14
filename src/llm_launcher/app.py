@@ -16,12 +16,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
+from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, python_candidates, resolve_port,
                        sections_order)
 from .process import ProcessManager, port_in_use
@@ -34,6 +35,43 @@ from .oom import MemoryGuardError
 STATIC_DIR = Path(__file__).parent / "static"
 
 DETECT_TTL = 20.0
+
+# --------------------------------------------------------------- 認証の既定値
+# /api/* は原則ログイン必須。公開するのは認証系 4 エンドポイントだけ。
+# (GET / と /static はログイン画面そのものなので無認証で配信する)
+AUTH_PUBLIC_PATHS = {"/api/auth/status", "/api/auth/login",
+                     "/api/auth/logout", "/api/auth/setup"}
+AUTH_OFF_VALUES = ("0", "off", "false", "no", "disable", "disabled")
+
+
+def auth_enabled_from_env() -> bool:
+    """LLM_LAUNCHER_AUTH=0 (または `--no-auth`) で認証を無効化できる開発用スイッチ。"""
+    return (os.environ.get("LLM_LAUNCHER_AUTH") or "1").strip().lower() not in AUTH_OFF_VALUES
+
+
+def _auth_http(e: AuthError) -> HTTPException:
+    return HTTPException(e.status, e.message)
+
+
+def _request_token(request: Request) -> str:
+    """Authorization: Bearer (API キー / トークン) → Cookie の順に認証情報を取り出す。"""
+    h = request.headers.get("authorization") or ""
+    if h.lower().startswith("bearer "):
+        return h[7:].strip()
+    return request.cookies.get(COOKIE_NAME, "")
+
+
+def _is_https(request: Request) -> bool:
+    proto = (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip().lower()
+    return proto == "https" or request.url.scheme == "https"
+
+
+def _set_session_cookie(resp: JSONResponse, token: str, remember: bool,
+                        request: Request) -> None:
+    """セッション Cookie。HttpOnly + SameSite=Lax (CSRF 抑止) / https 時は Secure。"""
+    resp.set_cookie(COOKIE_NAME, token,
+                    max_age=REMEMBER_TTL if remember else TOKEN_TTL,
+                    path="/", httponly=True, samesite="lax", secure=_is_https(request))
 
 
 class ProfileBody(BaseModel):
@@ -132,6 +170,49 @@ class PlaygroundChatBody(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     max_tokens: int | None = Field(default=None, ge=1)
+
+
+# --------------------------------------------------------------- 認証のボディ
+
+class LoginBody(BaseModel):
+    """ログイン。remember=True でセッション有効期限を 30 日に延ばす。"""
+    username: str = Field(min_length=1, max_length=64)
+    password: str = Field(min_length=1, max_length=300)
+    remember: bool = False
+
+
+class SetupBody(BaseModel):
+    """初回セットアップ (ユーザーが 1 人もいないときだけ受理される初期管理者作成)。"""
+    username: str = Field(min_length=2, max_length=32)
+    password: str = Field(min_length=8, max_length=256)
+    display_name: str = ""
+
+
+class UserCreateBody(BaseModel):
+    username: str = Field(min_length=2, max_length=32)
+    password: str = Field(min_length=8, max_length=256)
+    display_name: str = ""
+    role: str = "user"
+    enabled: bool = True
+
+
+class UserUpdateBody(BaseModel):
+    """部分更新 (未指定のキーは現状維持)。password は指定時のみ張り替え = 既存セッション失効。"""
+    username: str | None = None
+    display_name: str | None = None
+    role: str | None = None
+    enabled: bool | None = None
+    password: str | None = None
+
+
+class UserPasswordBody(BaseModel):
+    password: str = Field(min_length=8, max_length=256)
+
+
+class OwnPasswordBody(BaseModel):
+    """自分のパスワード変更 (成功すると全セッションが失効し再ログインが必要になる)。"""
+    current_password: str = Field(min_length=1, max_length=300)
+    password: str = Field(min_length=8, max_length=256)
 
 
 def sse_aggregate(raw: str) -> dict[str, Any]:
@@ -318,8 +399,16 @@ def create_app(root: Path) -> FastAPI:
     settings_store = JsonStore(data_dir / "settings.json", {"backends": {}})
     runs_store = JsonStore(data_dir / "runs.json", [])
     bench_store = JsonStore(data_dir / "bench.json", [])
+    users_store = JsonStore(data_dir / "users.json", [])
+    sessions_store = JsonStore(data_dir / "sessions.json", [])
     manager = ProcessManager(root, runs_store, profiles_store, settings_store)
     bench = BenchManager(bench_store, profiles_store, manager)
+    auth = AuthManager(users_store, sessions_store)
+    auth_enabled = auth_enabled_from_env()
+    if auth_enabled:
+        # LLM_LAUNCHER_ADMIN_USER / LLM_LAUNCHER_ADMIN_PASSWORD があれば初期管理者にする
+        # (無ければ UI の初回セットアップ画面で作る)
+        auth.bootstrap_from_env()
 
     detect_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
@@ -410,6 +499,8 @@ def create_app(root: Path) -> FastAPI:
     app = FastAPI(title="llm-launcher", version=__version__, docs_url="/api/docs")
     app.state.manager = manager
     app.state.root = root
+    app.state.auth = auth
+    app.state.auth_enabled = auth_enabled
 
     @app.on_event("startup")
     async def _startup() -> None:
@@ -421,6 +512,160 @@ def create_app(root: Path) -> FastAPI:
     async def _shutdown() -> None:
         await bench.shutdown()
         await manager.shutdown(kill=False)
+
+    # ---------------------------------------------------------------- auth
+    # /api/* は原則ログイン必須。ブラウザは HttpOnly Cookie、スクリプト等は
+    # ユーザー毎の API キー (Authorization: Bearer) で通す。
+    # /api/users* は管理者のみ。認証を無効化した場合 (LLM_LAUNCHER_AUTH=0 /
+    # --no-auth) はミドルウェア自体が素通しになる。
+
+    def current_user(request: Request) -> dict[str, Any] | None:
+        return auth.authenticate_token(_request_token(request))
+
+    def require_user(request: Request) -> dict[str, Any]:
+        if not auth_enabled:
+            raise HTTPException(400, "認証は無効です (LLM_LAUNCHER_AUTH=0 / --no-auth)")
+        u = current_user(request)
+        if not u:
+            raise HTTPException(401, "ログインが必要です")
+        return u
+
+    @app.middleware("http")
+    async def auth_guard(request: Request, call_next):
+        path = request.url.path
+        if not auth_enabled or not path.startswith("/api/") or path in AUTH_PUBLIC_PATHS:
+            return await call_next(request)
+        user = current_user(request)
+        if not user:
+            return JSONResponse({"detail": "ログインが必要です", "code": "unauthorized"},
+                                status_code=401)
+        if path.startswith("/api/users") and user.get("role") != "admin":
+            return JSONResponse({"detail": "管理者権限が必要です", "code": "forbidden"},
+                                status_code=403)
+        request.state.user = user
+        return await call_next(request)
+
+    @app.get("/api/auth/status")
+    async def auth_status(request: Request) -> dict[str, Any]:
+        """ログイン画面の初期化用。needs_setup=True なら管理者作成フォームを出す。"""
+        user = current_user(request) if auth_enabled else None
+        return {
+            "auth_enabled": auth_enabled,
+            "needs_setup": bool(auth_enabled and not auth.has_users()),
+            "authenticated": True if not auth_enabled else bool(user),
+            "is_admin": (user.get("role") == "admin") if user else (not auth_enabled),
+            "user": auth.public(user),
+        }
+
+    @app.post("/api/auth/login")
+    async def auth_login(body: LoginBody, request: Request) -> JSONResponse:
+        ip = request.client.host if request.client else "?"
+        try:
+            user = auth.authenticate(body.username, body.password, key=ip)
+        except AuthError as e:
+            raise _auth_http(e)
+        token = auth.issue(user["id"], remember=body.remember,
+                           agent=request.headers.get("user-agent", ""))
+        resp = JSONResponse({"ok": True, "user": auth.public(user),
+                             "expires_in": REMEMBER_TTL if body.remember else TOKEN_TTL})
+        _set_session_cookie(resp, token, body.remember, request)
+        return resp
+
+    @app.post("/api/auth/logout")
+    async def auth_logout(request: Request) -> JSONResponse:
+        token = _request_token(request)
+        if token:
+            auth.revoke(token)
+        resp = JSONResponse({"ok": True})
+        resp.delete_cookie(COOKIE_NAME, path="/")
+        return resp
+
+    @app.post("/api/auth/setup", status_code=201)
+    async def auth_setup(body: SetupBody, request: Request) -> JSONResponse:
+        """初期管理者の作成。ユーザーが 1 人もいないときだけ成功する。"""
+        if not auth_enabled:
+            raise HTTPException(400, "認証は無効です (LLM_LAUNCHER_AUTH=0 / --no-auth)")
+        try:
+            user = auth.create_first_admin(body.username, body.password, body.display_name)
+        except AuthError as e:
+            raise _auth_http(e)
+        token = auth.issue(user["id"], agent=request.headers.get("user-agent", ""))
+        resp = JSONResponse({"ok": True, "user": user}, status_code=201)
+        _set_session_cookie(resp, token, False, request)
+        return resp
+
+    @app.post("/api/auth/password")
+    async def auth_password(body: OwnPasswordBody, request: Request) -> dict[str, Any]:
+        """自分のパスワード変更。成功で全セッションが失効するため再ログインが必要。"""
+        user = require_user(request)
+        try:
+            auth.change_own_password(user["id"], body.current_password, body.password)
+        except AuthError as e:
+            raise _auth_http(e)
+        return {"ok": True, "relogin": True,
+                "note": "パスワードを変更しました。再ログインしてください"}
+
+    # --------------------------------------------------------------- users
+    # 管理者のみ (上のミドルウェアが /api/users* を role == "admin" に限定する)。
+
+    @app.get("/api/users")
+    async def list_users() -> dict[str, Any]:
+        if not auth_enabled:
+            raise HTTPException(400, "認証が無効なためユーザー管理は利用できません "
+                                     "(LLM_LAUNCHER_AUTH=0 / --no-auth)")
+        return {"users": auth.list_users()}
+
+    @app.post("/api/users", status_code=201)
+    async def create_user(body: UserCreateBody) -> dict[str, Any]:
+        try:
+            return auth.create_user(body.username, body.password, body.display_name,
+                                    body.role, body.enabled)
+        except AuthError as e:
+            raise _auth_http(e)
+
+    @app.put("/api/users/{uid}")
+    async def update_user(uid: str, body: UserUpdateBody, request: Request) -> dict[str, Any]:
+        actor = getattr(request.state, "user", None) or {}
+        try:
+            return auth.update_user(uid, body.model_dump(exclude_unset=True),
+                                    actor_id=actor.get("id"))
+        except AuthError as e:
+            raise _auth_http(e)
+
+    @app.delete("/api/users/{uid}")
+    async def delete_user(uid: str, request: Request) -> dict[str, Any]:
+        actor = getattr(request.state, "user", None) or {}
+        try:
+            auth.delete_user(uid, actor_id=actor.get("id"))
+        except AuthError as e:
+            raise _auth_http(e)
+        return {"ok": True}
+
+    @app.post("/api/users/{uid}/password")
+    async def set_user_password(uid: str, body: UserPasswordBody) -> dict[str, Any]:
+        try:
+            auth.set_password(uid, body.password)
+        except AuthError as e:
+            raise _auth_http(e)
+        return {"ok": True, "note": "パスワードを変更しました (このユーザーのセッションは失効)"}
+
+    @app.post("/api/users/{uid}/apikey")
+    async def rotate_user_apikey(uid: str) -> dict[str, Any]:
+        try:
+            key = auth.rotate_api_key(uid)
+        except AuthError as e:
+            raise _auth_http(e)
+        return {"ok": True, "api_key": key,
+                "note": "平文はこの 1 回だけ返ります。"
+                        "curl -H 'Authorization: Bearer <key>' で使えます"}
+
+    @app.delete("/api/users/{uid}/apikey")
+    async def revoke_user_apikey(uid: str) -> dict[str, Any]:
+        try:
+            auth.revoke_api_key(uid)
+        except AuthError as e:
+            raise _auth_http(e)
+        return {"ok": True}
 
     # -------------------------------------------------------------- system
 

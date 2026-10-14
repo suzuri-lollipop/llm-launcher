@@ -98,7 +98,7 @@ nav#sidemen .mitem .nbadge{margin-left:auto;background:var(--err);color:#fff;
 #menu-veil{position:fixed;inset:0;background:rgba(4,7,11,.55);z-index:29;display:none}
 #menu-veil.on{display:block}
 label.f{display:block;font-size:12.5px;color:var(--sub);margin:12px 0 4px;font-weight:600}
-input[type=text],input[type=number],select,textarea{
+input[type=text],input[type=password],input[type=number],select,textarea{
   width:100%;background:var(--bg2);border:1px solid var(--line);border-radius:var(--r2);
   color:var(--text);padding:10px 12px;font-size:14px;font-family:inherit;min-height:42px;
 }
@@ -134,14 +134,14 @@ pre.cmdprev{
 details.adv{border:1px solid var(--line);border-radius:var(--r2);margin-top:12px;background:var(--bg2)}
 details.adv summary{padding:10px 12px;font-size:13px;color:var(--sub);cursor:pointer;min-height:42px;display:flex;align-items:center}
 details.adv .inner{padding:0 12px 12px}
-#modal-veil{position:fixed;inset:0;background:rgba(4,7,11,.72);z-index:40;display:none}
-#modal{position:fixed;left:0;right:0;bottom:0;top:0;z-index:50;display:none;justify-content:center;align-items:flex-end}
-#modal .sheet{
+#modal-veil,#umodal-veil{position:fixed;inset:0;background:rgba(4,7,11,.72);z-index:40;display:none}
+#modal,#umodal{position:fixed;left:0;right:0;bottom:0;top:0;z-index:50;display:none;justify-content:center;align-items:flex-end}
+#modal .sheet,#umodal .sheet{
   background:var(--card);width:100%;max-width:680px;max-height:92vh;overflow:auto;
   border-radius:18px 18px 0 0;border:1px solid var(--line);padding:16px 16px calc(20px + env(safe-area-inset-bottom));
 }
-@media(min-width:760px){#modal{align-items:center}#modal .sheet{border-radius:18px;max-height:88vh;margin:0 16px}}
-#modal .sheet h3{margin:2px 0 6px;font-size:16px}
+@media(min-width:760px){#modal,#umodal{align-items:center}#modal .sheet,#umodal .sheet{border-radius:18px;max-height:88vh;margin:0 16px}}
+#modal .sheet h3,#umodal .sheet h3{margin:2px 0 6px;font-size:16px}
 .sheet-actions{display:flex;gap:10px;margin-top:18px;position:sticky;bottom:-16px;background:var(--card);padding:10px 0 0}
 #toast{
   position:fixed;left:50%;transform:translateX(-50%);bottom:calc(24px + env(safe-area-inset-bottom));
@@ -155,6 +155,26 @@ details.adv .inner{padding:0 12px 12px}
 .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--sub);border-top-color:transparent;border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
 .hidden{display:none!important}
+/* ---------------- ログイン / 初回セットアップ ---------------- */
+#login{position:fixed;inset:0;z-index:70;display:flex;align-items:center;justify-content:center;padding:18px;
+  background:radial-gradient(1100px 560px at 50% -12%,#16283e 0%,var(--bg) 62%)}
+#login .box{width:100%;max-width:372px;background:var(--card);border:1px solid var(--line);border-radius:18px;
+  padding:20px 18px calc(20px + env(safe-area-inset-bottom));box-shadow:0 18px 50px rgba(0,0,0,.55)}
+#login .logo{font-size:20px;font-weight:800;letter-spacing:.3px}
+#login .sub{color:var(--sub);font-size:12.5px;margin:5px 0 6px;line-height:1.55}
+#login .err{background:#241213;border:1px solid #4d2323;color:var(--err);border-radius:var(--r2);
+  padding:9px 12px;font-size:12.5px;margin-top:10px;white-space:pre-wrap}
+#login .foot{color:var(--sub);font-size:11px;text-align:center;margin-top:14px;line-height:1.6}
+#login button.primary{width:100%;margin-top:16px;min-height:46px;font-size:15px}
+#hdr-user{display:flex;align-items:center;gap:6px;margin-left:10px;flex:none}
+body.auth-lock{overflow:hidden}
+/* ---------------- ユーザー管理 ---------------- */
+.keyline{display:flex;align-items:center;gap:6px;margin-top:9px;flex-wrap:wrap}
+.keyline code{background:#0a0d12;border:1px solid var(--line);border-radius:6px;padding:4px 8px;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;color:#9fd3a8;
+  overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.um-actions{display:flex;gap:8px;margin-top:12px;flex-wrap:wrap}
+.um-actions button{min-height:36px;padding:6px 11px;font-size:12.5px}
 /* ---------------- dashboard (ホーム) ---------------- */
 a.btn,a.btn:hover{color:var(--text);text-decoration:none}
 .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(132px,1fr));gap:10px}
@@ -208,10 +228,39 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
 </style>
 </head>
 <body>
+<div id="login">
+  <div class="box">
+    <div class="logo">🚀 LLM Launcher</div>
+    <div class="sub" id="login-sub">管理アカウントでログインしてください</div>
+    <div class="err hidden" id="login-err"></div>
+    <form id="login-form" onsubmit="return loginSubmit(event)" autocomplete="on">
+      <label class="f" for="login-user">ユーザー名</label>
+      <input type="text" id="login-user" autocomplete="username" autocapitalize="none"
+             spellcheck="false" required maxlength="64">
+      <label class="f" for="login-pass">パスワード</label>
+      <input type="password" id="login-pass" autocomplete="current-password" required maxlength="256">
+      <div id="login-pw2wrap" class="hidden">
+        <label class="f" for="login-pw2">パスワード (確認)</label>
+        <input type="password" id="login-pw2" autocomplete="new-password" maxlength="256">
+      </div>
+      <label class="switch hidden" id="login-rememberwrap" style="margin-top:8px">
+        <input type="checkbox" id="login-remember"><span class="track"></span>
+        <span class="lab">ログイン状態を保持 (30日)</span>
+      </label>
+      <button class="primary" id="login-btn" type="submit">ログイン</button>
+    </form>
+    <div class="foot" id="login-foot"></div>
+  </div>
+</div>
 <header>
   <div id="live-dot"></div>
   <h1>LLM Launcher</h1>
   <div class="meta" id="hdr-meta">connecting…</div>
+  <div id="hdr-user" class="hidden">
+    <span class="badge info" id="hdr-user-name"></span>
+    <span class="badge" id="hdr-user-role"></span>
+    <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="logout()">ログアウト</button>
+  </div>
 </header>
 
 <main>
@@ -300,6 +349,24 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
     <div class="grid c2" id="backends-grid"></div>
   </section>
 
+  <section id="view-users" class="view hidden">
+    <h2 class="view-title">ユーザー管理 <span class="muted">ログインアカウントと API キー (管理者のみ)</span></h2>
+    <div id="um-note" class="card hidden" style="margin-bottom:12px;border-color:#4d3d1f;background:#241d10"></div>
+    <div class="row" style="margin-bottom:10px">
+      <span class="muted">ロール: <b>管理者</b> = 全機能 + ユーザー管理 / <b>ユーザー</b> = 起動・サーバー・プレイグラウンド・ベンチ (ユーザー管理のみ閲覧不可)</span>
+      <span class="grow"></span>
+      <button class="ghost" onclick="loadUsers()">↻ 更新</button>
+      <button class="primary" id="um-new" onclick="umOpen()">＋ 新規ユーザー</button>
+    </div>
+    <div class="grid c2" id="users-grid">
+      <div class="empty"><span class="spin"></span> 読み込み中…</div>
+    </div>
+    <div class="muted" style="margin-top:12px;font-size:11.5px">
+      API キーはスクリプトから <code style="font-size:11px">curl -H "Authorization: Bearer &lt;キー&gt;" http://&lt;host&gt;:8036/api/state</code> のように使えます。
+      平文は発行 (再生成) したときだけ表示され、サーバーにはハッシュ保存されます。パスワードを変更するとそのユーザーのセッションは全て失効します。
+    </div>
+  </section>
+
   <section id="view-playground" class="view hidden">
     <h2 class="view-title">プレイグラウンド <span class="muted">起動中のサーバーとチャット (OpenAI 互換 API 透過プロキシ)</span></h2>
     <div class="card" style="padding:10px 12px">
@@ -384,12 +451,15 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
     <button class="mitem" data-tab="bench"><span class="ico">📊</span>ベンチマーク<span class="nbadge hidden" id="nb-bench"></span></button>
     <button class="mitem" data-tab="profiles"><span class="ico">📋</span>プロファイル</button>
     <button class="mitem" data-tab="backends"><span class="ico">⚙️</span>バックエンド</button>
+    <button class="mitem hidden" data-tab="users" id="mi-users"><span class="ico">👥</span>ユーザー管理</button>
   </div>
 </nav>
 <div id="menu-veil" onclick="setMenu(false)"></div>
 
 <div id="modal-veil" onclick="closeEditor()"></div>
 <div id="modal"><div class="sheet" id="editor-sheet"></div></div>
+<div id="umodal-veil" onclick="umClose()"></div>
+<div id="umodal"><div class="sheet" id="umodal-sheet"></div></div>
 <div id="toast"></div>
 
 <script>
@@ -430,7 +500,12 @@ async function api(path, opts = {}) {
   });
   let data = null;
   try { data = await r.json(); } catch { /* ignore */ }
-  if (!r.ok) { const e = new Error((data && data.detail) || `HTTP ${r.status}`); e.status = r.status; throw e; }
+  if (!r.ok) {
+    const e = new Error((data && data.detail) || `HTTP ${r.status}`); e.status = r.status;
+    // セッション切れ: 定期取得を止めてログイン画面へ戻す (認証 API 自身の 401 は除く)
+    if (r.status === 401 && !path.startsWith("/api/auth/")) onUnauthorized();
+    throw e;
+  }
   return data;
 }
 function toast(msg, ms = 3500) {
@@ -505,6 +580,7 @@ function switchTab(tab) {
   document.querySelectorAll("section.view").forEach(v => v.classList.add("hidden"));
   $("#view-" + tab).classList.remove("hidden");
   renderAll();
+  if (tab === "users") loadUsers();
 }
 
 /* ============================================================= render */
@@ -523,6 +599,130 @@ function renderTabBadges() {
   const n = liveSessions().length;
   const nb = $("#nb-servers");
   nb.classList.toggle("hidden", n === 0); nb.textContent = n;
+}
+
+/* ============================================================= 認証 */
+const AUTH = { enabled: true, needsSetup: false, user: null, isAdmin: false,
+               mode: "login", booted: false };
+
+function loginError(msg) {
+  const el = $("#login-err");
+  if (!msg) { el.textContent = ""; el.classList.add("hidden"); return; }
+  el.textContent = msg; el.classList.remove("hidden");
+}
+function setLoginMode(mode) {
+  AUTH.mode = mode === "setup" ? "setup" : "login";
+  const setup = AUTH.mode === "setup";
+  $("#login-sub").textContent = setup
+    ? "初めての起動です。管理者アカウントを作成してください"
+    : "管理アカウントでログインしてください";
+  $("#login-pw2wrap").classList.toggle("hidden", !setup);
+  $("#login-rememberwrap").classList.toggle("hidden", setup);
+  $("#login-btn").textContent = setup ? "管理者を作成して開始" : "ログイン";
+  $("#login-pass").setAttribute("autocomplete", setup ? "new-password" : "current-password");
+  $("#login-foot").textContent = setup
+    ? "パスワードは 8 文字以上。PBKDF2-HMAC-SHA256 でハッシュ化して保存し、平文では残しません"
+    : "ログイン失敗が 5 回続くと 30 秒間ロックされます";
+  loginError("");
+}
+function showLogin(msg) {
+  setLoginMode(AUTH.needsSetup ? "setup" : "login");
+  $("#login").classList.remove("hidden");
+  document.body.classList.add("auth-lock");
+  if (msg) loginError(msg);
+  setTimeout(() => { const el = $("#login-user"); if (el) el.focus(); }, 60);
+}
+function hideLogin() {
+  $("#login").classList.add("hidden");
+  document.body.classList.remove("auth-lock");
+}
+async function fetchAuthStatus() {
+  try {
+    const st = await api("/api/auth/status");
+    AUTH.enabled = st.auth_enabled !== false;
+    AUTH.needsSetup = !!st.needs_setup;
+    AUTH.user = st.user || null;
+    AUTH.isAdmin = !!st.is_admin;
+  } catch {
+    // 認証 API が読めない (旧サーバー等) → 認証なしとして通常の起動を続ける
+    AUTH.enabled = false; AUTH.needsSetup = false; AUTH.user = null; AUTH.isAdmin = true;
+  }
+}
+function applyAuthUi() {
+  const box = $("#hdr-user");
+  const u = AUTH.user;
+  if (u) {
+    box.classList.remove("hidden");
+    // ユーザー名とロールを別バッジにする (表示名を混ぜると「管理者・管理者」のように重複する)
+    $("#hdr-user-name").textContent = "@" + u.username;
+    const role = $("#hdr-user-role");
+    role.textContent = u.role === "admin" ? "管理者" : "ユーザー";
+    role.className = "badge" + (u.role === "admin" ? " purple" : "");
+    const dn = u.display_name && u.display_name !== u.username ? u.display_name : "";
+    box.title = dn ? `${dn} (@${u.username})` : `@${u.username}`;
+  } else {
+    box.classList.add("hidden");
+    box.title = "";
+  }
+  $("#mi-users").classList.toggle("hidden", !AUTH.isAdmin);
+  if (!AUTH.isAdmin && S.tab === "users") switchTab("home");
+}
+async function loginSubmit(ev) {
+  ev.preventDefault();
+  const btn = $("#login-btn"), label = btn.textContent;
+  const user = $("#login-user").value.trim(), pass = $("#login-pass").value;
+  loginError("");
+  if (AUTH.mode === "setup") {
+    if (pass.length < 8) { loginError("パスワードは 8 文字以上にしてください"); return false; }
+    if (pass !== $("#login-pw2").value) { loginError("パスワード (確認) が一致しません"); return false; }
+  }
+  btn.disabled = true; btn.textContent = "処理中…";
+  let errMsg = "";
+  try {
+    if (AUTH.mode === "setup") {
+      await api("/api/auth/setup", { method: "POST", body: { username: user, password: pass } });
+      AUTH.needsSetup = false;
+    } else {
+      await api("/api/auth/login", { method: "POST",
+        body: { username: user, password: pass, remember: $("#login-remember").checked } });
+    }
+    await fetchAuthStatus();
+    applyAuthUi(); hideLogin();
+    $("#login-pass").value = ""; $("#login-pw2").value = "";
+    toast(`ようこそ、${(AUTH.user && (AUTH.user.display_name || AUTH.user.username)) || ""} さん`);
+    await refresh(false); startTimers();
+  } catch (e) {
+    errMsg = e.message || "ログインに失敗しました";
+  }
+  btn.disabled = false;
+  setLoginMode(AUTH.needsSetup ? "setup" : "login");   // 文面を戻してから
+  btn.textContent = label;
+  if (errMsg) loginError(errMsg);                      // 失敗メッセージを後がけする
+  return false;
+}
+async function logout() {
+  try { await api("/api/auth/logout", { method: "POST" }); } catch { /* Cookie が無ければ画面だけ戻す */ }
+  AUTH.user = null; AUTH.isAdmin = false;
+  stopTimers(); applyAuthUi(); showLogin();
+  toast("ログアウトしました");
+}
+function stopTimers() {
+  clearInterval(refreshTimer); clearInterval(logTimer);
+  clearInterval(sysTimer); clearInterval(benchTimer);
+  refreshTimer = logTimer = sysTimer = benchTimer = null;
+}
+function onUnauthorized() {
+  if (!AUTH.booted || !AUTH.user) return;      // boot 前の 401 は boot 側で処理する
+  AUTH.user = null; AUTH.isAdmin = false;
+  stopTimers(); applyAuthUi();
+  showLogin("セッションが切れました。再度ログインしてください");
+}
+async function boot() {
+  await fetchAuthStatus();
+  applyAuthUi();
+  AUTH.booted = true;
+  if (!AUTH.enabled || AUTH.user) { hideLogin(); await refresh(false); startTimers(); }
+  else showLogin();
 }
 
 /* ---------------- dashboard (ホーム) ---------------- */
@@ -1418,8 +1618,194 @@ async function saveEditor() {
 document.addEventListener("keydown", e => {
   if (e.key !== "Escape") return;
   if ($("#sidemen").classList.contains("open")) setMenu(false);
+  else if ($("#umodal").style.display === "flex") umClose();
   else closeEditor();
 });
+
+/* ============================================================= ユーザー管理 (管理者のみ) */
+const UM = { users: [], editing: null, mode: "form", reveal: {} };
+
+async function loadUsers() {
+  const grid = $("#users-grid");
+  try {
+    const d = await api("/api/users");
+    UM.users = d.users || [];
+    renderUsers();
+  } catch (e) {
+    if (e.status === 400) {              // 認証を無効化して起動しているモード
+      $("#um-note").innerHTML = `<b>認証が無効です</b> <span class="muted">${esc(e.message)}</span>`;
+      $("#um-note").classList.remove("hidden");
+      $("#um-new").classList.add("hidden");
+    }
+    grid.innerHTML = `<div class="empty">読み込みに失敗: ${esc(e.message)}</div>`;
+  }
+}
+function renderUsers() {
+  const grid = $("#users-grid");
+  if (!UM.users.length) { grid.innerHTML = `<div class="empty">ユーザーがいません</div>`; return; }
+  const me = AUTH.user && AUTH.user.id;
+  grid.innerHTML = UM.users.map(u => {
+    const key = UM.reveal[u.id];
+    const uid = esc(u.id);
+    return `<div class="card">
+      <div class="row" style="gap:8px">
+        <span class="badge ${u.role === "admin" ? "purple" : "info"}">${u.role === "admin" ? "管理者" : "ユーザー"}</span>
+        <b class="grow ellip mono">@${esc(u.username)}</b>
+        ${u.id === me ? `<span class="badge">あなた</span>` : ``}
+        <span class="badge ${u.enabled ? "ok" : "err"}><span class="dot"></span>${u.enabled ? "有効" : "無効"}</span>
+      </div>
+      <div class="kvs" style="margin-top:9px">
+        <span>表示名</span><span class="v">${esc(u.display_name || "-")}</span>
+        <span>最終ログイン</span><span class="v">${esc(fmtAgo(u.last_login_at))}</span>
+        <span>作成 / 更新</span><span class="v">${esc(fmtAgo(u.created_at))} / ${esc(fmtAgo(u.updated_at))}</span>
+      </div>
+      <div class="keyline">
+        <span class="muted">APIキー</span>
+        ${key ? `<code id="um-key-${uid}">${esc(key)}</code>
+          <button class="ghost" onclick="umCopyKey('${uid}')">コピー</button>`
+        : `<code>${u.has_api_key ? "発行済み (平文は再表示されません)" : "未発行"}</code>`}
+        <button class="ghost" onclick="umRotate('${uid}')">${u.has_api_key ? "再生成" : "発行"}</button>
+      </div>
+      <div class="um-actions">
+        <button class="ghost" onclick="umOpen('${uid}')">✏️ 編集</button>
+        <button class="ghost" onclick="umOpen('${uid}','pw')">🔑 パスワード</button>
+        <button class="ghost" onclick="umToggle('${uid}')">${u.enabled ? "無効化" : "有効化"}</button>
+        <button class="danger" onclick="umDelete('${uid}')">削除</button>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function umOpen(uid = "", mode = "form") {
+  UM.editing = uid || null; UM.mode = mode;
+  const u = uid ? UM.users.find(x => x.id === uid) : null;
+  if (uid && !u) return;
+  const sheet = $("#umodal-sheet");
+  if (mode === "pw") {
+    sheet.innerHTML = `<h3>パスワード変更 — @${esc(u.username)}</h3>
+      <div class="muted">8 文字以上で入力してください。変更するとこのユーザーのログインセッションは全て失効します。</div>
+      <label class="f" for="um-pw">新しいパスワード</label>
+      <input type="password" id="um-pw" autocomplete="new-password" maxlength="256">
+      <label class="f" for="um-pw2">確認</label>
+      <input type="password" id="um-pw2" autocomplete="new-password" maxlength="256">
+      <div class="sheet-actions">
+        <button class="primary grow" onclick="umSavePw()">変更</button>
+        <button class="ghost grow" onclick="umClose()">キャンセル</button>
+      </div>`;
+  } else {
+    sheet.innerHTML = `<h3>${u ? `ユーザー編集 — @${esc(u.username)}` : "新規ユーザー"}</h3>
+      <label class="f" for="um-name">ユーザー名 ${u ? `<span class="muted">(小文字英数字・変更不可)</span>` : `<span class="muted">(2〜32 文字の小文字英数字と . _ -)</span>`}</label>
+      <input type="text" id="um-name" maxlength="32" autocapitalize="none" spellcheck="false"
+             value="${esc(u ? u.username : "")}" ${u ? "disabled" : ""}>
+      <label class="f" for="um-dname">表示名</label>
+      <input type="text" id="um-dname" maxlength="60" value="${esc(u ? u.display_name : "")}">
+      <label class="f" for="um-role">ロール</label>
+      <select id="um-role"><option value="user">ユーザー</option><option value="admin">管理者</option></select>
+      <label class="switch"><input type="checkbox" id="um-enabled"><span class="track"></span>
+        <span class="lab">アカウントを有効にする (無効にするとログイン不可)</span></label>
+      <label class="f" for="um-pw">${u ? `新しいパスワード <span class="muted">(空欄 = 変更しない)</span>` : "パスワード (8 文字以上)"}</label>
+      <input type="password" id="um-pw" autocomplete="new-password" maxlength="256">
+      <div class="sheet-actions">
+        <button class="primary grow" onclick="umSave()">保存</button>
+        <button class="ghost grow" onclick="umClose()">キャンセル</button>
+      </div>`;
+    $("#um-role").value = u ? u.role : "user";
+    $("#um-enabled").checked = u ? !!u.enabled : true;
+  }
+  $("#umodal").style.display = "flex";
+  $("#umodal-veil").style.display = "block";
+  setTimeout(() => {
+    const el = $("#" + (mode === "pw" ? "um-pw" : (u ? "um-dname" : "um-name")));
+    if (el) el.focus();
+  }, 60);
+}
+function umClose() {
+  $("#umodal").style.display = "none";
+  $("#umodal-veil").style.display = "none";
+  UM.editing = null; UM.mode = "form";
+}
+function umReadPw(allowEmpty) {
+  const p = $("#um-pw").value;
+  if (!p) {
+    if (allowEmpty) return "";
+    toast("パスワードは 8 文字以上にしてください"); return null;
+  }
+  if (p.length < 8) { toast("パスワードは 8 文字以上にしてください"); return null; }
+  return p;
+}
+async function umSave() {
+  const isNew = !UM.editing;
+  const pw = umReadPw(!isNew);
+  if (pw === null) return;
+  const body = {
+    display_name: $("#um-dname").value.trim(),
+    role: $("#um-role").value,
+    enabled: $("#um-enabled").checked,
+  };
+  if (isNew) {
+    body.username = $("#um-name").value.trim();
+    if (!body.username) { toast("ユーザー名を入力してください"); return; }
+    body.password = pw;
+  } else if (pw) {
+    body.password = pw;
+  }
+  try {
+    if (isNew) await api("/api/users", { method: "POST", body });
+    else await api(`/api/users/${UM.editing}`, { method: "PUT", body });
+    toast(isNew ? "ユーザーを作成しました" : "保存しました");
+    umClose();
+    await loadUsers();
+  } catch (e) { toast("失敗: " + e.message); }
+}
+async function umSavePw() {
+  const p = $("#um-pw").value;
+  if (p.length < 8) { toast("パスワードは 8 文字以上にしてください"); return; }
+  if (p !== $("#um-pw2").value) { toast("確認用パスワードが一致しません"); return; }
+  try {
+    await api(`/api/users/${UM.editing}/password`, { method: "POST", body: { password: p } });
+    toast("パスワードを変更しました (このユーザーのセッションは失効)");
+    umClose();
+    await loadUsers();
+  } catch (e) { toast("失敗: " + e.message); }
+}
+async function umToggle(uid) {
+  const u = UM.users.find(x => x.id === uid);
+  if (!u) return;
+  try {
+    await api(`/api/users/${uid}`, { method: "PUT", body: { enabled: !u.enabled } });
+    toast(u.enabled ? "無効化しました" : "有効化しました");
+    await loadUsers();
+  } catch (e) { toast("失敗: " + e.message); }
+}
+async function umDelete(uid) {
+  const u = UM.users.find(x => x.id === uid);
+  if (!u) return;
+  if (!confirm(`ユーザー @${u.username} を削除しますか?\nログイン中のセッションも失効します。`)) return;
+  try {
+    await api(`/api/users/${uid}`, { method: "DELETE" });
+    delete UM.reveal[uid];
+    toast("削除しました");
+    await loadUsers();
+  } catch (e) { toast("失敗: " + e.message); }
+}
+async function umRotate(uid) {
+  const u = UM.users.find(x => x.id === uid);
+  if (!u) return;
+  if (u.has_api_key && !confirm("API キーを再生成しますか?\n既存のキーは直ちに無効になります。")) return;
+  try {
+    const d = await api(`/api/users/${uid}/apikey`, { method: "POST" });
+    UM.reveal[uid] = d.api_key;
+    await loadUsers();
+    toast("API キーを発行しました — 平文はこの 1 回だけ表示されます");
+  } catch (e) { toast("失敗: " + e.message); }
+}
+function umCopyKey(uid) {
+  const k = UM.reveal[uid];
+  if (!k) return;
+  (navigator.clipboard ? navigator.clipboard.writeText(k) : Promise.reject())
+    .then(() => toast("コピーしました"))
+    .catch(() => toast("自動コピーできない環境です — 表示されたキーを選択してコピーしてください"));
+}
 
 /* ============================================================= backends view */
 /* ---------------- OOM 対策パネル ---------------- */
@@ -2178,7 +2564,7 @@ $("#pg-input").addEventListener("keydown", e => {
 });
 ["pg-sys", "pg-temp", "pg-topp", "pg-mtok", "pg-stream"].forEach(id =>
   $(`#${id}`).addEventListener("change", pgPersist));
-refresh(false).then(startTimers);
+boot();                       // 認証状態を確認してから本体 UI を起動する
 setInterval(renderTabBadges, 1000);
 </script>
 </body>

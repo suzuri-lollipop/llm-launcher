@@ -37,13 +37,15 @@ git submodule update --init --depth 1
 #    ※ module/fork/ はフォルダのみ追跡。配下のリポジトリは追跡外 (submodule 化もしない)
 git clone --branch suzuri/develop https://github.com/suzuri-lollipop/FreeToken module/fork/freetoken
 
-# 2. 管理アプリを起動 (既定で 0.0.0.0:8036 で待ち受け)
+# 2. 管理アプリを起動 (既定で 0.0.0.0:8036 で待ち受け / 認証 ON)
 uv run llm-launcher
 ```
 
 起動時に表示される `http://<LAN-IP>:8036` にスマホ / PC のブラウザからアクセスしてください。
+**初めてのアクセス時は管理者アカウント作成画面**が出るので、ユーザー名とパスワード (8 文字以上) を登録するとそのままログインします (→ [認証・ユーザー管理](#認証ユーザー管理))。
 
 - `--host` / `--port` オプション、または `LLM_LAUNCHER_HOST` / `LLM_LAUNCHER_PORT` 環境変数で変更可能
+- 認証を切って従来どおり誰でもアクセスできる状態で起動する場合: `uv run llm-launcher --no-auth` (または `LLM_LAUNCHER_AUTH=0`) ※ LAN 内・開発用
 - 常駐させたい場合は systemctl に登録できます (sudo 不要): `scripts/systemd-install.sh` → [systemctl に登録](#systemctl-に登録-常駐運用)
 - (任意・推奨) 同じ PC で重い CLI 等を動かす場合は OOM 対策ヘルパーを入れておくと、モデルが OOM killer の一番の犠牲者になりにくくなります: `sudo scripts/oom-protect-install.sh` → [OOM 対策](#oom-対策-重い-cli-と同居させる環境向け)
 - バックエンド自体のインストールは各自の環境に依存します:
@@ -83,6 +85,7 @@ scripts/systemd-install.sh --uninstall  # 停止 + 登録解除 + ユニット�
 | 🧪 プレイグラウンド | **起動中のサーバーと直接チャットできる Playground**。サーバー / モデル選択 (`/v1/models`)、システムプロンプト、temperature / top_p / max_tokens、SSE ストリーム描画 (思考内容 = reasoning の折りたたみ表示、所要時間 / first token 遅延 (TTFT) / **生成速度 tok/s をストリーミング中にリアルタイム表示** / トークン数 (prompt→completion) の統計)、Enter 送信 / Shift+Enter 改行 / Stop ボタンで中断、会話はブラウザ (localStorage・サーバー毎) に自動保存。コードフェンスのシンタックス風表示とコピーボタン付き。稼働中サーバーのカード / ホーム / サーバー画面の 🧪 ボタンからも入室可 |
 | 📊 ベンチマーク | **作成済みプロファイルのサーバーを直接計測する組み込みベンチ**。対象プロファイルを選択 (未起動なら自動起動、完了後の自動停止も可) し、並列度リスト (例 `1,8,32`) を各 1 ステージとして逐次実行。リクエスト数 / prompt 語数 / max_tokens / temperature / エンドポイント (chat・completions) / stream / warmup を設定でき、プロンプトはリクエスト毎に重複しないランダム文章で prefix cache を抑制。ステージごとに **出力 tok/s・合計 tok/s・req/s・TTFT (avg/p99)・遅延分布 (p50/p99)・decode tok/s** を算出し、実行中はライブ進行バー (フェーズ・累積 tok/s)。履歴は `data/bench.json` に最大 50 件保存され、結果テーブル展開 / 設定の再読込 / JSON エクスポート / 削除 / 中断が可能。トークン数は API の `usage` 優先、非対応サーバーは文字数推定 (結果テーブルに注記)。同時実走は 1 件 (GPU 計測の互干渉防止)。追加依存なしの標準ライブラリのみで動作 |
 | 📋 プロファイル | **プロファイル管理画面**。一覧に検索 (名前/モデル/バックエンド/メモ)、並び替え (更新/名前/バックエンド/使用回数)、バックエンド別フィルタ (件数表示)。カードで有効パラメータ数・使用履歴 (起動回数/最終利用/異常終了数) を確認でき、起動/編集/複製/削除/JSON エクスポートを実行。**一括選択モード**でのまとめて削除/エクスポート、**JSON インポート** (他マシンへの移行・バックアップ) も可。編集画面はプルダウンでバックエンドを選ぶと起動パラメータが全項目リスト化・既定値入りで表示され、☑ で各フラグの送出 ON/OFF を制御 (vLLM 44項目 / SGLang 62項目 / llama.cpp 40項目 / FreeToken 45項目 / FreeToken (fork) 56項目 / Strata 18項目。fork は MTP 投機的デコード `--speculative` やカーネル最適化など fork 独自項目を含む) |
+| 👥 ユーザー | **管理者のみ表示できるユーザー管理画面**。ユーザー一覧 (ロール / 有効状態 / 最終ログイン)、新規作成・編集・有効化 / 無効化・削除、パスワードリセット、API キーの発行 / 再生成 / 失効 (平文は発行時の 1 回だけ表示)。認証を無効化して起動している場合は利用不可の案内を表示 |
 | ⚙️ バックエンド | 各 submodule の状態 (取得済み / インストール検出)、起動コマンドテンプレートや python / バイナリパスの上書き設定、再検出 |
 
 ### プロファイル作成画面の流れ
@@ -108,7 +111,31 @@ scripts/systemd-install.sh --uninstall  # 停止 + 登録解除 + ユニット�
 - 「コマンドのみモード」(高度な設定): ON にするとリスト項目のフラグ自動付与を止めます (カスタム起動の最終手段)
 - 旧 v2 (1プロファイルに複数バックエンド) の `data/profiles.json` は、起動時に**バックエンドごとの別プロファイルへ自動分離**されます
 
+## 認証・ユーザー管理
+
+既定で認証が **ON** です。`/api/*` はログイン前だと `401 {"detail":"ログインが必要です","code":"unauthorized"}` を返し、トップ画面 (ログイン / 管理者作成フォーム) だけが開けます。
+
+- **初回セットアップ**: ユーザーが 0 人のとき、最初の 1 人だけ `POST /api/auth/setup` で管理者を作成できます (作成 = 自動ログイン)。以降の setup は `403`。表示名は未指定ならユーザー名になり、画面右上は `@ユーザー名` + ロールバッジの別表示です (表示名の変更は ユーザー管理画面から)。CI 等で先回りして作りたい場合は `LLM_LAUNCHER_ADMIN_USER` / `LLM_LAUNCHER_ADMIN_PASSWORD` を設定して起動 (ユーザーが存在する場合は無視され、上書きもしません)
+- **セッション**: ログイン成功時に `llm_session` Cookie (ランダム 32 バイトのトークン、`HttpOnly` / `SameSite=Lax` / `Path=/`、HTTPS アクセス時は `Secure`) を発行。既定の有効期限は 12 時間、ログイン画面の「ログイン状態を保持する」で 30 日。セッションは `data/sessions.json` に保存するのでサーバー再起動後も維持されます。ログアウト / パスワード変更 / アカウント無効化 / 削除で失効
+- **パスワード**: PBKDF2-HMAC-SHA256 (200,000 反復) + 16 バイトソルト。`data/users.json` には `pbkdf2_sha256$反復回数$ソルト$ハッシュ` の形で保存し、平文は一切書きません。比較は `hmac.compare_digest`、ログイン失敗が 5 回続くと 30 秒ロック (429)、失敗時はユーザー名の存在を匂わせるメッセージを出しません
+- **ロール**: `admin` (全機能 + ユーザー管理) / `user` (起動・停止・プレイグラウンド等は OK、ユーザー管理のみ 403)。最後の管理者が自分自身を削除 / 無効化 / 一般ユーザーへ降格するのは 409 で拒否
+- **API キー** (任意): 各ユーザーに 1 本。`Authorization: Bearer llm_<40桁の16進>` を送ると Cookie なしで API を叩けます。ロール制限はそのまま適用。平文は保存せず SHA-256 ハッシュのみ記録、**発行 / 再生成したときだけ 1 回表示**されます。再生成ですぐに旧キーが無効化、失効 (DELETE) も可能
+- **認証を切る**: `uv run llm-launcher --no-auth` または `LLM_LAUNCHER_AUTH=0`。全 API が認証なしで使えます (開発・単機検証用)。この状態ではユーザー管理 API は `400` を返し、Web UI のユーザータブは案内表示になります
+
+保存先 (いずれも `data/` 配下、`0600` で作成。`data/` は `.gitignore` 済み):
+
+| ファイル | 内容 |
+| --- | --- |
+| `data/users.json` | ユーザー (パスワードハッシュ / API キーの SHA-256 ハッシュ / ロール / 有効フラグ) |
+| `data/sessions.json` | ログインセッション (セッショントークン・有効期限・ユーザー ID) |
+
 ## API (スクリプト等からも操作可能)
+
+- `GET /api/auth/status` — 認証設定とログイン状態 `{auth_enabled, needs_setup, authenticated, is_admin, user}` (認証 API 自体は常に認証不要)
+- `POST /api/auth/setup` `{username, password}` — 初回のみ管理者作成 (201 + 自動ログイン)
+- `POST /api/auth/login` `{username, password, remember?}` / `POST /api/auth/logout` — ログイン / ログアウト
+- `POST /api/auth/password` `{current_password, password}` — 自分のパスワード変更 (全セッション失効 + `relogin: true` を返す)
+- `GET/POST/PUT/DELETE /api/users[/{id}]` — ユーザー管理 (管理者のみ)。POST `{username, password, display_name?, role?, enabled?}`、PUT は部分更新、`POST /api/users/{id}/password` `{password}` でリセット、`POST /api/users/{id}/apikey` で発行 / 再生成 (平文は 1 回のみ返す)、`DELETE /api/users/{id}/apikey` で失効
 
 - `GET /api/state` — 全体状態 (バックエンド / プロファイル / セッション)
 - `GET /api/system` — ホスト / GPU スナップショット (ホーム画面用)。`/proc` と `nvidia-smi` を追加依存なしで読取。返り値 `{host:{cpu_count,load,uptime,memory,disk,...}, gpus:[{index,name,util,mem_used_mib,mem_total_mib,temp,power,power_limit}], error}`。非 NVIDIA 環境では `gpus:null`。GPU は 4 秒 TTL + single-flight キャッシュ
