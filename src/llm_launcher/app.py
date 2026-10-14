@@ -342,6 +342,13 @@ def create_app(root: Path) -> FastAPI:
                 python_candidates(root, b.get("module_path"))
             chosen = None
             tried: list[str] = []
+            # check_cwd (Strata 用): serve のようなリポジトリ直下パッケージは、submodule を cwd にして
+            # 実 import しないと判定できない。find_spec だと GUI .venv でもパス検索だけで成功し、
+            # 依存 (numpy/jinja2/...) を持つ module/<name>/.venv を選ばないため実 import にする。
+            snippet = ("import importlib,sys;importlib.import_module(sys.argv[1])"
+                       if b.get("check_cwd") else
+                       "import importlib.util,sys;"
+                       "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)")
             for label, py in cands:
                 if not Path(py).exists():
                     continue
@@ -349,10 +356,8 @@ def create_app(root: Path) -> FastAPI:
                 try:
                     proc = await asyncio.wait_for(
                         asyncio.create_subprocess_exec(
-                            py, "-c",
-                            "import importlib.util,sys;"
-                            "sys.exit(0 if importlib.util.find_spec(sys.argv[1]) else 1)",
-                            b["check_module"],
+                            py, "-c", snippet, b["check_module"],
+                            cwd=str(module_dir) if b.get("check_cwd") else None,
                             stdout=asyncio.subprocess.DEVNULL,
                             stderr=asyncio.subprocess.DEVNULL,
                         ),

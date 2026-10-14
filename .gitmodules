@@ -10,3 +10,6 @@
 [submodule "module/freetoken"]
 	path = module/freetoken
 	url = https://github.com/FlashML-org/FreeToken
+[submodule "module/strata"]
+	path = module/strata
+	url = https://github.com/Niko1221/Strata

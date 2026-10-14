@@ -287,6 +287,57 @@ def gen_llamacpp(root: Path) -> dict[str, Any]:
     return out
 
 
+# --------------------------------------------------------------------- Strata
+def gen_strata(root: Path) -> dict[str, Any]:
+    """Strata の CLI は serve/server.py の argparse が全て。
+
+    エンジン本体の引数 (--native / --max-context / --mtp ...) は CLI ではなく
+    setup.py が書く strata-<model>.json の "args" 配列に入るため、ここでは
+    サーバープロセス自体の起動フラグだけを正表化する。
+    """
+    src = (_repo(root, "strata") / "serve" / "server.py").read_text()
+    tree = ast.parse(src)
+    out: dict[str, Any] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument"):
+            continue
+        flags = [a.value for a in node.args
+                 if isinstance(a, ast.Constant) and isinstance(a.value, str)
+                 and a.value.startswith("-")]
+        if not flags:
+            continue
+        kw = {k.arg: k for k in node.keywords}
+        prim = next((f for f in flags if f.startswith("--")), flags[0])
+        spec: dict[str, Any] = {"aliases": [f for f in flags if f != prim]}
+        if "action" in kw:
+            act = ast.unparse(kw["action"].value)
+            if "store_true" in act or "store_false" in act:
+                spec["type"] = "bool"
+            elif "append" in act:
+                spec["type"] = "str"
+        if "type" in kw:
+            t = ast.unparse(kw["type"].value)
+            spec["type"] = {"int": "int", "float": "float", "str": "str", "bool": "bool"}.get(t, "str")
+        if "action" not in kw and "type" not in kw:
+            spec["type"] = "str"
+        if "choices" in kw:
+            ch = _choices(kw["choices"].value, {})
+            if ch:
+                spec["choices"] = ch
+        if "metavar" in kw:
+            spec["metavar"] = ast.unparse(kw["metavar"].value).strip("'\"")
+        if "default" in kw and isinstance(kw["default"].value, ast.Constant) \
+                and kw["default"].value.value is not None:
+            # default=None (未指定なら config 側で決まる) や os.environ.get(...) 等の動的既定は
+            # 「既定値なし」扱い — 実行時に決まる値を UI にプリフィルしない
+            spec["default"] = _literal(ast.unparse(kw["default"].value))
+        if "help" in kw and isinstance(kw["help"].value, ast.Constant) and isinstance(kw["help"].value.value, str):
+            spec["help"] = kw["help"].value.value[:200]
+        out[prim] = spec
+    return out
+
+
 def _literal(s: Any) -> Any:
     if s is None:
         return None
@@ -324,6 +375,11 @@ def build(root: Path) -> dict[str, dict[str, Any]]:
         "vllm": gen_vllm(root),
         "llamacpp": gen_llamacpp(root),
     }
+    # Strata (module/strata): submodule 取得済みなら serve/server.py の argparse から生成
+    if (_repo(root, "strata") / "serve" / "server.py").exists():
+        tables["strata"] = gen_strata(root)
+    else:
+        print("strata: module/strata が未クローンのため skip", flush=True)
     # フォーク (module/fork/freetoken): clone 済みなら fork ソースから正表を生成。
     # 未 clone 時は skip し、backends.py の TABLE_FALLBACK で基底表が流用される。
     if (_repo(root, "fork/freetoken") / "python/freetoken/server/args.py").exists():

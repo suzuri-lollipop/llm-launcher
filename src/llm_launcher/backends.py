@@ -1,4 +1,4 @@
-"""バックエンド(vllm / sglang / llama.cpp / FreeToken)の定義と起動コマンド組み立て。
+"""バックエンド(vllm / sglang / llama.cpp / FreeToken / Strata)の定義と起動コマンド組み立て。
 
 各バックエンドは通常 `module/` 配下の git submodule だが、
 フォーク (freetoken-fork) は `module/fork/` 配下の非追跡 clone を使う
@@ -511,6 +511,57 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
     return _backend_meta(b, fields)
 
 
+def build_strata() -> dict[str, Any]:
+    """Strata (https://github.com/Niko1221/Strata) — MoE エキスパートを RAM/SSD に階層化して
+    consumer GPU で大型モデルを動かすエンジン + OpenAI/Anthropic 互換サーバー。
+
+    起動するのはリポジトリ直下の serve/server.py (Python) で、モデル本体の設定
+    (GGUF・コンテキスト長・MTP など) は serve 層の CLI ではなく setup.py が生成する
+    strata-<model>.json の "args" 配列に入る。よって GUI から出すのはサーバープロセスの
+    起動フラグ (--config / --host / --port など) だけ。
+    """
+    b = "strata"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--config", "モデル設定 JSON (strata-<model>.json)",
+          placeholder="module/strata/strata-qwen3.8-flash-next-q2_0.json",
+          help="setup.sh / setup.py が生成する実行設定。モデル・コンテキスト長・MTP などはこの args に入る"),
+        F("--engine", "エンジン", default="strata",
+          help="strata = 実エンジン / mock = モデル不要の偽エンジン (API 疎通確認用)"),
+        F("--tokenizer", "トークナイザ DIR",
+          help="空 = config の tokenizer (setup が設定済み。通常は触らない)"),
+        F("--gpu", "GPU 指定", section="parallel", placeholder="0 / 0,2 (層分割)",
+          help="nvidia-smi の番号。空 = config の gpu"),
+        F("--replicas", "データ並列レプリカ数", section="parallel", placeholder="空=1",
+          help="gpu リストを N 群に分割し、群ごとにエンジンを起動してリクエストを分散"),
+        F("--lazy", "遅延ロード (初回リクエストで起動)", section="sched",
+          help="API は未ロードで待ち受け、最初のリクエストでエンジンとビジョンエンコーダを起動"),
+        F("--idle-unload", "アイドル自動アンロード秒", section="sched", ftype="float",
+          placeholder="空=常駐", help="指定秒リクエストが無いとモデルを降ろして VRAM を空ける"),
+        F("--min-free-vram-mib", "ロードに必要な空き VRAM (MiB)", section="sched",
+          placeholder="空=常にロード", help="未ロード時にこれ未満なら 503 を返す"),
+        F("--host", "ホスト", section="server", default="0.0.0.0",
+          help="0.0.0.0 で LAN 公開 (その場合は APIキーを推奨)。127.0.0.1 = この PC のみ"),
+        F("--port", "ポート", section="server", default="8080"),
+        F("--api-key", "APIキー", section="server", placeholder="key1,key2",
+          help="/v1/* で Bearer / x-api-key を必須 (--host 0.0.0.0 と併用)。カンマ区切りで複数"),
+        F("--open", "起動時にブラウザを開く", section="server"),
+        F("--api-monitor", "/api-monitor 有効", section="server",
+          help="直近 100 リクエストのプロンプト/回答をメモリ保持"),
+        F("--fit-max-tokens", "max_tokens を残り長さに clamp", section="server",
+          help="OFF はコンテキスト超過を 400 で拒否 (llama.cpp と同じ既定)"),
+        F("--slot-save-path", "スロット保存 DIR", section="server",
+          help="POST /slots/0?action=save|restore (llama-server 互換 API) を有効化"),
+        F("--before-load", "再ロード前に実行するコマンド", section="server",
+          placeholder="例: 他サーバーのモデルを降ろすスクリプト"),
+        F("--mcp-config", "MCP サーバー設定 JSON", section="server",
+          help='Claude Desktop 形式 {"mcpServers": {...}}。Web UI のチャットでのみ利用可'),
+        F("--script", "mock エンジンの回答", section="server",
+          help="--engine mock のときだけ有効。複数回指定可 (GUI は 1 つまで)"),
+    ]
+    return _backend_meta(b, fields)
+
+
 # モジュール側が自動導出する項目: GUI 既定値で上書きしないよう既定 OFF (チェックで ON にすると送信)
 DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     "vllm": {"dtype", "load_format", "kv_cache_dtype", "generation_config",
@@ -541,6 +592,9 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
                   "nvfp4_backend", "moe_cache_size", "moe_cache_rate", "moe_cache_policy",
                   "moe_cpu_threads", "moe_hybrid_max_fetch", "attention_backend",
                   "decode_log_interval", "tool_call_parser", "reasoning_parser"},
+    # Strata: 正解を strata-<model>.json (config) が既に持っている項目は既定 OFF
+    "strata": {"tokenizer", "gpu", "replicas", "idle_unload", "min_free_vram_mib",
+               "slot_save_path", "before_load", "mcp_config", "script"},
 }
 
 # 常に送信する (無効化できない) 項目
@@ -549,6 +603,7 @@ REQUIRED_KEYS: dict[str, set[str]] = {
     "sglang": {"model_path", "host", "port"},
     "llamacpp": {"model", "host", "port"},
     "freetoken": {"model_path", "host", "port"},
+    "strata": {"config", "engine", "host", "port"},
 }
 
 # fork バックエンドは基底 (freetoken) と同じ送信ポリシー (コピーして派生 = 個別追加可)
@@ -625,6 +680,19 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["Uvicorn running", "Application startup complete"],
         "default_port": "1919",
     },
+    "strata": {
+        "id": "strata", "name": "Strata",
+        "repo": "https://github.com/Niko1221/Strata",
+        "module_path": "module/strata", "kind": "python",
+        "desc": "MoE エキスパートを RAM/SSD に階層化して consumer GPU で大型モデルを動かすエンジン"
+                " (OpenAI/Anthropic 互換)。初回は module/strata で setup.sh を実行する。",
+        # serve/server.py は __file__ から自リポジトリを解決するので cwd 依存ではない
+        "default_command": "{python} {root}/module/strata/serve/server.py",
+        # serve はリポジトリ直下のパッケージ (未 install) → submodule を cwd に実 import して判定
+        "check_module": "serve.server", "check_cwd": True, "health_path": "/health",
+        "ready_markers": ["ready: http"],
+        "default_port": "8080",
+    },
 }
 
 BACKENDS: dict[str, dict[str, Any]] = {
@@ -633,6 +701,7 @@ BACKENDS: dict[str, dict[str, Any]] = {
     "llamacpp": build_llamacpp(),
     "freetoken": build_freetoken(),
     "freetoken-fork": build_freetoken("freetoken-fork"),
+    "strata": build_strata(),
 }
 
 
