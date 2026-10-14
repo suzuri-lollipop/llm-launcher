@@ -43,6 +43,8 @@ uv run llm-launcher
 起動時に表示される `http://<LAN-IP>:8036` にスマホ / PC のブラウザからアクセスしてください。
 
 - `--host` / `--port` オプション、または `LLM_LAUNCHER_HOST` / `LLM_LAUNCHER_PORT` 環境変数で変更可能
+- 常駐させたい場合は systemctl に登録できます (sudo 不要): `scripts/systemd-install.sh` → [systemctl に登録](#systemctl-に登録-常駐運用)
+- (任意・推奨) 同じ PC で重い CLI 等を動かす場合は OOM 対策ヘルパーを入れておくと、モデルが OOM killer の一番の犠牲者になりにくくなります: `sudo scripts/oom-protect-install.sh` → [OOM 対策](#oom-対策-重い-cli-と同居させる環境向け)
 - バックエンド自体のインストールは各自の環境に依存します:
   - **vLLM / SGLang / FreeToken**: 各 `module/<name>` 内で `uv sync` (または `uv pip install -e .`) して作られる **`module/<name>/.venv` を自動検出**して使います。解決順は `明示設定 > module/<name>/.venv > GUI(llm-launcher)の .venv > launcher 自身`。検出時は各候補で実際の import を試し、成功した python を起動に使用します (バックエンド画面の「検出詳細」に試行結果を表示)
   - llama.cpp: `module/llama.cpp` をビルドすると `build/bin/llama-server` を自動検出。PATH 上の `llama-server` も対象。ビルド前でもバックエンド画面でパスを直接指定できます
@@ -50,6 +52,23 @@ uv run llm-launcher
 ```bash
 cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 ```
+
+## systemctl に登録 (常駐運用)
+
+`uv run llm-launcher` を**ユーザーサービス**として登録できます (sudo 不要)。
+
+```bash
+scripts/systemd-install.sh              # インストール + 自動起動登録 + 起動
+scripts/systemd-install.sh --port 8100  # 待ち受けホスト / ポートを変える場合
+scripts/systemd-install.sh --uninstall  # 停止 + 登録解除 + ユニット削除
+```
+
+- 管理コマンド: `systemctl --user status llm-launcher` / `{start,stop,restart}`、ログ: `journalctl --user -u llm-launcher -f`
+- OS 起動時 (ログイン前) に立ち上げるには Linger が必要です。未設定なら `sudo loginctl enable-linger $USER` を一度だけ実行
+- ユーザーマネージャーの PATH に `~/.local/bin` は含まれないため、ユニットには uv の絶対パス (`~/.local/bin/uv`) を埋め込みます
+- **`systemctl --user` で restart / stop しても稼働中のバックエンドサーバーは巻き添えになりません** (ユニットは `KillMode=process`。本体再起動後は生存サーバーを「引き継ぎ」として再検出)。サーバーごと停止するには先に UI から停止してください
+- `uv run` は起動時に `.venv` を `uv.lock` と同期するため、`git pull` 後の restart で依存更新も反映されます
+- OOM 対策モード 1 (sudoers ヘルパー) はこのサービスからも有効です (起動ログに `oom-guard:` が出ます)。モード 2 (`sudo scripts/oom-protect-install.sh --systemd`) はシステム側に**同名**の別ユニット (`/etc/systemd/system/llm-launcher.service`, venv python 実行・ポート 8088) を作るため、併用すると二重起動になります。切り替えるときは `systemctl --user disable --now llm-launcher` してから
 
 ## 使い方 (Web UI)
 
@@ -91,8 +110,10 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 - `GET /api/state` — 全体状態 (バックエンド / プロファイル / セッション)
 - `GET /api/system` — ホスト / GPU スナップショット (ホーム画面用)。`/proc` と `nvidia-smi` を追加依存なしで読取。返り値 `{host:{cpu_count,load,uptime,memory,disk,...}, gpus:[{index,name,util,mem_used_mib,mem_total_mib,temp,power,power_limit}], error}`。非 NVIDIA 環境では `gpus:null`。GPU は 4 秒 TTL + single-flight キャッシュ
 - `GET/POST/PUT/DELETE /api/profiles[/{id}]` — プロファイル CRUD。ボディは `{name, backend, values, on, extra_args, env, cwd, command, custom_only, note}`。`on` は各フラグの送信 ON/OFF (`{field_key: bool}`、**省略 = 旧来動作: 値があれば送信**)。旧 configs ボディは平坦化して互換受理
-- `POST /api/sessions` `{profile_id, force?}` — 起動 (バックエンドはプロファイルに従う。ポート衝突は 409、`force` で回避可)
-- `POST /api/sessions/{id}/stop` / `restart`、`GET /api/sessions/{id}/log?cursor=` — 停止 / 再起動 / ログ
+- `POST /api/sessions` `{profile_id, force?}` — 起動 (バックエンドはプロファイルに従う。ポート衝突は 409、`force` で回避可)。空きメモリが予約値を大きく下回ると **メモリガードが 409 で起動を拒否** (同じく `force: true` で強制起動)
+- `POST /api/sessions/{id}/stop` / `restart` (`{force?}`)、`GET /api/sessions/{id}/log?cursor=` — 停止 / 再起動 / ログ (再起動時もメモリガードが働くため `{force:true}` を送れます)
+- `GET /api/oom` — OOM 対策の状態スナップショット `{enabled, score_adj, min_available_gb, guard_mode, reapply, swift_stop, can_lower, helper, self_applied, self_via, self_error, self_score, self_unit, oomd, oom_kills, state, available, reserve, used_pct, verdict, level, install_hint}` (`level` = `ok|warn|off`、`state` = `ok|warn|crit`)
+- `POST /api/oom` `{設定の一括/部分更新}` — 保存してその場で再適用 (launcher 自身 + 起動中セッションのツリー)。未指定キーは現状維持、範囲外はクリップ。返り値は `GET /api/oom` と同じ形
 - `GET /api/backends/{id}` ... バックエンド設定・再検出
 - `GET /api/hf-models[?refresh=1]` — HF Hub キャッシュスキャン結果 (`{cache_dir, exists, models:[{repo_id, snapshot, revision, has_weights, gguf:[{name,size}]}]}`)
 - `GET /api/playground/{session_id}/models` — そのセッションの OpenAI 互換 API (`/v1/models`) への透過プロキシ (プレイグラウンド用。ブラウザからの CORS を回避)
@@ -100,6 +121,30 @@ cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 - `GET /api/benchmarks` — ベンチ履歴一覧 `{runs:[...], active:id|null}`。`POST /api/benchmarks` `{profile_id, model?, endpoint?, stream?, concurrency:[..], num_prompts, input_len, output_len, temperature?, warmup, request_timeout, ready_timeout, auto_start, stop_after}` で実行開始 (未起動プロファイルは auto_start で自動起動。同時 1 件)、`GET /api/benchmarks/{id}` (進捗 `progress` とステージ結果 `stages` 付き)、`POST /api/benchmarks/{id}/cancel`、`DELETE /api/benchmarks/{id}`。ステージ結果は `{concurrency, ok, fail, rps, out_tps, total_tps, ttft:{avg,p50,p90,p99,...}, latency:{...}, decode_tps:{...}, errors:[...]}`
 - `PUT /api/backends/{id}`、`POST /api/backends/{id}/detect` — バックエンド設定・再検出
 - OpenAPI ドキュメント: `GET /api/docs`
+
+## OOM 対策 (重い CLI と同居させる環境向け)
+
+モデルインスタンスは RSS が最大のことが多く、空きが数 GB を切った瞬間にカーネルの OOM killer の一番の犠牲者になります。llm-launcher は次の多重で守ります (設定は `data/settings.json` の `oom`、UI は「バックエンド設定 → 🛡 OOM 対策」)。
+
+- **起動前メモリガード** — `MemAvailable` が予約 (`min_available_gb`、既定 8 GB) を大きく下回ると起動を拒否 (`guard_mode: "block"` が既定)。`"warn"` は警告のみ、`"off"` は無効。拒否時は API が 409 を返し、`force: true` で強制起動できます
+- **oom_score_adj の引き下げ** — 既定 -700 を起動ツリー (モデル本体 + 後から湧く scheduler / worker) と launcher 自身に適用し、kill 順を後回しにします
+- **定期再適用** — バックエンドが起動後に増やした subprocess へも数分おきに再適用します (`reapply`)
+- **逼迫時の safety stop** — `swift_stop: true` にすると、critical な逼迫で launcher 側が最も新しく起動したセッションを安全停止します (カーネルに kill されるより軽い障害で復旧できます)
+- **OOM kill の推定** — SIGKILL / exit 137 と cgroup `memory.events` の `oom_kill` 増分から「OOM kill の可能性」をセッションカードとログに表示します
+
+**権限についての現実**: `oom_score_adj` を**下げる**には `CAP_SYS_RESOURCE` が必要です。一般ユーザーでは EACCES で弾かれるため、UI と `GET /api/oom` は「権限不足」を隠さず表示し、以下の導入を案内します。
+
+```bash
+sudo scripts/oom-protect-install.sh              # 1) 専用 sudo ヘルパー (推奨・launcher 再起動のみで有効)
+sudo scripts/oom-protect-install.sh --systemd    # 2) システムサービス化 (OOMScoreAdjust=-1000 + MemoryHigh)
+sudo scripts/oom-protect-install.sh --swap 32G   # 3) スワップが無い環境だけで実メモリの受け皿を追加
+sudo scripts/oom-protect-install.sh --uninstall  # 削除
+```
+
+- 1) は `/usr/local/lib/llm-launcher/oom-protect` にヘルパーを置き、sudoers で「**引数なしのそのパスだけ**」を NOPASSWD で許可します。stdin で `pid` と `score` の 2 行だけを受け取り、`/proc/<pid>/oom_score_adj` をその PID と子孫にのみ書き込みます (親方向 — sshd やユーザーセッション — には書きません)。`--user` で対象ユーザーを指定できます
+- 2) はユニットに `MemoryHigh` (実メモリの 85%) / `MemoryMax` (92%) を書くため、超過分は kill ではなく throttle され、同居するプロセスごと巻き添えになりにくくなります。ユーザーセッション (`systemd-run --user`) では `OOMScoreAdjust` が無視されるので、必ず**システム**側に入れてください
+- 適用状況はセッションカード (🛡 保護中 / 未適用とその理由 / 逼迫 / OOM 推定) とホームの通知に表示され、セッションログには `[oom]` 行として記録されます
+
 
 ## 動作仕様メモ
 

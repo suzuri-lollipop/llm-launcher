@@ -295,6 +295,7 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
 
   <section id="view-backends" class="view hidden">
     <h2 class="view-title">バックエンド設定 <span class="muted">(module/ のサブモジュール)</span></h2>
+    <div class="card" id="oom-card" style="margin-bottom:14px"></div>
     <div class="grid c2" id="backends-grid"></div>
   </section>
 
@@ -471,6 +472,7 @@ async function refreshSystem() {
   try { S.sys = await api("/api/system"); }
   catch { S.sys = null; }
   if (S.tab === "home") renderHome();
+  if (S.tab === "backends") renderOomCard();
 }
 function startTimers() {
   clearInterval(refreshTimer); clearInterval(logTimer); clearInterval(sysTimer); clearInterval(benchTimer);
@@ -547,6 +549,23 @@ function renderHome(){
 }
 function renderHomeNotices(){
   const el = $("#home-notices"); const notes = [];
+  const o = S.sys && S.sys.oom;
+  if (o) {
+    if (o.level === "warn") notes.push(`<div class="card" style="border-color:#4d3a1f;background:#241d10">
+      <div class="row"><b style="color:var(--warn)">🛡 OOM 対策が効いていません</b><span class="grow"></span>
+      <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('backends')">OOM 対策設定へ →</button></div>
+      <div class="muted mono" style="margin-top:4px;white-space:pre-wrap;word-break:break-all">${esc(o.verdict)}</div></div>`);
+    if (o.state === "crit") notes.push(`<div class="card" style="border-color:#4d2323;background:#241213">
+      <div class="row"><b style="color:var(--err)">🧨 メモリ逼迫: 空き ${esc(o.available_gb)}GB / 予約 ${esc(o.min_available_gb)}GB</b><span class="grow"></span>
+      <span class="muted">スワップ ${fmtGB(o.swap_free)} 空き</span></div>
+      <div class="muted" style="margin-top:4px">この状態で起動すると OOM kill される可能性が高いです。重いプロセス (Cline 等) を止めるか、稼働中のサーバーを停止してください。</div></div>`);
+    else if (o.state === "warn") notes.push(`<div class="card" style="border-color:#4d3a1f;background:#241d10">
+      <div class="row"><b style="color:var(--warn)">⚠ メモリが少なくなってきます: 空き ${esc(o.available_gb)}GB (予約 ${esc(o.min_available_gb)}GB)</b></div></div>`);
+    if (o.oom_kills) notes.push(`<div class="card" style="border-color:#4d2323;background:#241213">
+      <div class="row"><b style="color:var(--err)">💀 cgroup 内で OOM kill が ${esc(o.oom_kills)} 回発生</b><span class="grow"></span>
+      <span class="muted mono">${esc(o.self_unit || "unit 不明")}${o.oomd ? " / systemd-oomd 動作中" : ""}</span></div>
+      <div class="muted" style="margin-top:4px">セッションの異常終了ログと照合してください。モデル側が犠牲になっているなら保護設定を見直してください。</div></div>`);
+  }
   const broken = (S.state.backends||[]).filter(b => !b.detection.installed);
   if (broken.length) notes.push(`<div class="card" style="border-color:#4d2323;background:#241213">
     <div class="row"><b style="color:var(--err)">⚠ ${broken.length} 個のバックエンドが未検出</b><span class="grow"></span>
@@ -612,6 +631,14 @@ function renderHomeMeters(){
   if (h.memory){
     html += meter("メモリ", h.memory.used, h.memory.total, (u,t)=>`${fmtGB(u)} / ${fmtGB(t)}`);
     if (h.memory.swap_total) html += meter("スワップ", h.memory.swap_used, h.memory.swap_total, (u,t)=>`${fmtGB(u)} / ${fmtGB(t)}`);
+  }
+  const o = s.oom;
+  if (o && o.total){
+    // OOM 判定の基準は MemAvailable (キャッシュ差し引き後の実質空き) なので別枠で明示
+    const cls = o.state === "crit" ? "err" : o.state === "warn" ? "warn" : "ok";
+    html += `<div class="meter"><div class="m-hd"><b>OOM 判定用空き (MemAvailable)</b>
+      <span class="r">${fmtGB(o.available)} / 予約 ${fmtGB(o.reserve)}</span></div>
+      <div class="mbar"><i class="${cls}" style="width:${Math.min(100, o.used_pct)}%"></i></div></div>`;
   }
   if (h.disk) html += meter("ディスク", h.disk.used, h.disk.total, (u,t)=>`${fmtGB(u)} / ${fmtGB(t)}`);
   if (h.load && h.cpu_count){
@@ -764,14 +791,17 @@ async function stopSession(sid) {
   catch (e) { toast("停止失敗: " + e.message); }
   finally { S.busy[sid] = false; refresh(false); }
 }
-async function restartSession(sid) {
+async function restartSession(sid, force = false) {
   S.busy[sid] = true; renderAll(true);
   try {
-    const s = await api(`/api/sessions/${sid}/restart`, {method:"POST"});
+    const s = await api(`/api/sessions/${sid}/restart`, {method:"POST", body:{force}});
     toast("再起動しました");
     if (S.openLogs.has(sid)) { S.openLogs.delete(sid); S.openLogs.add(s.id); delete S.logCursor[s.id]; delete S.logBuf[s.id]; }
-  } catch (e) { toast("再起動失敗: " + e.message); }
-  finally { S.busy[sid] = false; refresh(false); }
+  } catch (e) {
+    if (e.status === 409 && /force/.test(e.message)) {
+      if (confirm(e.message + "\n\n強制的に再起動しますか?")) return restartSession(sid, true);
+    } else toast("再起動失敗: " + e.message);
+  } finally { S.busy[sid] = false; refresh(false); }
 }
 async function deleteSession(sid) {
   if (!confirm("履歴とログを削除しますか?")) return;
@@ -785,7 +815,8 @@ async function deleteSession(sid) {
 function sessionSig() {
   return (S.state.sessions || []).map(s =>
     [s.id, s.status, s.ready ? 1 : 0, s.pid, s.exit_code ?? "", s.error ?? "",
-     s.detached ? 1 : 0, s.port ?? ""].join(":")).join("|");
+     s.detached ? 1 : 0, s.port ?? "", s.mem_state || "", s.oom_suspect ? 1 : 0,
+     s.oom_swift_stop ? 1 : 0, s.oom ? `${s.oom.applied}/${s.oom.denied}/${s.oom.score}` : ""].join(":")).join("|");
 }
 function renderServers(force) {
   const list = $("#servers-list");
@@ -807,6 +838,17 @@ function renderServers(force) {
   const card = s => {
     const open = S.openLogs.has(s.id);
     const url = s.port ? `http://${esc(S.state.system.ip)}:${s.port}` : "";
+    const oomTxt = s.oom_swift_stop
+      ? `<span style="color:var(--warn)">🛡 メモリ逼迫により launcher が安全停止しました</span>`
+      : s.oom_suspect
+      ? `<span style="color:var(--err)">💀 OOM kill の可能性</span>`
+      : (s.oom && s.oom.applied)
+        ? `🛡 保護中 (oom_score_adj ${s.oom.score}${s.oom.via === "helper" ? " · sudo 経由" : ""} · ${s.oom.applied} プロセス)`
+        : (s.oom && s.oom.error)
+          ? `<span style="color:var(--warn)">🛡 未適用 — ${esc(s.oom.error)}</span>`
+          : `<span class="muted">保護 未適用 / 設定オフ</span>`;
+    const memTxt = (isLive(s) && s.mem_state && s.mem_state !== "ok")
+      ? ` <span style="color:${s.mem_state === "crit" ? "var(--err)" : "var(--warn)"}">· 空き ${esc(s.mem_available_gb)}GB</span>` : "";
     return `<div class="card" data-sid="${s.id}">
       <div class="row">
         ${statusBadge(s)}
@@ -819,6 +861,7 @@ function renderServers(force) {
           isLive(s) ? fmtUp(s.uptime) : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-")
         }</span>${s.exit_code != null ? ` (code ${s.exit_code})` : ""}</span>
         <span>API</span><span class="v mono">${url ? `<a href="${url}" target="_blank" rel="noopener">:${s.port} ↗</a>` : "-"}</span>
+        <span>OOM</span><span class="v" style="font-size:12.5px">${oomTxt}${memTxt}</span>
       </div>
       <pre class="cmdprev" style="max-height:44px">${esc(s.argv.join(" "))}</pre>
       ${s.error ? `<div class="muted" style="color:var(--err);margin-top:6px">${esc(s.error)}</div>` : ""}
@@ -1378,7 +1421,64 @@ document.addEventListener("keydown", e => {
 });
 
 /* ============================================================= backends view */
+/* ---------------- OOM 対策パネル ---------------- */
+function renderOomCard(){
+  const el = $("#oom-card"); if (!el) return;
+  const o = S.sys && S.sys.oom;
+  if (!o){ el.innerHTML = `<div class="muted"><span class="spin"></span> OOM 対策の状態を読み込み中…</div>`; return; }
+  if (document.activeElement && document.activeElement.matches("input,select,textarea")
+      && el.contains(document.activeElement)) return;   // 入力中に書き換えない
+  const badge = o.level === "ok" ? `<span class="badge ok"><span class="dot"></span>保護適用中</span>`
+              : o.level === "warn" ? `<span class="badge warn"><span class="dot"></span>要注意</span>`
+              : `<span class="badge"><span class="dot"></span>無効</span>`;
+  const cls = o.state === "crit" ? "err" : o.state === "warn" ? "warn" : "ok";
+  const vcol = o.level === "off" ? "var(--sub)" : `var(--${o.level === "ok" ? "acc" : o.level})`;
+  el.innerHTML = `
+    <div class="row"><b style="font-size:15px">🛡 OOM 対策</b>
+      <span class="muted" style="font-size:12px">重い CLI と同居する環境でモデルが最初に kill されるのを防ぐ</span>
+      <span class="grow"></span>${badge}</div>
+    <div class="mono" style="margin-top:8px;white-space:pre-wrap;word-break:break-all;font-size:12.5px;color:${vcol}">${esc(o.verdict)}</div>
+    <div class="meter" style="margin-top:10px"><div class="m-hd"><b>空きメモリ (MemAvailable)</b>
+      <span class="r">${fmtGB(o.available)} 空き / 予約 ${fmtGB(o.reserve)} · 使用 ${esc(o.used_pct)}%</span></div>
+      <div class="mbar"><i class="${cls}" style="width:${Math.min(100,o.used_pct)}%"></i></div></div>
+    <div class="kvs" style="margin-top:10px">
+      <span>oom_score_adj</span><span class="v mono">${esc(o.score_adj)}${o.self_applied ? "" : " (未適用)"} / 実測 ${esc(o.self_score ?? "-")}${o.self_via ? (o.self_via === "helper" ? " · sudo 経由" : " · 直接") : ""}</span>
+      <span>権限 (CAP_SYS_RESOURCE)</span><span class="v">${o.can_lower ? "あり — 直接書き込み可" : "なし — sudo ヘルパーが必要"}</span>
+      <span>sudo ヘルパー</span><span class="v mono">${o.helper ? "導入済み" : "未導入"}</span>
+      <span>起動前ガード</span><span class="v">${esc(o.guard_mode)}${o.guard_mode === "block" ? " (空き不足なら起動を拒否)" : o.guard_mode === "warn" ? " (警告のみで起動)" : " (無効)"}</span>
+      <span>systemd-oomd / cgroup</span><span class="v mono">${o.oomd ? "動作中" : "停止中"} / ${esc(o.self_unit || "-")} · oom_kill ${esc(o.oom_kills ?? "-")}</span>
+    </div>
+    <div class="row" style="margin-top:12px;gap:12px;flex-wrap:wrap;align-items:flex-end">
+      <label class="row" style="gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="oom-en" ${o.enabled?"checked":""} style="width:16px;height:16px;accent-color:var(--acc)"> 有効</label>
+      <label class="f" style="margin:0">score_adj<input type="number" id="oom-score" min="-1000" max="0" step="50" value="${esc(o.score_adj)}" style="width:96px;margin-left:6px"></label>
+      <label class="f" style="margin:0">予約 GB<input type="number" id="oom-gb" min="0" max="512" step="0.5" value="${esc(o.min_available_gb)}" style="width:88px;margin-left:6px"></label>
+      <label class="f" style="margin:0">ガード<select id="oom-mode" style="width:auto;margin-left:6px">${
+        ["block","warn","off"].map(m => `<option value="${m}"${o.guard_mode === m ? " selected" : ""}>${m}</option>`).join("")}</select></label>
+      <label class="row" style="gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="oom-reapply" ${o.reapply?"checked":""} style="width:16px;height:16px;accent-color:var(--acc)"> 定期再適用</label>
+      <label class="row" style="gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="oom-swift" ${o.swift_stop?"checked":""} style="width:16px;height:16px;accent-color:var(--acc)"> 逼迫時 safety stop</label>
+      <span class="grow"></span>
+      <button class="primary" onclick="saveOom()">OOM 設定を保存 / 再適用</button>
+    </div>
+    <div class="muted" style="font-size:11.5px;margin-top:8px">負の score_adj はカーネル特権 (CAP_SYS_RESOURCE) が必要で、一般ユーザーでは直接書けません。
+      下のコマンドで「そのパスだけ」を許可する sudo ヘルパーを導入すると、起動ツリー全体 (モデル本体 + 後から湧く worker + launcher 自身) に適用されます。</div>
+    <pre class="cmdprev" style="max-height:none">${esc(o.install_hint || "")}</pre>`;
+}
+async function saveOom(){
+  const body = {
+    enabled: $("#oom-en").checked, score_adj: Number($("#oom-score").value || 0),
+    min_available_gb: Number($("#oom-gb").value || 0), guard_mode: $("#oom-mode").value,
+    reapply: $("#oom-reapply").checked, swift_stop: $("#oom-swift").checked,
+  };
+  try {
+    const o = await api("/api/oom", {method:"POST", body});
+    if (!S.sys) S.sys = {};
+    S.sys.oom = o;
+    renderOomCard();
+    toast(o.level === "ok" ? "OOM 設定を適用しました" : "保存しました (権限が足りず未適用): " + o.verdict.split("\n")[0]);
+  } catch (e) { toast("保存失敗: " + e.message); }
+}
 function renderBackends() {
+  renderOomCard();
   const g = $("#backends-grid");
   g.innerHTML = S.state.backends.map(b => {
     const det = b.detection;

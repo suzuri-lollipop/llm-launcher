@@ -27,7 +27,9 @@ from .backends import (SECTIONS_JA, BACKENDS, python_candidates, resolve_port,
 from .process import ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
+from . import oom
 from . import sysinfo
+from .oom import MemoryGuardError
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -421,7 +423,27 @@ def create_app(root: Path) -> FastAPI:
     async def get_system() -> dict[str, Any]:
         host = await asyncio.to_thread(sysinfo.host_snapshot, str(root))
         gpu = await sysinfo.gpu_snapshot()
-        return {"host": host, **gpu}
+        return {"host": host, "oom": await asyncio.to_thread(manager.oom_status), **gpu}
+
+    # ----------------------------------------------------------------- oom
+
+    @app.get("/api/oom")
+    async def get_oom() -> dict[str, Any]:
+        """OOM 対策の状態: 設定 / 適用状況 / メモリ逼迫 / kill 痕跡。"""
+        return await asyncio.to_thread(manager.oom_status)
+
+    @app.post("/api/oom")
+    async def post_oom(body: dict[str, Any]) -> dict[str, Any]:
+        cfg = oom.merged_settings({**(settings_store.load() or {}).get("oom", {}),
+                                   **(body or {})})
+
+        def _mut(settings: dict) -> dict:
+            settings["oom"] = cfg
+            return settings
+
+        await asyncio.to_thread(settings_store.mutate, _mut)
+        # 保存した設定をその場で再適用 (自分自身 + 起動中セッションのツリー)
+        return await asyncio.to_thread(manager.apply_oom_settings, cfg)
 
     # ------------------------------------------------------------- state
 
@@ -546,7 +568,10 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(409, f"ポート {port} は {who} が使用中です。"
                                      "問題なければ force で起動してください。")
         try:
-            session = await manager.start(profile)
+            session = await manager.start(profile, force=bool(body.force))
+        except MemoryGuardError as e:
+            # メモリガードによる拒否 (UI は force 再試行で起動できる)
+            raise HTTPException(409, str(e))
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         return manager.session_public(session["id"])
@@ -559,7 +584,7 @@ def create_app(root: Path) -> FastAPI:
         return manager.session_public(sid)
 
     @app.post("/api/sessions/{sid}/restart", status_code=201)
-    async def restart_session(sid: str) -> dict[str, Any]:
+    async def restart_session(sid: str, body: StartBody = StartBody()) -> dict[str, Any]:
         old = manager.sessions.get(sid)
         if not old:
             raise HTTPException(404, "セッションが見つかりません")
@@ -567,7 +592,11 @@ def create_app(root: Path) -> FastAPI:
         if not profile:
             raise HTTPException(400, "元のプロファイルが削除されています")
         await manager.stop(sid)
-        session = await manager.start(profile)
+        try:
+            # 停止後にメモリガードへ掛かることがあるので force は同じ形で引き継ぐ
+            session = await manager.start(profile, force=bool(body.force))
+        except MemoryGuardError as e:
+            raise HTTPException(409, str(e))
         return manager.session_public(session["id"])
 
     @app.delete("/api/sessions/{sid}")

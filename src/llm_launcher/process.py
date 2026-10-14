@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
@@ -14,11 +15,15 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from . import oom
 from .backends import (BACKENDS, python_candidates, render_argv, resolve_binary,
                        resolve_port)
+from .oom import MemoryGuardError
 from .store import JsonStore, new_id, now
 
 LOG_TAIL_LIMIT = 512 * 1024
+OOM_REAPPLY_TICKS = 4        # tick(3s) x 4 = 12 秒ごとに起動ツリーへ再適用
+PRESSURE_LOG_COOLDOWN = 120.0
 
 
 def pid_alive(pid: int) -> bool:
@@ -53,6 +58,99 @@ class ProcessManager:
         self._monitors: dict[str, asyncio.Task] = {}
         self._tick_task: asyncio.Task | None = None
         self._dirty = False
+        self.self_oom: dict[str, Any] = {}       # launcher 自身への保護適用結果
+        self.last_guard: dict[str, Any] = {}     # 直近の起動前メモリガード判定
+        self._tick_n = 0
+        self._last_pressure_log = 0.0
+        self._bg_tasks: set[asyncio.Task] = set()   # fire-and-forget task の GC 防止
+
+    # ------------------------------------------------------------ oom guard
+
+    def oom_cfg(self) -> dict[str, Any]:
+        """settings.json の oom ブロック (既定値マージ + クリップ済み)。"""
+        return oom.merged_settings((self.settings.load() or {}).get("oom"))
+
+    def _log_note(self, sid: str, text: str) -> None:
+        """セッションログに 1 行追記 (OOM 適用結果や逼迫警告を証跡として残す)。"""
+        fh = self._log_handles.get(sid)
+        if fh is None:
+            return
+        with contextlib.suppress(OSError):
+            fh.write(f"[oom] {text}  # {time.strftime('%F %T')}\n".encode())
+
+    def apply_oom(self, sid: str) -> dict[str, Any]:
+        """起動済みセッションのプロセスツリー全体へ oom_score_adj を適用する。"""
+        cfg = self.oom_cfg()
+        s = self.sessions.get(sid)
+        if not cfg["enabled"] or not s or s.get("pid", 0) <= 0:
+            return {"enabled": bool(cfg["enabled"]), "skipped": True, "applied": 0,
+                    "denied": 0, "via": "", "error": "", "score": cfg["score_adj"]}
+        res = oom.apply_score(s["pid"], cfg["score_adj"])
+        res["skipped"] = False
+        if res["denied"] or res["error"]:
+            hint = ("未導入 — sudo scripts/oom-protect-install.sh で導入できます"
+                    if not res["helper"] else "導入済み")
+            self._log_note(sid, f"oom_score_adj={cfg['score_adj']} 適用 {res['applied']} 件 / "
+                                f"拒否 {res['denied']} 件 — {res['error'] or '権限不足'}"
+                                f" / sudo ヘルパー: {hint}")
+        else:
+            self._log_note(sid, f"oom_score_adj={cfg['score_adj']} を {res['applied']} プロセス"
+                                f"{' (sudo ヘルパー経由)' if res['via'] == 'helper' else ''} に適用")
+        s["oom"] = {k: res[k] for k in ("applied", "denied", "via", "error", "score")}
+        return res
+
+    async def _reapply_oom(self) -> None:
+        """起動後に湧いた worker を拾って再適用 (バックエンドは後から子を増やすため)。"""
+        cfg = self.oom_cfg()
+        if not cfg["enabled"] or not cfg["reapply"]:
+            return
+        if not oom.can_lower_score() and not oom.helper_available():
+            return                      # 権限がない場合は /proc を毎回数分回すだけなので見送る
+        live = [s for s in self.sessions.values() if s["status"] in ("running", "starting")]
+        for s in live:
+            res = await asyncio.to_thread(oom.apply_score, s["pid"], cfg["score_adj"])
+            s["oom"] = {k: res[k] for k in ("applied", "denied", "via", "error", "score")}
+
+    async def _check_pressure(self) -> None:
+        """メモリ逼迫を監視。警告をログへ残し、swift_stop が ON なら自発的に止める。"""
+        cfg = self.oom_cfg()
+        if not cfg["enabled"] or cfg["min_available_gb"] <= 0:
+            return
+        live = [s for s in self.sessions.values() if s["status"] in ("running", "starting")]
+        if not live:
+            return
+        p = await asyncio.to_thread(oom.pressure, cfg)
+        for s in live:
+            s["mem_state"] = p["state"]
+            s["mem_available_gb"] = p["available_gb"]
+        if p["state"] == "ok":
+            return
+        t = time.monotonic()
+        if t - self._last_pressure_log >= PRESSURE_LOG_COOLDOWN:
+            self._last_pressure_log = t
+            for s in live:
+                self._log_note(s["id"], f"メモリ逼迫警告: 空き {p['available_gb']:.1f}GB "
+                                        f"(予約 {cfg['min_available_gb']:.1f}GB / state={p['state']})")
+        if p["state"] == "crit" and cfg["swift_stop"]:
+            # 逼迫の引き金を引いているのはほとんどの場合いちばん新しく起動したローダーなので、
+            # 稼働中のサーバーは守って新しい方を止める (kernel OOM より軽い障害で止まる)
+            candidates = [s for s in live if not s.get("oom_swift_stop")]
+            if not candidates:
+                return
+            victim = max(candidates, key=lambda s: s.get("started_at", 0))
+            victim["error"] = (f"メモリ逼迫 (空き {p['available_gb']:.1f}GB) のため launcher 側で"
+                               "安全停止しました (OOM kill より軽い障害で復旧できます)")
+            victim["oom_swift_stop"] = True
+            self._log_note(victim["id"], victim["error"])
+            self._spawn(self.stop(victim["id"], grace=8.0))
+
+    def _spawn(self, coro: Any) -> asyncio.Task:
+        """参照を保ったまま fire-and-forget (task は GC されると途中で消える)。"""
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(task)
+        task.add_done_callback(self._bg_tasks.discard)
+        return task
+
 
     # ------------------------------------------------------------- helpers
 
@@ -114,13 +212,21 @@ class ProcessManager:
 
     # --------------------------------------------------------------- start
 
-    async def start(self, profile: dict[str, Any]) -> dict[str, Any]:
+    async def start(self, profile: dict[str, Any], force: bool = False) -> dict[str, Any]:
         bid = profile.get("backend")
         if bid not in BACKENDS:
             raise RuntimeError("このプロファイルにバックエンドが設定されていません")
         backend = BACKENDS[bid]
         argv = self.build_argv(profile)
         port = resolve_port(backend, profile, argv)
+
+        # 起動前メモリガード: ここで殺し合いを仕掛けない方がマシなので、空きが予約値
+        # 未満のときは基本ブロック (UI は force で再試行できる)。
+        cfg = self.oom_cfg()
+        g = oom.guard(cfg)
+        self.last_guard = g
+        if not g["ok"] and not force:
+            raise MemoryGuardError(g["message"] + "。空きを空けるか、force で起動してください。")
 
         env = os.environ.copy()
         # venv の python を絶対パスで直接起動しても bin/ は PATH に入らない
@@ -164,6 +270,10 @@ class ProcessManager:
             "exit_code": None,
             "log": str(log_path.relative_to(self.root)),
             "error": "",
+            "oom": None,                                  # 保護適用結果 {applied,denied,via,error,score}
+            "oom_kills0": oom.cgroup_oom_kills(),         # 起動時の cgroup oom_kill カウンタ
+            "oom_suspect": False,
+            "mem_state": "ok",
         }
 
         try:
@@ -196,6 +306,7 @@ class ProcessManager:
         self._procs[sid] = proc
         self._log_handles[sid] = log_fh
         self._monitors[sid] = asyncio.create_task(self._monitor(sid, proc))
+        self.apply_oom(sid)          # 起動直後にツリー全体へ oom_score_adj を適用
         self._persist()
         return session
 
@@ -207,8 +318,14 @@ class ProcessManager:
             s["exit_code"] = None if user_stop else rc
             s["finished_at"] = now()
             s["status"] = "exited" if (rc == 0 or user_stop) else "failed"
-            if s["status"] == "failed":
-                s["error"] = f"exit code {rc}"
+            if s["status"] == "failed" and not s.get("oom_swift_stop"):
+                base = s.get("oom_kills0")
+                cur = await asyncio.to_thread(oom.cgroup_oom_kills)
+                delta = None if (base is None or cur is None) else cur - base
+                avail = oom.meminfo().get("MemAvailable", 0) / (1 << 30)
+                reason, suspect = oom.death_reason(rc, delta, avail)
+                s["oom_suspect"] = bool(suspect)
+                s["error"] = reason or f"exit code {rc}"
             self._persist()
         fh = self._log_handles.pop(sid, None)
         if fh:
@@ -276,8 +393,36 @@ class ProcessManager:
     # ------------------------------------------------------------ lifecycle
 
     async def start_tick(self) -> None:
+        cfg = self.oom_cfg()
+        # 先に生存確認してからscore を書きにいく (死んだ pid は pid 再利用の可能性があるので触らない)
         self._reconcile()
+        if cfg["enabled"]:
+            # launcher 本体が先に死んだら再起動もログも失うので自分自身を守る
+            self.self_oom = await asyncio.to_thread(oom.protect_self, cfg["score_adj"])
+            if not self.self_oom["applied"]:
+                print(f"oom-guard: launcher 自身を保護できません ({self.self_oom['error']}) "
+                      "— OOM kill 時に一番最初に kill されます。再起動・ログ管理まで巻き添えになります",
+                      file=sys.stderr)
+            elif cfg["score_adj"] < 0:
+                print(f"oom-guard: launcher の oom_score_adj={cfg['score_adj']} "
+                      f"({'sudo ヘルパー経由' if self.self_oom['via'] == 'helper' else '直接書き込み'})")
+            await self._reapply_oom()      # 引き取った (detached) プロセスにも適用
         self._tick_task = asyncio.create_task(self._tick_loop())
+
+    def oom_status(self, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+        """OOM 対策パネル用: 設定 + 権限 + メモリ状況 + kill 痕跡のスナップショット。"""
+        return oom.status(cfg or self.oom_cfg(), self.self_oom)
+
+    def apply_oom_settings(self, raw: dict[str, Any] | None) -> dict[str, Any]:
+        """設定保存時に再適用。返り値は *適用した設定* 基準のスナップショット
+        (設定ストアの保存は呼び出し側 = app.py が行うため、ズレを出さない)。"""
+        cfg = oom.merged_settings(raw)
+        self.self_oom = (oom.protect_self(cfg["score_adj"]) if cfg["enabled"]
+                         else {"enabled": False, "applied": False, "via": "", "error": "",
+                               "score": cfg["score_adj"]})
+        for sid in self._procs:
+            self.apply_oom(sid)
+        return self.oom_status(cfg)
 
     async def shutdown(self, kill: bool = False) -> None:
         if self._tick_task:
@@ -303,6 +448,10 @@ class ProcessManager:
         while True:
             try:
                 await self._probe_all()
+                await self._check_pressure()
+                self._tick_n += 1
+                if self._tick_n % OOM_REAPPLY_TICKS == 0:
+                    await self._reapply_oom()   # 起動後に増えた worker を拾う
             except Exception:  # noqa: BLE001
                 pass
             await asyncio.sleep(3.0)

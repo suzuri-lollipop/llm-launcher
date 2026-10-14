@@ -113,6 +113,10 @@ CHOICE_SUPPLEMENT: dict[str, dict[str, list[str]]] = {
         "--moe-cache-policy": ["", "lru"],
         "--cache-type": ["", "radix"],
     },
+    "freetoken-fork": {
+        # fork は PLE テーブル read-only mmap (OS page cache がホット行を保持) を追加
+        "--ple-backend": ["", "pinned", "disk", "swap"],
+    },
 }
 
 # 正表自体がSparseな vllm 数値/文字列系の補完 (arg_utils.py 準拠)
@@ -158,9 +162,10 @@ def _spec(backend_id: str, flag: str) -> dict[str, Any]:
         spec = {**spec, **{k: v for k, v in LLAMA_SUPPLEMENT.get(flag, {}).items() if v not in (None, [])}}
     sup = (VLLM_SUPPLEMENT if backend_id == "vllm" else {})
     spec = {**sup.get(flag, {}), **{k: v for k, v in spec.items() if v not in (None, [])}} if backend_id == "vllm" else spec
-    ch_key = backend_id if backend_id in CHOICE_SUPPLEMENT else TABLE_FALLBACK.get(backend_id, backend_id)
-    if flag in CHOICE_SUPPLEMENT.get(ch_key, {}):
-        spec = {**spec, "choices": CHOICE_SUPPLEMENT[ch_key][flag]}
+    # 基底バックエンドの補完を先に当て、派生 (fork) 専用の補完があればそれが上書きする
+    for ch_key in (TABLE_FALLBACK.get(backend_id, backend_id), backend_id):
+        if flag in CHOICE_SUPPLEMENT.get(ch_key, {}):
+            spec = {**spec, "choices": CHOICE_SUPPLEMENT[ch_key][flag]}
     d = spec.get("default")
     if isinstance(d, str) and (d.strip().lower() in _JUNK_DEFAULTS or d.strip() in ("()", "[]", "{}")):
         # ただし choices に実在する値 (--speculative の "none" 等) は junk ではなく正当な既定値
@@ -438,7 +443,10 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
         F("--moe-strategy", "MoE戦略", section="cache"),
         F("--expert-load", "エキスパート読込", section="cache"),
         F("--quant-backend", "量子化バックエンド", section="cache", help="moe.nvfp4=... 形式も可"),
-        F("--ple-backend", "PLEオフロード", section="cache"),
+        F("--ple-backend", "PLEオフロード", section="cache",
+          help="" if bid != "freetoken-fork" else
+          "disk=fillの度チェックポイントから読込 / swap=チェックポイントread-only mmapでOS page cacheが"
+          "ホット行を保持 (diskとpinnedの中間) / pinned=テーブル全体をピン留めホストRAMに常駐"),
         F("--nvfp4-backend", "NVFP4バックエンド", section="cache"),
         F("--moe-cache-size", "MoEキャッシュサイズ", section="cache", placeholder="0=自動", help="--moe-cache-rate / --moe-cache-auto と排他"),
         F("--moe-cache-rate", "MoEキャッシュ比率", section="cache", ftype="float", placeholder="例 0.5", help="--moe-cache-size と排他"),
@@ -478,6 +486,14 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
               placeholder="カンマ区切り", help="クライアント指定の画像URLのホスト許可リスト"),
             F("--prefill-decode-interval", "prefill/decode交互間隔", section="sched", placeholder="0=無効",
               help="連続prefill N回で1ステップ稼働中decodeに譲る。0=従来動作 (サーバー既定値は4)"),
+            F("--mamba-host-cache-mb", "GDNスナップショットhost退避MiB", section="cache",
+              placeholder="0=無効",
+              help="退避対象のGDNスナップショットをピン留めホストRAMに待避する予算(MiB)。"
+                   "マルチターン再開時にH2D復元で再prefillを回避 (実測 -85% turn2 TTFT、既定2048)"),
+            F("--no-embed-fp8", "埋め込みfp8無効", section="exec", ftype="bool",
+              help="入力埋め込みテーブルをbf16のまま保持 (既定はfp8-e4m3化してVRAMをMoEスロットへ回す)"),
+            F("--no-decode-fetch-overlap", "デコードfetch overlap無効", section="exec", ftype="bool",
+              help="MoEデコードのhit/missフェッチオーバーラップを無効化 (既定ON、無効化で直列化し低速)"),
             F("--speculative", "推測的デコード (MTP)", section="exec",
               help="mtp = チェックポイントの MTP ヘッドで1トークン先読みし単一リクエスト時のデコードを高速化"
                    " (同時リクエストが増えると自動無効化)。対応は qwen4_exp のみ、none/空=無効"),
