@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0e1116">
+<title>AI サーバー 起動・停止</title>
+<style>
+:root{
+  --bg:#0e1116; --bg2:#151a22; --card:#1a2029; --line:#2a323d;
+  --text:#eef3f8; --sub:#93a1b3; --acc:#4da3ff; --ok:#3ddc84; --warn:#ffb020; --err:#ff5d5d;
+  --r:18px;
+  /* 1vh 相当の実数単位。dvh が使えるブラウザでは「URL バーを引いた実際の高さ」に
+     合わせる (見えている高さより大きく採って全画面表示がはみ出すのを防ぐ)。 */
+  --vh1:1vh;
+}
+@supports (height:100dvh){:root{--vh1:1dvh}}
+*{box-sizing:border-box; -webkit-tap-highlight-color:transparent}
+html,body{margin:0;padding:0}
+body{
+  background:var(--bg); color:var(--text);
+  font-family:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
+  font-size:17px; line-height:1.6; min-height:100vh;
+  padding-bottom:calc(20px + env(safe-area-inset-bottom));
+}
+header{
+  position:sticky; top:0; z-index:20;
+  background:rgba(14,17,22,.92); backdrop-filter:blur(10px);
+  border-bottom:1px solid var(--line);
+  padding:calc(11px + env(safe-area-inset-top)) 16px 11px;
+  display:flex; align-items:center; gap:12px;
+}
+header h1{font-size:20px; margin:0; letter-spacing:.3px}
+header .meta{margin-left:auto; font-size:14px; color:var(--sub); text-align:right}
+main{max-width:760px; margin:0 auto; padding:14px 16px 20px}
+.hidden{display:none!important}
+.muted{color:var(--sub); font-size:15px}
+.card{background:var(--card); border:1px solid var(--line); border-radius:var(--r);
+  padding:16px; margin-bottom:12px}
+.srv{display:flex; flex-direction:column; gap:12px}
+.srv.tap{cursor:pointer}
+.srv.tap:focus-visible{outline:2px solid var(--acc); outline-offset:2px}
+.srv-name{font-size:22px; font-weight:800; line-height:1.3; word-break:break-word}
+.pill{display:inline-flex; align-items:center; gap:9px; font-size:17px; font-weight:800;
+  padding:7px 15px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
+  color:var(--sub); align-self:flex-start}
+.pill .dot{width:13px; height:13px; border-radius:50%; background:currentColor}
+.pill.ok{color:var(--ok); border-color:#274d38; background:#12251c}
+.pill.warn{color:var(--warn); border-color:#4d3d1f; background:#241d10}
+.pill.err{color:var(--err); border-color:#4d2323; background:#241213}
+.pill.ok .dot{animation:blink 1.6s ease-in-out infinite}
+@keyframes blink{50%{opacity:.35}}
+button{
+  appearance:none; border:1px solid var(--line); background:var(--card,#20272f); color:var(--text);
+  border-radius:14px; padding:15px 20px; font-size:20px; font-weight:800; cursor:pointer;
+  min-height:64px; width:100%; font-family:inherit;
+}
+button:active{transform:scale(.98)}
+button.go{background:var(--ok); border-color:var(--ok); color:#062012}
+button.stop{background:transparent; border-color:#4c2a30; color:var(--err)}
+button.small{min-height:44px; font-size:16px; padding:10px 14px; width:auto; font-weight:600}
+button:disabled{opacity:.5; cursor:default}
+.spin{display:inline-block; width:16px; height:16px; border:2px solid currentColor;
+  border-top-color:transparent; border-radius:50%; animation:sp .8s linear infinite}
+@keyframes sp{to{transform:rotate(360deg)}}
+/* ---------------- 全画面プレイヤー (1 台に集中する大きな表示) ---------------- */
+/* カードをタップするとここへ来る。一覧もヘッダーも覆って、状態の大きな文字と
+   停止 / 起動 / 戻る のボタンだけに集中させる (異常停止の全画面警告と同じ発音)。
+   縦が足りない環境 (横画面スマホ / 小さなウィンドウ) でもスクロールにならないよう、
+   円盤・状態文字・ボタン高・余白を --vh1 (ビューポート高さ) に連動させて縮める。
+   clamp の下限が最後の砦で、overflow:auto はそれでも収まらないときの保険。 */
+#player{position:fixed; inset:0; z-index:50; background:var(--bg); display:flex;
+  flex-direction:column; align-items:center; gap:var(--gap); overflow:auto; text-align:center;
+  animation:pop .2s ease-out;
+  --gap:clamp(6px,calc(var(--vh1)*2.2),20px);
+  --art:clamp(64px,min(calc(var(--vh1)*22),38vw),148px);
+  --status:clamp(24px,min(12vw,calc(var(--vh1)*8.6)),68px);
+  --btn:clamp(46px,calc(var(--vh1)*9.6),74px);
+  --btn2:clamp(36px,calc(var(--vh1)*6.6),54px);
+  padding:calc(clamp(8px,calc(var(--vh1)*2),16px) + env(safe-area-inset-top)) 20px
+          calc(clamp(10px,calc(var(--vh1)*2.6),26px) + env(safe-area-inset-bottom))}
+@keyframes pop{from{opacity:0; transform:translateY(12px)}to{opacity:1; transform:none}}
+#player .p-top{width:100%; max-width:560px; display:flex; align-items:center; gap:10px;
+  font-size:clamp(12px,calc(var(--vh1)*2.4),14px); color:var(--sub)}
+#player .p-top button{margin-left:auto; min-height:clamp(30px,calc(var(--vh1)*6.4),44px);
+  font-size:clamp(13px,calc(var(--vh1)*2.6),16px); padding:6px clamp(10px,3vw,14px)}
+#player .p-name{font-size:clamp(14px,min(4.9vw,calc(var(--vh1)*4.6)),19px); font-weight:700;
+  color:var(--sub); max-width:560px; line-height:1.4; word-break:break-word}
+#player .p-stage{flex:1 1 auto; min-height:0; width:100%; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:clamp(8px,calc(var(--vh1)*3),24px)}
+#player .art{width:var(--art); height:var(--art); border-radius:50%; display:grid; place-items:center;
+  flex:0 0 auto; border:1px solid var(--line); color:var(--sub);
+  background:radial-gradient(circle at 50% 32%,#20272f,#11161c)}
+#player .art.ok{border-color:#274d38; color:var(--ok);
+  background:radial-gradient(circle at 50% 32%,#173221,#0e1f15)}
+#player .art.warn{border-color:#4d3d1f; color:var(--warn);
+  background:radial-gradient(circle at 50% 32%,#2b2413,#15171c)}
+#player .p-status{font-size:var(--status); font-weight:900; line-height:1.2;
+  letter-spacing:.5px; color:var(--sub)}
+#player .p-status.ok{color:var(--ok)}
+#player .p-status.warn{color:var(--warn)}
+#player .p-hint{font-size:clamp(13px,min(4.4vw,calc(var(--vh1)*2.8)),17px); color:var(--sub);
+  max-width:520px; line-height:1.6}
+#player .p-btns{width:100%; max-width:520px; display:flex; flex-direction:column;
+  gap:clamp(6px,calc(var(--vh1)*1.8),12px)}
+#player .p-btns button{min-height:var(--btn); border-radius:999px;
+  font-size:clamp(16px,min(5.6vw,calc(var(--vh1)*3.4)),22px);
+  padding:clamp(6px,calc(var(--vh1)*1.6),15px) 20px}
+#player .p-btns button.back{min-height:var(--btn2); font-weight:600; color:var(--sub);
+  background:transparent; border-color:var(--line);
+  font-size:clamp(13px,min(4.4vw,calc(var(--vh1)*2.6)),17px)}
+/* 全画面中は背後の一覧をタブ対象から外す (覆い隠すだけだと誤ってフォーカス当たる) */
+body.plock>header,body.plock>main{visibility:hidden}
+/* イコライザ: 稼働中だけ跳ねる。停止中は寝たバーのまま (円盤の大きさに合わせて縮む) */
+.eq{display:flex; align-items:flex-end; gap:calc(var(--art)*.047); height:calc(var(--art)*.38)}
+.eq i{width:calc(var(--art)*.061); height:30%; border-radius:999px; background:currentColor;
+  animation:eq 1.15s ease-in-out infinite}
+.eq i:nth-child(2){animation-delay:.12s}
+.eq i:nth-child(3){animation-delay:.24s}
+.eq i:nth-child(4){animation-delay:.36s}
+.eq i:nth-child(5){animation-delay:.48s}
+.art.off .eq i{height:18%; animation:none; opacity:.55}
+.art .spin{width:calc(var(--art)*.3); height:calc(var(--art)*.3); border-width:4px}
+@keyframes eq{0%,100%{height:30%}50%{height:100%}}
+@media (prefers-reduced-motion:reduce){.eq i,.spin,.pill.ok .dot,#player{animation:none}}
+/* ---------------- 全画面アラート ---------------- */
+/* プレイヤーと同じ考え方: 高さが足りないときは文字・余白・ボタン高を連動して縮める
+   (警告は最優先で読ませたいので下限はプレイヤーより甘くしない)。 */
+#alert{position:fixed; inset:0; z-index:60; background:#2a0d10; display:flex;
+  flex-direction:column; align-items:center; justify-content:center; text-align:center;
+  padding:clamp(12px,calc(var(--vh1)*3.4),28px) clamp(14px,4vw,20px);
+  gap:clamp(8px,calc(var(--vh1)*2.4),18px); overflow:auto}
+#alert .big{font-size:clamp(19px,min(8.7vw,calc(var(--vh1)*6.4)),34px); font-weight:900;
+  line-height:1.35; color:#fff}
+#alert .mid{font-size:clamp(13px,min(5.6vw,calc(var(--vh1)*4.2)),22px); color:#ffd9d9; font-weight:700}
+#alert .contact{font-size:clamp(15px,min(6.7vw,calc(var(--vh1)*4.8)),26px); font-weight:900;
+  background:#3d1317; border:2px solid #7a2a30; border-radius:16px; color:#fff; line-height:1.5;
+  max-width:640px; padding:clamp(9px,calc(var(--vh1)*2.4),18px) clamp(12px,3.4vw,20px)}
+#alert .tech{font-size:13px; color:#e3a9a9; max-width:640px; max-height:26vh; overflow:auto;
+  word-break:break-all; background:#1d090b; border:1px solid #4d2323; border-radius:10px;
+  padding:10px 12px}
+#alert .btns{display:flex; gap:clamp(8px,calc(var(--vh1)*1.8),12px); flex-wrap:wrap;
+  justify-content:center; width:100%; max-width:560px}
+#alert .btns button{flex:1 1 200px; min-height:clamp(46px,calc(var(--vh1)*8),64px);
+  font-size:clamp(16px,min(5.6vw,calc(var(--vh1)*3.4)),20px)}
+#toast{position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom));
+  transform:translateX(-50%); background:#20272f; border:1px solid var(--line); color:var(--text);
+  border-radius:12px; padding:12px 18px; font-size:16px; z-index:70; opacity:0;
+  transition:opacity .25s; pointer-events:none; max-width:90vw}
+#toast.on{opacity:1}
+/* ---------------- 縦が短い環境 (横画面スマホ / 小さなウィンドウ) ------------- */
+/* 一覧はページ全体がスクロールしてよいが、ボタン 64px だと 1 枚で画面が
+   いっぱいになるので、高さが足りないときだけカードとボタンを詰める。 */
+@media (max-height:560px){
+  header{padding-top:calc(8px + env(safe-area-inset-top)); padding-bottom:8px}
+  header h1{font-size:18px}
+  header .meta{font-size:13px}
+  main{padding:10px 14px 16px}
+  .card{padding:12px 14px; margin-bottom:10px; border-radius:14px}
+  .srv{gap:9px}
+  .srv-name{font-size:19px}
+  .pill{font-size:15px; padding:5px 13px}
+  .pill .dot{width:11px; height:11px}
+  button{min-height:clamp(46px,calc(var(--vh1)*10),64px);
+    font-size:clamp(17px,calc(var(--vh1)*4.4),20px); padding:10px 16px}
+}
+</style>
+</head>
+<body>
+<header class="hidden" id="hdr">
+  <h1>🤖 AI サーバー</h1>
+  <div class="meta" id="host"></div>
+  <button class="small" onclick="doLogout()">ログアウト</button>
+</header>
+
+<main>
+  <div id="notice" class="card hidden"></div>
+  <div id="list"></div>
+  <div class="muted" style="margin-top:18px; text-align:center" id="foot"></div>
+</main>
+
+<div id="player" class="hidden"></div>
+<div id="alert" class="hidden"></div>
+<div id="toast"></div>
+
+<script>
+"use strict";
+/* ロール user 専用の画面。何を見せて何が異常かはサーバー (/api/simple) が決めるので、
+   ここは表示とボタン押下だけを持つ (設定値・ログ・ホスト詳細は受け取らない)。
+   認証 (ログイン / ログアウト) は管理画面と同じ / のログイン画面に一本化している。 */
+const $ = s => document.querySelector(s);
+let DATA = null, TIMER = null, KNOWN = [], DISMISS = 0;
+const BUSY = {};
+let MY_ROLE = "user";
+/* 全画面プレイヤー (開いているサーバーの profile_id、null = 一覧)。
+   sessionStorage に何も無い = 未選択なので「1 台だけ稼働中」なら自動で全画面に
+   展開する (稼働中にリロードした人が一覧から押し直す導線を無くすため)。「← 一覧に
+   戻る」は空文字を保存して = 一覧を明示選択したので、以降は自動展開しない。 */
+let FOCUS = null;
+function loadFocus() {
+  try { return sessionStorage.getItem("llm.simple.focus"); } catch { return null; }
+}
+function saveFocus(pid) {
+  FOCUS = pid || null;
+  try { sessionStorage.setItem("llm.simple.focus", FOCUS || ""); }
+  catch { /* 使えなくても画面自体は動く */ }
+}
+function openPlayer(pid) {
+  if (FOCUS === pid) return;
+  saveFocus(pid);
+  if (DATA) renderPlayer();               // 次の 5 秒周期を待たずに即切り替える
+}
+function closePlayer() {
+  if (FOCUS === null) return;
+  saveFocus("");
+  if (DATA) renderPlayer();               // 「← 一覧に戻る」も即時に一覧へ戻る
+}
+function pinFocus() { if (FOCUS) saveFocus(FOCUS); }   // 自動展開ルールを確定させる
+
+function esc(s) {
+  return String(s ?? "").replace(/[&<>"']/g,
+    c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+function toast(m) {
+  const t = $("#toast"); t.textContent = m; t.classList.add("on");
+  clearTimeout(toast._t); toast._t = setTimeout(() => t.classList.remove("on"), 3600);
+}
+async function api(path, body) {
+  const opt = body === undefined ? {}
+    : { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) };
+  const r = await fetch(path, opt);
+  const j = await r.json().catch(() => ({}));
+  if (r.status === 401) {
+    gotoLogin("セッションが切れました。もう一度ログインしてください");
+    throw new Error("ログインが必要です");
+  }
+  if (!r.ok) throw new Error(j.detail || ("エラー (" + r.status + ")"));
+  return j;
+}
+
+/* ------------------------------------------------- ログイン (共通画面 / に委譲) */
+/* ログイン / ログアウト / セッション切れは管理画面と同じ / のログイン画面を使う。
+   /simple 側に認証フォームを持たせないで共通化するのが狙いで、ロール user なら
+   / の方がログイン後に /simple へ戻してくれる (二重ログイン画面を避ける)。 */
+let LEAVING = false;
+function gotoLogin(note) {
+  if (LEAVING) return;
+  LEAVING = true;
+  if (TIMER) { clearInterval(TIMER); TIMER = null; }
+  try {   // / 側のログイン画面に出す案内と「ログイン状態を保持」を引き継ぐ
+    sessionStorage.setItem("llm.login", JSON.stringify({ note: note || "", remember: true }));
+  } catch { /* 使えなくても / のログイン画面には行ける */ }
+  location.replace("/");
+}
+function showApp() { $("#hdr").classList.remove("hidden"); }
+async function doLogout() {
+  try { await api("/api/auth/logout", {}); } catch { /* 未ログインなら画面だけ戻す */ }
+  gotoLogin("ログアウトしました");
+}
+/* ------------------------------------------------------------ 表示 */
+const STATE = {
+  running:  ["ok", "稼働中", "そのままお使いいただけます"],
+  starting: ["warn", "起動中", "このままお待ちください（1〜2 分かかることがあります）"],
+  stopping: ["warn", "停止中", "まもなく止まります"],
+  stopped:  ["", "停止中", "「▶ 起動する」を押すと始まります"],
+};
+async function boot() {
+  let st = null;
+  try { st = await api("/api/auth/status"); }
+  catch {
+    if (LEAVING) return;                       // 401 で / へリダイレクト済み
+    $("#list").innerHTML = '<div class="card muted">⚠ 接続できませんでした。'
+      + '時間をおいて再度お試しください</div>';
+    setTimeout(boot, 5000);                    // サーバーの一時不通はここで再試行
+    return;
+  }
+  if (!st.authenticated) { gotoLogin(); return; }   // 未ログインは共通画面 / でログイン
+  MY_ROLE = st.role || "user";
+  showApp();
+  await tick();
+  if (TIMER) clearInterval(TIMER);
+  TIMER = setInterval(tick, 5000);
+}
+async function tick() {
+  try { DATA = await api("/api/simple"); }
+  catch (e) {
+    if (LEAVING) return;                            // / へ移動中なのでエラーを出さない
+    if (!DATA) $("#list").innerHTML = `<div class="card muted">⚠ ${esc(e.message)}</div>`;
+    return;
+  }
+  $("#host").textContent = DATA.hostname || "";
+  render();
+}
+/* 開いているサーバーを選ぶ (未選択なら 1 台だけ稼働中のときだけ自動で展開) */
+function pickFocus(srvs) {
+  const stored = loadFocus();
+  if (stored === null) {
+    FOCUS = srvs.length === 1 && srvs[0].state !== "stopped" ? srvs[0].profile_id : null;
+    return;
+  }
+  FOCUS = stored || null;
+  if (FOCUS && !srvs.some(s => s.profile_id === FOCUS)) FOCUS = null;   // 一覧から消えた
+}
+function render() {
+  const srvs = DATA.servers || [], note = $("#notice");
+  pickFocus(srvs);
+  note.classList.toggle("hidden", srvs.length > 0);
+  if (!srvs.length) {
+    note.innerHTML = `<div style="font-size:21px;font-weight:800">利用できるサーバーが設定されていません</div>
+      <div class="muted" style="margin-top:8px">管理者に「利用できるよう設定してください」と依頼してください</div>`;
+  }
+  $("#list").innerHTML = srvs.map(s => {
+    const st = STATE[s.state] || STATE.stopped, live = s.state !== "stopped";
+    const busy = BUSY[s.profile_id], pid = esc(s.profile_id);
+    return `<div class="card srv tap" tabindex="0" role="button" aria-label="${esc(s.profile_name)} を大きく表示"
+      onclick="openPlayer('${pid}')"
+      onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();openPlayer('${pid}')}">
+      <div class="srv-name">${esc(s.profile_name)}</div>
+      <div class="pill ${st[0]}"><span class="dot"></span>${
+        busy ? '<span class="spin"></span> 処理中…' : st[1]}</div>
+      ${live
+        ? `<button class="stop" onclick="event.stopPropagation();stopSrv('${pid}')" ${busy ? "disabled" : ""}>■ 停止する</button>`
+        : `<button class="go" onclick="event.stopPropagation();startSrv('${pid}')" ${busy ? "disabled" : ""}>▶ 起動する</button>`}
+    </div>`;
+  }).join("");
+  $("#foot").innerHTML = "カードをタップすると大きく表示します ・ 5 秒ごとに自動更新します"
+    + (MY_ROLE && MY_ROLE !== "user" ? ' ・ <a href="/">管理画面</a>' : "");
+  renderPlayer();
+  renderAlert();
+}
+/* ------------------------------------------------------------ 全画面プレイヤー */
+/* 円盤の中身: 稼働中 = 跳ねるイコライザ / 起動・停止処理中 = スピナ / 停止中 = 寝たバー */
+function artHtml(busy, state) {
+  if (busy || state === "starting" || state === "stopping") return '<span class="spin"></span>';
+  return '<span class="eq"><i></i><i></i><i></i><i></i><i></i></span>';
+}
+function renderPlayer() {
+  const el = $("#player");
+  const s = (DATA.servers || []).find(x => x.profile_id === FOCUS);
+  if (!s) { el.classList.add("hidden"); el.innerHTML = ""; document.body.classList.remove("plock"); return; }   // 一覧側へ戻る
+  const st = STATE[s.state] || STATE.stopped, live = s.state !== "stopped";
+  const busy = BUSY[s.profile_id], cls = busy ? "warn" : st[0], pid = esc(s.profile_id);
+  el.innerHTML = `
+    <div class="p-top"><span>${esc(DATA.hostname || "")}</span>
+      <button class="small" onclick="doLogout()">ログアウト</button></div>
+    <div class="p-name">${esc(s.profile_name)}</div>
+    <div class="p-stage">
+      <div class="art ${cls || "off"}">${artHtml(busy, s.state)}</div>
+      <div class="p-status ${cls}">${busy ? "処理中" : esc(st[1])}</div>
+      <div class="p-hint">${esc(busy ? "もう少しお待ちください" : st[2])}</div>
+    </div>
+    <div class="p-btns">
+      ${live
+        ? `<button class="stop" onclick="stopSrv('${pid}')" ${busy ? "disabled" : ""}>■ 停止する</button>`
+        : `<button class="go" onclick="startSrv('${pid}')" ${busy ? "disabled" : ""}>▶ 起動する</button>`}
+      <button class="back" onclick="closePlayer()">← 一覧に戻る</button>
+    </div>`;
+  el.classList.remove("hidden");
+  document.body.classList.add("plock");
+}
+/* ------------------------------------------------------------ 全画面アラート */
+function alertText(a) {
+  const n = a.profile_name || "サーバー";
+  if (a.kind === "memory")
+    return ["🚨 このマシンのメモリが不足しています", "サーバーが停止する前に管理者へ連絡してください"];
+  if (a.kind === "lost")
+    return [`🚨 ${n} と通信できません`, "「もう一度起動する」を押してください"];
+  return [`🚨 ${n} が停止しました`, "「もう一度起動する」でも失敗する場合は管理者へ連絡してください"];
+}
+function renderAlert() {
+  const el = $("#alert"), alerts = DATA.alerts || [];
+  const fresh = alerts.some(a => !KNOWN.includes(a.id));
+  KNOWN = alerts.map(a => a.id);
+  if (!alerts.length) {
+    el.classList.add("hidden"); el.innerHTML = ""; DISMISS = 0;
+    if (beep._loop) { clearInterval(beep._loop); beep._loop = null; }
+    return;
+  }
+  if (Date.now() < DISMISS) {                       // 「今は様子を見るだけ」中
+    if (beep._loop) { clearInterval(beep._loop); beep._loop = null; }
+    return;
+  }
+  if (fresh) { beep(); if (!beep._loop) beep._loop = setInterval(beep, 30000); }
+  const a = alerts[0], t = alertText(a);
+  el.innerHTML = `
+    <div class="big">${esc(t[0])}</div>
+    <div class="mid">${esc(t[1])}</div>
+    ${DATA.contact ? `<div class="contact">📞 ${esc(DATA.contact)}</div>`
+                   : `<div class="mid">周囲の管理者に伝えてください</div>`}
+    <div class="btns">
+      ${a.profile_id ? `<button class="go" onclick="startSrv('${esc(a.profile_id)}')">▶ もう一度起動する</button>` : ""}
+      <button class="small" onclick="dismissAlert()">今は様子を見るだけ</button>
+    </div>
+    ${a.detail ? `<details style="max-width:640px"><summary class="muted" style="cursor:pointer">管理者用 詳細</summary>
+      <div class="tech">${esc(a.detail)}</div></details>` : ""}`;
+  el.classList.remove("hidden");
+}
+function dismissAlert() { DISMISS = Date.now() + 90000; $("#alert").classList.add("hidden"); }
+
+/* ------------------------------------------------------------ 操作 */
+async function startSrv(pid) {
+  openPlayer(pid);                            // 押した瞬間に全画面の大きな表示へ
+  BUSY[pid] = true; DISMISS = 0; if (DATA) render();
+  try {
+    await api("/api/simple/start", { profile_id: pid });
+    toast("起動しました — 完了まで 1〜2 分かかることがあります");
+  } catch (e) { toast("⚠ " + e.message); }
+  BUSY[pid] = false;
+  await tick();
+}
+async function stopSrv(pid) {
+  pinFocus();                                 // 停止後も同じ大きな表示に留まる
+  BUSY[pid] = true; if (DATA) render();
+  try { await api("/api/simple/stop", { profile_id: pid }); toast("停止しました"); }
+  catch (e) { toast("⚠ " + e.message); }
+  BUSY[pid] = false;
+  await tick();
+}
+function beep() {
+  try {
+    const C = window.AudioContext || window.webkitAudioContext;
+    if (!C) return;
+    beep.ctx = beep.ctx || new C();
+    const ctx = beep.ctx, t = ctx.currentTime;
+    [0, 0.35, 0.7].forEach((d, i) => {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = "square";
+      o.frequency.value = i % 2 ? 620 : 880;
+      g.gain.setValueAtTime(0.0001, t + d);
+      g.gain.exponentialRampToValueAtTime(0.22, t + d + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + d + 0.28);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(t + d); o.stop(t + d + 0.3);
+    });
+  } catch { /* 音が鳴らせなくても警告は出る */ }
+}
+boot();
+</script>
+</body>
+</html>

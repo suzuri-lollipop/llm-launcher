@@ -25,6 +25,12 @@ LOG_TAIL_LIMIT = 512 * 1024
 OOM_REAPPLY_TICKS = 4        # tick(3s) x 4 = 12 秒ごとに起動ツリーへ再適用
 PRESSURE_LOG_COOLDOWN = 120.0
 
+# セッションの起動経路 (started_via)。簡易画面の警告は "simple" と "ui" を対象に
+# する ("bench" は出さない / rbac.SIMPLE_VIAS)。
+VIA_SIMPLE = "simple"        # /simple の「▶ 起動する」ボタン
+VIA_UI = "ui"                # 管理画面の起動 / 再起動
+VIA_BENCH = "bench"          # ベンチマークの自動起動 (警告には出さない)
+
 
 def pid_alive(pid: int) -> bool:
     if pid <= 0:
@@ -212,7 +218,15 @@ class ProcessManager:
 
     # --------------------------------------------------------------- start
 
-    async def start(self, profile: dict[str, Any], force: bool = False) -> dict[str, Any]:
+    async def start(self, profile: dict[str, Any], force: bool = False,
+                    actor: dict[str, Any] | None = None, via: str = VIA_UI) -> dict[str, Any]:
+        """バックエンドを起動してセッション記録を作る。
+
+        actor / via は「誰がどの画面から起こしたインスタンスか」の記録。
+        簡易画面 (/simple) は自分が起こした分だけを警告に出すため、起動の瞬間に
+        しか取れないこの情報を永続化しておく (履歴レコードに無い古いセッションは
+        誰の起動でもない = 警告対象にしない)。
+        """
         bid = profile.get("backend")
         if bid not in BACKENDS:
             raise RuntimeError("このプロファイルにバックエンドが設定されていません")
@@ -257,6 +271,10 @@ class ProcessManager:
             "profile_name": profile.get("name", ""),
             "backend": bid,
             "backend_name": backend["name"],
+            # 起動したユーザーと経路 (簡易画面の警告は自分が起動した分だけを出す)
+            "started_by": (actor or {}).get("id", "") or "",
+            "started_by_name": (actor or {}).get("username", "") or "",
+            "started_via": via or VIA_UI,
             "argv": argv,
             "cwd": cwd,
             "port": port,

@@ -172,6 +172,8 @@ details.adv .inner{padding:0 12px 12px}
 #login .sub{color:var(--sub);font-size:12.5px;margin:5px 0 6px;line-height:1.55}
 #login .err{background:#241213;border:1px solid #4d2323;color:var(--err);border-radius:var(--r2);
   padding:9px 12px;font-size:12.5px;margin-top:10px;white-space:pre-wrap}
+#login .note{background:#12202e;border:1px solid #254059;color:var(--acc);border-radius:var(--r2);
+  padding:9px 12px;font-size:12.5px;margin-top:10px}
 #login .foot{color:var(--sub);font-size:11px;text-align:center;margin-top:14px;line-height:1.6}
 #login button.primary{width:100%;margin-top:16px;min-height:46px;font-size:15px}
 #hdr-user{display:flex;align-items:center;gap:6px;margin-left:10px;flex:none}
@@ -233,13 +235,22 @@ table.bm th,table.bm td{padding:6px 9px;border-bottom:1px solid var(--line);text
 table.bm th:first-child,table.bm td:first-child{text-align:left}
 table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
 .nbadge.run{background:var(--acc);color:#04101f}
+/* ---------------- ロール権限で隠す要素 (キーは rbac.CAPS / can() と対応) ---------------- */
+body.no-edit .need-edit,body.no-bench .need-bench,body.no-oom .need-oom,
+body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-dashboard{
+  display:none!important}
+.perm-row{display:flex;align-items:center;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line);min-width:0}
+.perm-row:last-child{border-bottom:0}
+.perm-row .lab{font-size:13.5px;font-weight:600}
+.perm-row .dsc{font-size:11.5px;color:var(--sub);line-height:1.35}
 </style>
 </head>
 <body>
 <div id="login">
   <div class="box">
     <div class="logo">🚀 LLM Launcher</div>
-    <div class="sub" id="login-sub">管理アカウントでログインしてください</div>
+    <div class="sub" id="login-sub">ユーザー名とパスワードを入力してください</div>
+    <div class="note hidden" id="login-note"></div>
     <div class="err hidden" id="login-err"></div>
     <form id="login-form" onsubmit="return loginSubmit(event)" autocomplete="on">
       <label class="f" for="login-user">ユーザー名</label>
@@ -336,11 +347,11 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
     <div class="row" style="margin-bottom:10px">
       <h2 class="view-title" style="margin:0">プロファイル管理 <span class="muted">1プロファイル = 1バックエンド</span></h2>
       <div class="grow"></div>
-      <button class="ghost" id="pm-batch-btn" onclick="toggleBatch()">☑ 一括</button>
-      <button class="ghost" onclick="exportAll()">⬇ 全部エクスポート</button>
-      <button class="ghost" onclick="$('#import-file').click()">⬆ インポート</button>
+      <button class="ghost need-edit" id="pm-batch-btn" onclick="toggleBatch()">☑ 一括</button>
+      <button class="ghost need-edit" onclick="exportAll()">⬇ 全部エクスポート</button>
+      <button class="ghost need-edit" onclick="$('#import-file').click()">⬆ インポート</button>
       <input type="file" id="import-file" accept="application/json,.json" style="display:none" onchange="importFile(this)">
-      <button class="primary" onclick="openEditor()">＋ 新規</button>
+      <button class="primary need-edit" onclick="openEditor()">＋ 新規</button>
     </div>
     <div class="row" style="margin-bottom:10px;gap:8px">
       <input type="text" id="pm-q" class="grow" style="min-width:140px" placeholder="🔍 名前 / モデル / バックエンド / メモで絞り込み" oninput="S.pm.q=this.value;renderProfiles()">
@@ -374,8 +385,9 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
   <section id="view-users" class="view hidden">
     <h2 class="view-title">ユーザー管理 <span class="muted">ログインアカウントと API キー (管理者のみ)</span></h2>
     <div id="um-note" class="card hidden" style="margin-bottom:12px;border-color:#4d3d1f;background:#241d10"></div>
+    <div class="grid c2" id="role-cards" style="margin-bottom:14px"></div>
     <div class="row" style="margin-bottom:10px">
-      <span class="muted">ロール: <b>管理者</b> = 全機能 + ユーザー管理 / <b>ユーザー</b> = 起動・サーバー・プレイグラウンド・ベンチ (ユーザー管理のみ閲覧不可)</span>
+      <span class="muted">ロール: <b>管理者</b> = 全機能 / <b>メンテナー</b> = 起動・停止 + 上の「開示する機能」で選んだ範囲 / <b>ユーザー</b> = 簡易画面 (<a href="/simple">/simple</a>) の開始・停止のみ</span>
       <span class="grow"></span>
       <button class="ghost" onclick="loadUsers()">↻ 更新</button>
       <button class="primary" id="um-new" onclick="umOpen()">＋ 新規ユーザー</button>
@@ -454,7 +466,7 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
       <input type="text" id="bm-model" class="mono" placeholder="(自動)">
       <div class="muted" style="font-size:11.5px;margin-top:6px">プロンプトは launcher が生成するランダム文章 (≈語数。リクエスト毎に重複なしで prefix cache を抑制)。トークン数は API の usage 優先、未取得時は文字数推定 (≈)。同一機上で複数実行すると結果が相互に狂うため同時実走は 1 件です。</div>
       <div class="row" style="margin-top:10px">
-        <button class="primary" id="bm-start" onclick="bmStart()">▶ ベンチ開始</button>
+        <button class="primary need-bench" id="bm-start" onclick="bmStart()">▶ ベンチ開始</button>
         <span class="grow"></span>
         <span class="muted" id="bm-note"></span>
       </div>
@@ -466,14 +478,14 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
 <nav id="sidemen">
   <button id="menu-btn" aria-label="メニューを開く" aria-expanded="false" aria-controls="menu-items">☰</button>
   <div class="menu-items" id="menu-items">
-    <button class="mitem on" data-tab="home"><span class="ico">🏠</span>ホーム</button>
+    <button class="mitem on" data-tab="home" id="mi-home"><span class="ico">🏠</span>ホーム</button>
     <button class="mitem" data-tab="launch"><span class="ico">🚀</span>起動</button>
     <button class="mitem" data-tab="running"><span class="ico">🖥️</span>稼働中<span class="nbadge run hidden" id="nb-running"></span></button>
-    <button class="mitem" data-tab="history"><span class="ico">🕘</span>セッション履歴<span class="nbadge hidden" id="nb-fail"></span></button>
-    <button class="mitem" data-tab="playground"><span class="ico">🧪</span>プレイグラウンド</button>
-    <button class="mitem" data-tab="bench"><span class="ico">📊</span>ベンチマーク<span class="nbadge hidden" id="nb-bench"></span></button>
-    <button class="mitem" data-tab="profiles"><span class="ico">📋</span>プロファイル</button>
-    <button class="mitem" data-tab="backends"><span class="ico">⚙️</span>バックエンド</button>
+    <button class="mitem" data-tab="history" id="mi-history"><span class="ico">🕘</span>セッション履歴<span class="nbadge hidden" id="nb-fail"></span></button>
+    <button class="mitem" data-tab="playground" id="mi-playground"><span class="ico">🧪</span>プレイグラウンド</button>
+    <button class="mitem" data-tab="bench" id="mi-bench"><span class="ico">📊</span>ベンチマーク<span class="nbadge hidden" id="nb-bench"></span></button>
+    <button class="mitem" data-tab="profiles" id="mi-profiles"><span class="ico">📋</span>プロファイル</button>
+    <button class="mitem" data-tab="backends" id="mi-backends"><span class="ico">⚙️</span>バックエンド</button>
     <button class="mitem hidden" data-tab="users" id="mi-users"><span class="ico">👥</span>ユーザー管理</button>
   </div>
 </nav>
@@ -602,13 +614,22 @@ $("#menu-btn").addEventListener("click", () => setMenu(!$("#sidemen").classList.
 document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => {
   b.addEventListener("click", () => { switchTab(b.dataset.tab); setMenu(false); });
 });
+/* ロールで開けるタブ。起動 / 稼働中は常に開ける (メンテナーの基本操作)。users は管理者のみ */
+const TAB_CAP = { home: "dashboard", history: "history", playground: "playground",
+                  bench: "bench", profiles: "profiles.edit", backends: "backends.edit" };
+function tabAllowed(tab) {
+  if (tab === "users") return AUTH.isAdmin;
+  const cap = TAB_CAP[tab];
+  return cap ? can(cap) : true;
+}
 function switchTab(tab) {
+  if (!tabAllowed(tab)) tab = "launch";
   S.tab = tab;
   document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
   document.querySelectorAll("section.view").forEach(v => v.classList.add("hidden"));
   $("#view-" + tab).classList.remove("hidden");
   renderAll();
-  if (tab === "users") loadUsers();
+  if (tab === "users") { loadUsers(); loadRoles(); }
 }
 
 /* ============================================================= render */
@@ -635,7 +656,14 @@ function renderTabBadges() {
 
 /* ============================================================= 認証 */
 const AUTH = { enabled: true, needsSetup: false, user: null, isAdmin: false,
-               mode: "login", booted: false };
+               role: "", perms: {}, simpleOnly: false, mode: "login", booted: false };
+
+/* 機能権限の判定 (キーはサーバー側 rbac.CAPS と同じ)。admin は全機能、user は簡易画面のみ。
+   ここで隠すものは API 側でも 403 になる = 表示と認可が同じキーを見る。 */
+function can(cap) {
+  if (AUTH.role === "admin") return true;
+  return !!(AUTH.perms && AUTH.perms[cap]);
+}
 
 function loginError(msg) {
   const el = $("#login-err");
@@ -647,7 +675,7 @@ function setLoginMode(mode) {
   const setup = AUTH.mode === "setup";
   $("#login-sub").textContent = setup
     ? "初めての起動です。管理者アカウントを作成してください"
-    : "管理アカウントでログインしてください";
+    : "ユーザー名とパスワードを入力してください";
   $("#login-pw2wrap").classList.toggle("hidden", !setup);
   $("#login-rememberwrap").classList.toggle("hidden", setup);
   $("#login-btn").textContent = setup ? "管理者を作成して開始" : "ログイン";
@@ -668,6 +696,28 @@ function hideLogin() {
   $("#login").classList.add("hidden");
   document.body.classList.remove("auth-lock");
 }
+/* /simple (ロール user 専用画面) は自前のログインフォームを持たない。ログアウトや
+   セッション切れでここに送られてくるときは sessionStorage に案内と「ログイン状態を
+   保持」の既定を置いていくので、ログイン画面を出すときに 1 回だけ反映する。 */
+let LOGIN_HINT = null;
+function readLoginHint() {
+  LOGIN_HINT = null;
+  try {
+    const raw = sessionStorage.getItem("llm.login");
+    sessionStorage.removeItem("llm.login");
+    const h = raw ? JSON.parse(raw) : null;
+    if (h && typeof h === "object") LOGIN_HINT = h;
+  } catch { /* 読めなければ通常のログイン画面として出す */ }
+}
+function showLoginHint() {
+  const h = LOGIN_HINT; LOGIN_HINT = null;
+  const el = $("#login-note");
+  if (!el) return;
+  el.textContent = ""; el.classList.add("hidden");
+  if (!h) return;
+  if (h.remember) { const c = $("#login-remember"); if (c) c.checked = true; }
+  if (h.note) { el.textContent = h.note; el.classList.remove("hidden"); }
+}
 async function fetchAuthStatus() {
   try {
     const st = await api("/api/auth/status");
@@ -675,10 +725,20 @@ async function fetchAuthStatus() {
     AUTH.needsSetup = !!st.needs_setup;
     AUTH.user = st.user || null;
     AUTH.isAdmin = !!st.is_admin;
+    AUTH.role = st.role || "";
+    AUTH.perms = st.perms || {};
+    AUTH.simpleOnly = !!st.simple_only;
   } catch {
     // 認証 API が読めない (旧サーバー等) → 認証なしとして通常の起動を続ける
     AUTH.enabled = false; AUTH.needsSetup = false; AUTH.user = null; AUTH.isAdmin = true;
+    AUTH.role = "admin"; AUTH.perms = {}; AUTH.simpleOnly = false;
   }
+}
+const ROLE_BADGE = { admin: ["管理者", "purple"], maintainer: ["メンテナー", "info"],
+                     user: ["ユーザー", "ok"] };
+function roleBadge(role) {
+  const r = ROLE_BADGE[role] || [role || "ユーザー", ""];
+  return `<span class="badge ${r[1]}">${esc(r[0])}</span>`;
 }
 function applyAuthUi() {
   const box = $("#hdr-user");
@@ -688,16 +748,29 @@ function applyAuthUi() {
     // ユーザー名とロールを別バッジにする (表示名を混ぜると「管理者・管理者」のように重複する)
     $("#hdr-user-name").textContent = "@" + u.username;
     const role = $("#hdr-user-role");
-    role.textContent = u.role === "admin" ? "管理者" : "ユーザー";
-    role.className = "badge" + (u.role === "admin" ? " purple" : "");
+    const rb = ROLE_BADGE[u.role] || ["ユーザー", ""];
+    role.textContent = rb[0];
+    role.className = "badge" + (rb[1] ? " " + rb[1] : "");
     const dn = u.display_name && u.display_name !== u.username ? u.display_name : "";
     box.title = dn ? `${dn} (@${u.username})` : `@${u.username}`;
   } else {
     box.classList.add("hidden");
     box.title = "";
   }
+  // ボタン類 (body の no-* クラスと .need-* で一括に隠す)
+  const b = document.body.classList;
+  b.toggle("no-admin", !AUTH.isAdmin);
+  b.toggle("no-edit", !can("profiles.edit"));
+  b.toggle("no-bench", !can("bench"));
+  b.toggle("no-oom", !can("oom.edit"));
+  b.toggle("no-backend", !can("backends.edit"));
+  b.toggle("no-dashboard", !can("dashboard"));
+  // メニュー項目
+  [["#mi-home", "dashboard"], ["#mi-history", "history"], ["#mi-playground", "playground"],
+   ["#mi-bench", "bench"], ["#mi-profiles", "profiles.edit"], ["#mi-backends", "backends.edit"]]
+    .forEach(([id, cap]) => $(id).classList.toggle("hidden", !can(cap)));
   $("#mi-users").classList.toggle("hidden", !AUTH.isAdmin);
-  if (!AUTH.isAdmin && S.tab === "users") switchTab("home");
+  if (!tabAllowed(S.tab)) switchTab("launch");
 }
 async function loginSubmit(ev) {
   ev.preventDefault();
@@ -719,6 +792,11 @@ async function loginSubmit(ev) {
         body: { username: user, password: pass, remember: $("#login-remember").checked } });
     }
     await fetchAuthStatus();
+    if (AUTH.simpleOnly) {                    // ロール user は管理画面を使わせない
+      toast(`ようこそ、${(AUTH.user && (AUTH.user.display_name || AUTH.user.username)) || ""} さん`);
+      location.replace("/simple");
+      return false;
+    }
     applyAuthUi(); hideLogin();
     $("#login-pass").value = ""; $("#login-pw2").value = "";
     toast(`ようこそ、${(AUTH.user && (AUTH.user.display_name || AUTH.user.username)) || ""} さん`);
@@ -734,7 +812,7 @@ async function loginSubmit(ev) {
 }
 async function logout() {
   try { await api("/api/auth/logout", { method: "POST" }); } catch { /* Cookie が無ければ画面だけ戻す */ }
-  AUTH.user = null; AUTH.isAdmin = false;
+  AUTH.user = null; AUTH.isAdmin = false; AUTH.role = ""; AUTH.perms = {}; AUTH.simpleOnly = false;
   stopTimers(); applyAuthUi(); showLogin();
   toast("ログアウトしました");
 }
@@ -745,16 +823,18 @@ function stopTimers() {
 }
 function onUnauthorized() {
   if (!AUTH.booted || !AUTH.user) return;      // boot 前の 401 は boot 側で処理する
-  AUTH.user = null; AUTH.isAdmin = false;
+  AUTH.user = null; AUTH.isAdmin = false; AUTH.role = ""; AUTH.perms = {}; AUTH.simpleOnly = false;
   stopTimers(); applyAuthUi();
   showLogin("セッションが切れました。再度ログインしてください");
 }
 async function boot() {
+  readLoginHint();                                   // /simple からのログアウト等の案内 (1 回だけ)
   await fetchAuthStatus();
+  if (AUTH.simpleOnly) { location.replace("/simple"); return; }   // ロール user は簡易画面へ
   applyAuthUi();
   AUTH.booted = true;
   if (!AUTH.enabled || AUTH.user) { hideLogin(); await refresh(false); startTimers(); }
-  else showLogin();
+  else { showLogin(); showLoginHint(); }
 }
 
 /* ---------------- dashboard (ホーム) ---------------- */
@@ -994,11 +1074,11 @@ function renderLaunch() {
           ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹'} 停止</button>
              <button onclick="switchTab('running');openLog('${s.id}')">ログ</button>
              ${s.ready?`<button onclick="openPlayground('${s.id}')">🧪 Play</button>`:""}
-             ${s.ready?`<button onclick="openBench('${p.id}')">📊 Bench</button>`:""}`
+             ${s.ready?`<button class="need-bench" onclick="openBench('${p.id}')">📊 Bench</button>`:""}`
           : `<button class="primary" onclick="startProfile('${p.id}')" ${S.busy[p.id]?"disabled":""}>${S.busy[p.id]?'<span class="spin"></span>':'▶ 起動'}</button>
-             <button onclick="openBench('${p.id}')">📊 Bench</button>`}
+             <button class="need-bench" onclick="openBench('${p.id}')">📊 Bench</button>`}
         <span class="grow"></span>
-        <button class="ghost" onclick="openEditor('${p.id}')">編集</button>
+        <button class="ghost need-edit" onclick="openEditor('${p.id}')">編集</button>
       </div>
     </div>`;
   }).join("");
@@ -1387,12 +1467,12 @@ function renderProfiles() {
       <div class="row" style="margin-top:12px">
         ${s ? `<button class="danger" onclick="stopSession('${s.id}')">⏹ 停止</button>`
             : `<button class="primary" onclick="startProfile('${p.id}')">▶ 起動</button>`}
-        <button onclick="openEditor('${p.id}')">編集</button>
-        <button onclick="openBench('${p.id}')">📊 Bench</button>
-        <button class="ghost" onclick="dupProfile('${p.id}')">複製</button>
-        <button class="ghost" onclick="exportProfiles(['${p.id}'])">エクスポート</button>
+        <button class="need-edit" onclick="openEditor('${p.id}')">編集</button>
+        <button class="need-bench" onclick="openBench('${p.id}')">📊 Bench</button>
+        <button class="ghost need-edit" onclick="dupProfile('${p.id}')">複製</button>
+        <button class="ghost need-edit" onclick="exportProfiles(['${p.id}'])">エクスポート</button>
         <span class="grow"></span>
-        ${!s ? `<button class="ghost danger" onclick="delProfile('${p.id}')">削除</button>` : ""}
+        ${!s ? `<button class="ghost danger need-edit" onclick="delProfile('${p.id}')">削除</button>` : ""}
       </div>
     </div>`;
   }).join("");
@@ -1515,9 +1595,11 @@ function defaultsOn(b, savedValues, savedOn) {
   return on;
 }
 function openEditor(pid) {
+  if (!can("profiles.edit")) { toast("プロファイル編集は管理者が開示を OFF にしています"); return; }
   let draft;
   if (pid) {
     const p = profileById(pid); if (!p) return;
+    if (p.redacted) { toast("設定値は管理者のみ閲覧できます (管理者に依頼してください)"); return; }
     draft = JSON.parse(JSON.stringify(p));
     if (draft.on === undefined || draft.on === null) {
       draft.on = defaultsOn(backendById(draft.backend), draft.values, null);
@@ -1559,6 +1641,7 @@ function collectDraft() {
   const w = inputVal("#ed-cwd");    if (w !== null) d.cwd = w;
   const m = inputVal("#ed-command"); if (m !== null) d.command = m;
   const o = $("#ed-custom");        if (o) d.custom_only = o.checked;
+  const v = $("#ed-simple");        if (v) d.simple_visible = v.checked;
   const e = inputVal("#ed-env");    if (e !== null) d.env = parseEnv(e);
   document.querySelectorAll("[data-fkey]").forEach(el => {
     d.values[el.dataset.fkey] = el.type === "checkbox" ? el.checked : el.value;
@@ -1584,7 +1667,8 @@ function schedulePreview() { clearTimeout(previewTimer); previewTimer = setTimeo
 function editorBody() {
   const d = collectDraft();
   return {name:d.name, backend:d.backend, values:d.values, on:d.on, extra_args:d.extra_args,
-          env:d.env, cwd:d.cwd, command:d.command, custom_only:d.custom_only, note:d.note};
+          env:d.env, cwd:d.cwd, command:d.command, custom_only:d.custom_only, note:d.note,
+          simple_visible:!!d.simple_visible};
 }
 async function showPreview() {
   const el = $("#ed-preview"); if (!el || !S.editing) return;
@@ -1709,6 +1793,8 @@ function renderEditor() {
     </details>
     <label class="f" for="ed-note">メモ</label>
     <input type="text" id="ed-note" value="${esc(d.note)}">
+    <label class="switch" style="margin-top:10px"><input type="checkbox" id="ed-simple" ${d.simple_visible?"checked":""}>
+      <span class="track"></span><span class="lab" style="font-size:12.5px">簡易画面に表示 (<a href="/simple" target="_blank" rel="noopener">/simple</a> に「開始 / 停止」ボタンを出す。ON にしたプロファイルだけロール user のユーザーから使えます)</span></label>
     <label class="f">起動コマンド プレビュー</label>
     <pre class="cmdprev" id="ed-preview">…</pre>
     <div class="sheet-actions">
@@ -1736,6 +1822,7 @@ function renderEditor() {
     if (el) el.addEventListener("input", () => { collectDraft(); schedulePreview(); });
   });
   $("#ed-custom").addEventListener("change", () => { collectDraft(); schedulePreview(); });
+  $("#ed-simple").addEventListener("change", collectDraft);
   ["ed-name","ed-note"].forEach(id => $(`#${id}`).addEventListener("input", collectDraft));
   schedulePreview();
 }
@@ -1774,6 +1861,65 @@ async function loadUsers() {
     grid.innerHTML = `<div class="empty">読み込みに失敗: ${esc(e.message)}</div>`;
   }
 }
+
+/* ---------------- ロール権限カード (管理者のみ表示) ---------------- */
+const ROLECFG = { caps: [], maintainer: {}, simple: { contact: "" }, simple_profiles: [] };
+async function loadRoles() {
+  if (!AUTH.isAdmin) return;
+  try {
+    Object.assign(ROLECFG, await api("/api/roles"));
+    renderRoleCards();
+  } catch { /* 対応していないサーバーではカードを出さない */ }
+}
+function renderRoleCards() {
+  const el = $("#role-cards");
+  if (!el || !ROLECFG.caps.length) return;
+  const rows = ROLECFG.caps.map(c => `
+    <div class="perm-row">
+      <label class="switch" style="flex:none"><input type="checkbox" ${ROLECFG.maintainer[c.key] ? "checked" : ""}
+        onchange="setPerm('${c.key}', this.checked)"><span class="track"></span></label>
+      <div class="grow"><div class="lab">${esc(c.label)}</div><div class="dsc">${esc(c.desc || "")}</div></div>
+    </div>`).join("");
+  const sp = ROLECFG.simple_profiles.map(p => esc(p.name)).join(" / ") || "なし";
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-h">🛠️ メンテナーに開示する機能</div>
+      <div class="muted" style="margin-bottom:6px">起動・停止・稼働中の一覧は常に使えます。
+        ここでは閲覧 / 編集機能の ON・OFF を決めます (トグルごとにすぐ保存、相手は再ログイン不要)。</div>
+      ${rows}
+    </div>
+    <div class="card">
+      <div class="card-h">👤 簡易画面 (/simple) の設定</div>
+      <div class="muted" style="margin-bottom:6px">ロール「ユーザー」の人はこの画面しか使えません。
+        プロファイル編集の <b>簡易画面に表示</b> を ON にしたものだけが表示されます。<br>
+        現在 ON: <b>${sp}</b></div>
+      <label class="f" for="rs-contact">とまらないときに出す連絡先メッセージ</label>
+      <input type="text" id="rs-contact" maxlength="120" value="${esc(ROLECFG.simple.contact)}"
+             placeholder="例: とまらないときは 内線 1234 (総務 山田) へ">
+      <div class="row" style="margin-top:10px">
+        <button class="primary" onclick="saveSimpleContact()">保存</button>
+        <a class="btn" href="/simple" target="_blank" rel="noopener">簡易画面を開く</a>
+      </div>
+    </div>`;
+}
+async function setPerm(key, on) {
+  const label = (ROLECFG.caps.find(c => c.key === key) || {}).label || key;
+  try {
+    const r = await api("/api/roles/maintainer",
+      { method: "PUT", body: { perms: { ...ROLECFG.maintainer, [key]: on } } });
+    ROLECFG.maintainer = r.maintainer;
+    await fetchAuthStatus(); applyAuthUi();
+    toast(`「${label}」を ${on ? "ON" : "OFF"} にしました`);
+  } catch (e) { toast("保存失敗: " + e.message); loadRoles(); }
+}
+async function saveSimpleContact() {
+  try {
+    const r = await api("/api/roles/simple",
+      { method: "PUT", body: { contact: $("#rs-contact").value } });
+    ROLECFG.simple = r.simple;
+    toast("簡易画面の設定を保存しました");
+  } catch (e) { toast("保存失敗: " + e.message); }
+}
 function renderUsers() {
   const grid = $("#users-grid");
   if (!UM.users.length) { grid.innerHTML = `<div class="empty">ユーザーがいません</div>`; return; }
@@ -1783,7 +1929,7 @@ function renderUsers() {
     const uid = esc(u.id);
     return `<div class="card">
       <div class="row" style="gap:8px">
-        <span class="badge ${u.role === "admin" ? "purple" : "info"}">${u.role === "admin" ? "管理者" : "ユーザー"}</span>
+        ${roleBadge(u.role)}
         <b class="grow ellip mono">@${esc(u.username)}</b>
         ${u.id === me ? `<span class="badge">あなた</span>` : ``}
         <span class="badge ${u.enabled ? "ok" : "err"}><span class="dot"></span>${u.enabled ? "有効" : "無効"}</span>
@@ -1834,7 +1980,11 @@ function umOpen(uid = "", mode = "form") {
       <label class="f" for="um-dname">表示名</label>
       <input type="text" id="um-dname" maxlength="60" value="${esc(u ? u.display_name : "")}">
       <label class="f" for="um-role">ロール</label>
-      <select id="um-role"><option value="user">ユーザー</option><option value="admin">管理者</option></select>
+      <select id="um-role">
+        <option value="admin">管理者 — すべての機能 + ロール設定</option>
+        <option value="maintainer">メンテナー — 起動・停止 + 管理者が ON にした機能</option>
+        <option value="user">ユーザー — 簡易画面 (/simple) の開始・停止のみ</option>
+      </select>
       <label class="switch"><input type="checkbox" id="um-enabled"><span class="track"></span>
         <span class="lab">アカウントを有効にする (無効にするとログイン不可)</span></label>
       <label class="f" for="um-pw">${u ? `新しいパスワード <span class="muted">(空欄 = 変更しない)</span>` : "パスワード (8 文字以上)"}</label>
@@ -1978,7 +2128,7 @@ function renderOomCard(){
       <label class="row" style="gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="oom-reapply" ${o.reapply?"checked":""} style="width:16px;height:16px;accent-color:var(--acc)"> 定期再適用</label>
       <label class="row" style="gap:6px;cursor:pointer;font-size:13px"><input type="checkbox" id="oom-swift" ${o.swift_stop?"checked":""} style="width:16px;height:16px;accent-color:var(--acc)"> 逼迫時 safety stop</label>
       <span class="grow"></span>
-      <button class="primary" onclick="saveOom()">OOM 設定を保存 / 再適用</button>
+      <button class="primary need-oom" onclick="saveOom()">OOM 設定を保存 / 再適用</button>
     </div>
     <div class="muted" style="font-size:11.5px;margin-top:8px">負の score_adj はカーネル特権 (CAP_SYS_RESOURCE) が必要で、一般ユーザーでは直接書けません。
       下のコマンドで「そのパスだけ」を許可する sudo ヘルパーを導入すると、起動ツリー全体 (モデル本体 + 後から湧く worker + launcher 自身) に適用されます。</div>
@@ -2029,10 +2179,10 @@ function renderBackends() {
       <input type="text" class="mono" id="bk-py-${b.id}" value="${esc(b.kind==="python" ? (b.python_override || det.python || "") : (b.binary_override || ""))}" placeholder="${b.kind==="python" ? "既定: 自動検出 (module/.venv → GUI .venv → launcher)" : "既定: 自動検出 (build/bin or PATH)"}">
       ${b.kind === "python" ? `<div class="muted" style="font-size:11px;margin-top:3px">既定の解決順: ${esc(b.module_path)}/.venv → GUI(llm-launcher)の .venv → launcher 自身。検出は各候補で実際の import を試し、成功したものを使用します</div>` : ""}
       <div class="row" style="margin-top:12px">
-        <button class="primary" onclick="saveBackend('${b.id}')">保存</button>
-        <button class="ghost" onclick="resetBackend('${b.id}')">リセット</button>
+        <button class="primary need-backend" onclick="saveBackend('${b.id}')">保存</button>
+        <button class="ghost need-backend" onclick="resetBackend('${b.id}')">リセット</button>
         <span class="grow"></span>
-        <button class="ghost" onclick="newProfileFor('${b.id}')">このバックエンドで新規プロファイル</button>
+        <button class="ghost need-edit" onclick="newProfileFor('${b.id}')">このバックエンドで新規プロファイル</button>
       </div>
     </div>`;
   }).join("");

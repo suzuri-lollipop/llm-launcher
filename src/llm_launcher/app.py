@@ -25,10 +25,11 @@ from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, python_candidates, resolve_port,
                        sections_order)
-from .process import ProcessManager, port_in_use
+from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
 from . import oom
+from . import rbac
 from . import sysinfo
 from .oom import MemoryGuardError
 
@@ -87,6 +88,8 @@ class ProfileBody(BaseModel):
     command: str = ""
     custom_only: bool = False
     note: str = ""
+    # ロール user の簡易画面 (/simple) に出すか (オプトイン)
+    simple_visible: bool = False
     # 旧 v2 (configs) 形式の互換受け: default_backend か最初の1件を展開する
     configs: dict[str, Any] = {}
     default_backend: str = ""
@@ -213,6 +216,26 @@ class OwnPasswordBody(BaseModel):
     """自分のパスワード変更 (成功すると全セッションが失効し再ログインが必要になる)。"""
     current_password: str = Field(min_length=1, max_length=300)
     password: str = Field(min_length=8, max_length=256)
+
+
+class MaintainerPermsBody(BaseModel):
+    """メンテナーに開示する機能 (管理者のみ変更可)。未指定のキーは既定値に戻る。"""
+    perms: dict[str, bool] = {}
+
+
+class SimpleSettingsBody(BaseModel):
+    """簡易画面の設定 (異常時に大きく出す連絡先メッセージ)。"""
+    contact: str = ""
+
+
+class SimpleStartBody(BaseModel):
+    profile_id: str = Field(min_length=1, max_length=64)
+
+
+class SimpleStopBody(BaseModel):
+    """session_id / profile_id のどちらかで停止 (簡易画面はプロファイル名しか知らない)。"""
+    session_id: str = ""
+    profile_id: str = ""
 
 
 def sse_aggregate(raw: str) -> dict[str, Any]:
@@ -516,8 +539,9 @@ def create_app(root: Path) -> FastAPI:
     # ---------------------------------------------------------------- auth
     # /api/* は原則ログイン必須。ブラウザは HttpOnly Cookie、スクリプト等は
     # ユーザー毎の API キー (Authorization: Bearer) で通す。
-    # /api/users* は管理者のみ。認証を無効化した場合 (LLM_LAUNCHER_AUTH=0 /
-    # --no-auth) はミドルウェア自体が素通しになる。
+    # 必要権限は rbac.required_cap(method, path) が決め、未知の /api/* は管理者のみ
+    # (deny by default)。認証を無効化した場合 (LLM_LAUNCHER_AUTH=0 / --no-auth) は
+    # ミドルウェア自体が素通しになる。
 
     def current_user(request: Request) -> dict[str, Any] | None:
         return auth.authenticate_token(_request_token(request))
@@ -530,6 +554,31 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(401, "ログインが必要です")
         return u
 
+    def perms_for(user: dict[str, Any] | None) -> dict[str, bool]:
+        """ユーザーの実効機能権限 (admin = 全 ON / user = 全 OFF / 認証オフ = 全 ON)。"""
+        role = (user or {}).get("role") or (None if auth_enabled else rbac.ROLE_ADMIN)
+        if role == rbac.ROLE_ADMIN:
+            return {k: True for k in rbac.CAP_KEYS}
+        if role == rbac.ROLE_MAINTAINER:
+            return rbac.maintainer_perms(settings_store.load())
+        return {k: False for k in rbac.CAP_KEYS}
+
+    def forbidden(user: dict[str, Any], need: str | None) -> JSONResponse:
+        """403 の理由を組み立てる (UI のトーストにそのまま出す)。
+
+        ロール順に判定するので、ロール user は /api/users のような管理者専用でも
+        「簡易画面だけを使ってください」という案内になる (相手が触れる機能は全部そう)。
+        """
+        role = (user or {}).get("role") or rbac.ROLE_USER
+        if role == rbac.ROLE_USER:
+            msg = "この機能は利用できません。簡易画面 (/simple) の開始・停止だけをご利用ください"
+        elif need == rbac.ADMIN_ONLY or need is None:
+            msg = "この API は管理者のみ利用できます"
+        else:
+            msg = ("この機能は管理者が開示を OFF にしています ("
+                   + rbac.CAP_BY_KEY.get(need or "", {}).get("label", need or "") + ")")
+        return JSONResponse({"detail": msg, "code": "forbidden"}, status_code=403)
+
     @app.middleware("http")
     async def auth_guard(request: Request, call_next):
         path = request.url.path
@@ -539,21 +588,37 @@ def create_app(root: Path) -> FastAPI:
         if not user:
             return JSONResponse({"detail": "ログインが必要です", "code": "unauthorized"},
                                 status_code=401)
-        if path.startswith("/api/users") and user.get("role") != "admin":
-            return JSONResponse({"detail": "管理者権限が必要です", "code": "forbidden"},
-                                status_code=403)
+        role = user.get("role") or rbac.ROLE_USER
+        need = rbac.required_cap(request.method, path)
+        allowed = role == rbac.ROLE_ADMIN or need == rbac.ALL
+        if not allowed and role == rbac.ROLE_MAINTAINER:
+            allowed = need == rbac.CORE or (
+                need is not None and need not in (rbac.ADMIN_ONLY, rbac.ALL)
+                and rbac.can(role, need, rbac.maintainer_perms(settings_store.load())))
+        if not allowed:
+            return forbidden(user, need)
         request.state.user = user
+        request.state.perms = perms_for(user)
         return await call_next(request)
 
     @app.get("/api/auth/status")
     async def auth_status(request: Request) -> dict[str, Any]:
-        """ログイン画面の初期化用。needs_setup=True なら管理者作成フォームを出す。"""
+        """ログイン画面の初期化用。needs_setup=True なら管理者作成フォームを出す。
+
+        role / perms / simple_only を返すので、Web UI は表示するタブとボタンを決める
+        (perms のキーは rbac.CAPS と一致。メンテナーだけ管理者の設定が反映される)。
+        """
         user = current_user(request) if auth_enabled else None
+        role = (user or {}).get("role") or (None if auth_enabled else rbac.ROLE_ADMIN)
         return {
             "auth_enabled": auth_enabled,
             "needs_setup": bool(auth_enabled and not auth.has_users()),
             "authenticated": True if not auth_enabled else bool(user),
-            "is_admin": (user.get("role") == "admin") if user else (not auth_enabled),
+            "is_admin": (user.get("role") == rbac.ROLE_ADMIN) if user else (not auth_enabled),
+            "role": role,
+            "role_label": rbac.ROLE_LABELS.get(role or "", ""),
+            "simple_only": bool(auth_enabled and role == rbac.ROLE_USER),
+            "perms": perms_for(user) if (user or not auth_enabled) else {},
             "user": auth.public(user),
         }
 
@@ -667,6 +732,46 @@ def create_app(root: Path) -> FastAPI:
             raise _auth_http(e)
         return {"ok": True}
 
+    # ----------------------------------------------------------- ロール権限
+    # 管理者のみ (auth_guard が /api/roles* を ADMIN_ONLY として弾く)。
+    # メンテナーに「見せる情報 / 実行できる機能」の ON/OFF をここで保存する。
+
+    @app.get("/api/roles")
+    async def get_roles() -> dict[str, Any]:
+        st = settings_store.load() or {}
+        return {
+            "caps": [dict(c) for c in rbac.CAPS],
+            "roles": [{"id": r, "label": rbac.ROLE_LABELS[r]} for r in rbac.ROLES],
+            "maintainer": rbac.maintainer_perms(st),
+            "simple": rbac.merged_simple(st),
+            "simple_profiles": [{"id": p.get("id"), "name": p.get("name", "")}
+                                for p in profiles_store.load() if p.get(rbac.SIMPLE_FIELD)],
+        }
+
+    @app.put("/api/roles/maintainer")
+    async def put_maintainer_perms(body: MaintainerPermsBody) -> dict[str, Any]:
+        perms = rbac.merged_perms(body.perms)
+
+        def _mut(settings: dict) -> dict:
+            settings["roles"] = {**(settings.get("roles") or {}), "maintainer": perms}
+            return settings
+
+        await asyncio.to_thread(settings_store.mutate, _mut)
+        return {"maintainer": perms}
+
+    @app.put("/api/roles/simple")
+    async def put_simple_settings(body: SimpleSettingsBody) -> dict[str, Any]:
+        contact = str(body.contact or "").strip()
+        if len(contact) > rbac.SIMPLE_CONTACT_MAX:
+            raise HTTPException(400, f"連絡先メッセージは {rbac.SIMPLE_CONTACT_MAX} 文字以内で入力してください")
+
+        def _mut(settings: dict) -> dict:
+            settings["simple"] = {**(settings.get("simple") or {}), "contact": contact}
+            return settings
+
+        await asyncio.to_thread(settings_store.mutate, _mut)
+        return {"simple": {"contact": contact}}
+
     # -------------------------------------------------------------- system
 
     @app.get("/api/system")
@@ -698,21 +803,33 @@ def create_app(root: Path) -> FastAPI:
     # ------------------------------------------------------------- state
 
     @app.get("/api/state")
-    async def get_state() -> dict[str, Any]:
+    async def get_state(request: Request) -> dict[str, Any]:
         dets = await asyncio.gather(*[detect(bid) for bid in BACKENDS])
         backends = [backend_public(bid, det) for bid, det in zip(BACKENDS, dets)]
+        system = {
+            "hostname": socket.gethostname(),
+            "ip": lan_ip(),
+            "root": str(root),
+            "platform": platform.platform(),
+            "version": __version__,
+            "server_time": now(),
+        }
+        profiles: list[dict[str, Any]] = profiles_store.load()
+        sessions = manager.public_sessions()
+        perms = getattr(request.state, "perms", None)
+        if perms is not None:                      # 認証 ON のときだけロールで絞る
+            if not perms.get("dashboard", True):   # ホスト詳細を開示しない
+                system = {k: system[k] for k in ("hostname", "version", "server_time")}
+            if not perms.get("config.read", True):  # 設定値・コマンドを開示しない
+                profiles = [rbac.redact_profile(p) for p in profiles]
+                for s in sessions:
+                    for k in ("argv", "cwd", "log"):
+                        s[k] = ""
         return {
-            "system": {
-                "hostname": socket.gethostname(),
-                "ip": lan_ip(),
-                "root": str(root),
-                "platform": platform.platform(),
-                "version": __version__,
-                "server_time": now(),
-            },
+            "system": system,
             "backends": backends,
-            "profiles": profiles_store.load(),
-            "sessions": manager.public_sessions(),
+            "profiles": profiles,
+            "sessions": sessions,
         }
 
     # ----------------------------------------------------------- profiles
@@ -740,6 +857,7 @@ def create_app(root: Path) -> FastAPI:
             "command": body.command or "",
             "custom_only": bool(body.custom_only),
             "note": body.note or "",
+            rbac.SIMPLE_FIELD: bool(body.simple_visible),
         }
 
     @app.get("/api/profiles")
@@ -797,7 +915,7 @@ def create_app(root: Path) -> FastAPI:
     # ----------------------------------------------------------- sessions
 
     @app.post("/api/sessions", status_code=201)
-    async def start_session(body: SessionStartBody) -> dict[str, Any]:
+    async def start_session(body: SessionStartBody, request: Request) -> dict[str, Any]:
         profile = manager.find_profile(body.profile_id)
         if not profile:
             raise HTTPException(404, "プロファイルが見つかりません")
@@ -809,8 +927,11 @@ def create_app(root: Path) -> FastAPI:
                    and s["status"] in ("running", "starting", "stopping")]
         if already:
             raise HTTPException(409, f"このプロファイルは起動済みです (session {already[0]['id']})")
-        argv = manager.build_argv(profile)
-        port = resolve_port(BACKENDS[bid], profile, argv)
+        try:
+            argv = manager.build_argv(profile)
+            port = resolve_port(BACKENDS[bid], profile, argv)
+        except ValueError as e:            # llama-server 未ビルド / python 未設定など
+            raise HTTPException(400, str(e))
         if port and port_in_use(port) and not body.force:
             dup = [s for s in manager.sessions.values()
                    if s.get("port") == port and s["status"] in ("running", "starting")]
@@ -818,10 +939,13 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(409, f"ポート {port} は {who} が使用中です。"
                                      "問題なければ force で起動してください。")
         try:
-            session = await manager.start(profile, force=bool(body.force))
+            session = await manager.start(profile, force=bool(body.force),
+                                          actor=current_user(request), via=VIA_UI)
         except MemoryGuardError as e:
             # メモリガードによる拒否 (UI は force 再試行で起動できる)
             raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(400, str(e))
         except RuntimeError as e:
             raise HTTPException(400, str(e))
         return manager.session_public(session["id"])
@@ -834,7 +958,8 @@ def create_app(root: Path) -> FastAPI:
         return manager.session_public(sid)
 
     @app.post("/api/sessions/{sid}/restart", status_code=201)
-    async def restart_session(sid: str, body: StartBody = StartBody()) -> dict[str, Any]:
+    async def restart_session(sid: str, request: Request,
+                              body: StartBody = StartBody()) -> dict[str, Any]:
         old = manager.sessions.get(sid)
         if not old:
             raise HTTPException(404, "セッションが見つかりません")
@@ -844,7 +969,8 @@ def create_app(root: Path) -> FastAPI:
         await manager.stop(sid)
         try:
             # 停止後にメモリガードへ掛かることがあるので force は同じ形で引き継ぐ
-            session = await manager.start(profile, force=bool(body.force))
+            session = await manager.start(profile, force=bool(body.force),
+                                          actor=current_user(request), via=VIA_UI)
         except MemoryGuardError as e:
             raise HTTPException(409, str(e))
         return manager.session_public(session["id"])
@@ -1069,11 +1195,123 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(409, str(e))
         return {"ok": True}
 
+    # ------------------------------------------------------------- 簡易画面
+    # ロール user が使える唯一の API 群。プロファイル名と起動 / 停止だけを
+    # 扱い、設定値・ログ・ホスト詳細は返さない。異常の判定はサーバー側で行い、
+    # alerts を受け取った簡易画面 (/simple) が画面いっぱいの警告を出す。
+    # 警告を出すのは **そのユーザーが自分で起こした (簡易画面の起動ボタン /
+    # 管理画面の起動・再起動) 現在のインスタンスだけ**。履歴全体を参照すると
+    # 「今は稼働中なのに過去の異常終了で警告」や、他人の起動・ベンチの自動起動・
+    # 導入前の古い履歴で警告してしまい、誰がどうすればいいのかわからない表示に
+    # なる (自分の起動分だけなら「もう一度起動する」が正しい案内になる)。
+
+    def simple_profiles() -> list[dict[str, Any]]:
+        """簡易画面に出すプロファイル (simple_visible = ON のものだけ)。"""
+        return [p for p in profiles_store.load() if p.get(rbac.SIMPLE_FIELD)]
+
+    def simple_payload(owner: str | None = None,
+                       mem: dict[str, Any] | None = None) -> dict[str, Any]:
+        """簡易画面用のデータ。owner = ログイン中のユーザー ID (認証オフなら None)。"""
+        profs = simple_profiles()
+        live: dict[str, dict[str, Any]] = {}
+        latest: dict[str, dict[str, Any]] = {}
+        for s in manager.sessions.values():                 # プロファイル別の現在 / 最新起動
+            pid = s.get("profile_id")
+            cur = latest.get(pid)
+            if not cur or (s.get("started_at") or 0) >= (cur.get("started_at") or 0):
+                latest[pid] = s
+            if s.get("status") in ("running", "starting", "stopping"):
+                cur = live.get(pid)
+                if not cur or (s.get("started_at") or 0) >= (cur.get("started_at") or 0):
+                    live[pid] = s
+        servers, current = [], []
+        for p in sorted(profs, key=lambda x: str(x.get("name") or "")):
+            s = live.get(p["id"]) or latest.get(p["id"])    # 稼働中を現在インスタンスとして優先
+            st = (s or {}).get("status") or "stopped"
+            state = st if st in ("running", "starting", "stopping") else "stopped"
+            servers.append({
+                "profile_id": p["id"],
+                "profile_name": p.get("name", ""),
+                "sid": s.get("id") if state != "stopped" else None,
+                "state": state,
+                "ready": bool((s or {}).get("ready")),
+                "since": (s or {}).get("started_at"),
+            })
+            if s:
+                current.append(s)
+        alerts, _ = rbac.simple_alerts(current, mem, owner=owner)
+        return {
+            "hostname": socket.gethostname(),
+            "contact": rbac.merged_simple(settings_store.load())["contact"],
+            "servers": servers,
+            "alerts": alerts,
+            "server_time": now(),
+        }
+
+    @app.get("/api/simple")
+    async def get_simple(request: Request) -> dict[str, Any]:
+        st = await asyncio.to_thread(manager.oom_status)
+        mem = None
+        if st.get("state") == "crit":
+            mem = {"state": "crit",
+                   "note": f"空きメモリ {st.get('available_gb', '?')}GB (危険域)",
+                   "checked_at": now()}
+        # 認証オフ (ロール user が存在しない開発モード) は via 判定のみ。認証オンで
+        # ユーザーが解決できないときは空 ID (= 何も警告しない) で閉じる。
+        owner = (current_user(request) or {}).get("id", "") if auth_enabled else None
+        return simple_payload(owner, mem)
+
+    @app.post("/api/simple/start")
+    async def post_simple_start(body: SimpleStartBody, request: Request) -> dict[str, Any]:
+        profile = manager.find_profile(body.profile_id)
+        if not profile or not profile.get(rbac.SIMPLE_FIELD):
+            raise HTTPException(404, "この機械は簡易画面から起動できません。管理者に問い合わせてください")
+        if profile.get("backend") not in BACKENDS:
+            raise HTTPException(400, "この機械の設定は未完成です。管理者に問い合わせてください")
+        live = [s for s in manager.sessions.values()
+                if s["profile_id"] == profile["id"]
+                and s["status"] in ("running", "starting", "stopping")]
+        if live:                                   # 連打しても「起動済み」を返すだけ
+            return manager.session_public(live[0]["id"])
+        try:
+            session = await manager.start(profile, force=False,
+                                          actor=current_user(request), via=VIA_SIMPLE)
+        except MemoryGuardError:
+            raise HTTPException(409, "メモリが不足しているため起動できませんでした。"
+                                     "少し待ってからもう一度押すか、管理者に問い合わせてください")
+        except (RuntimeError, ValueError):
+            # バックエンド未導入 / 設定不備など (ロール user に技術詳細は出さない)
+            raise HTTPException(400, "起動できませんでした。時間をおいても同じ場合は"
+                                     "管理者に問い合わせてください")
+        return manager.session_public(session["id"])
+
+    @app.post("/api/simple/stop")
+    async def post_simple_stop(body: SimpleStopBody) -> dict[str, Any]:
+        sid = body.session_id
+        if not sid and body.profile_id:
+            live = [s for s in manager.sessions.values()
+                    if s["profile_id"] == body.profile_id
+                    and s["status"] in ("running", "starting", "stopping")]
+            sid = live[0]["id"] if live else ""
+        s = manager.sessions.get(sid) if sid else None
+        if not s:
+            raise HTTPException(404, "停止する対象が見つかりません")
+        prof = manager.find_profile(s["profile_id"])
+        if not prof or not prof.get(rbac.SIMPLE_FIELD):
+            raise HTTPException(403, "この機械は簡易画面から停止できません")
+        await manager.stop(sid)
+        return manager.session_public(sid)
+
     # -------------------------------------------------------------- static
 
     @app.get("/")
     async def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")
+
+    @app.get("/simple")
+    async def simple_page() -> FileResponse:
+        """ロール user 向けの開始 / 停止だけの簡易画面 (機械に詳しくない人向け)。"""
+        return FileResponse(STATIC_DIR / "simple.html")
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 

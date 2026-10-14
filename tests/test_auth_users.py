@@ -232,10 +232,13 @@ def test_user_crud_and_role_restriction(tmp_path, auth_on, fast_kdf):
         assert st == 403 and s["code"] == "forbidden"
         st, _ = await user.post("/api/users", {"username": "mallory", "password": "passw0rd-3"})
         assert st == 403                                           # 作成も不可
-        st, s = await user.get("/api/state")                       # 通常機能は使える
-        assert st == 200
+        st, s = await user.get("/api/state")                       # ユーザーロールは通常 API を使えない
+        assert st == 403 and s["code"] == "forbidden"
+        st, s = await user.get("/api/simple")                      # 簡易画面の API だけ通る
+        assert st == 200 and set(s) >= {"servers", "alerts"}
         st, s = await user.get("/api/auth/status")
-        assert st == 200 and s["is_admin"] is False and s["user"]["role"] == "user"
+        assert (st == 200 and s["is_admin"] is False and s["user"]["role"] == "user"
+                and s["simple_only"] is True)
 
         st, s = await admin.get("/api/users")
         assert st == 200 and len(s["users"]) == 2
@@ -334,7 +337,8 @@ def test_api_key_auth_and_rotation(tmp_path, auth_on, fast_kdf):
 
     async def go() -> None:
         me = await setup_admin(admin)
-        st, u = await admin.post("/api/users", {"username": "script", "password": "passw0rd-4"})
+        st, u = await admin.post("/api/users", {"username": "script", "password": "passw0rd-4",
+                                                "role": "maintainer"})
         assert st == 201
         st, d = await admin.post(f"/api/users/{u['id']}/apikey")
         assert st == 200 and d["api_key"].startswith("llm_")

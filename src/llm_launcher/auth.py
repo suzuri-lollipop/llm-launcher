@@ -13,6 +13,9 @@
   data/users.json    [{id, username, display_name, role, enabled, password, api_key_hash,
                        created_at, updated_at, last_login_at}]
   data/sessions.json [{token, user_id, created_at, expires_at, remember, agent}]
+
+ロール (定義は rbac.py):
+  admin = 全機能 / maintainer = 管理者が開示を切り替える機能のみ / user = 簡易画面のみ
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ import secrets
 import time
 from typing import Any
 
+from .rbac import ROLE_ADMIN, ROLE_RANK, ROLES
 from .store import JsonStore, new_id, now
 
 COOKIE_NAME = "llm_session"
@@ -33,7 +37,6 @@ REMEMBER_TTL = 30 * 24 * 3600    # ON のとき
 PBKDF2_ITERS = 200_000
 MIN_PASSWORD = 8
 MAX_PASSWORD = 256
-ROLES = ("admin", "user")
 USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{1,31}$")
 
 # ログイン失敗のスロットル (総当たり抑止): 同一 IP+ユーザー名で FAIL_LIMIT 回失敗 → LOCKOUT 秒凍結
@@ -112,7 +115,7 @@ def validate_display_name(display_name: str) -> str:
 def validate_role(role: str) -> str:
     r = str(role or "user").strip().lower()
     if r not in ROLES:
-        raise AuthError(400, "ロールは admin / user のいずれかを指定してください")
+        raise AuthError(400, "ロールは admin / maintainer / user のいずれかを指定してください")
     return r
 
 
@@ -148,7 +151,7 @@ class AuthManager:
 
     def list_users(self) -> list[dict[str, Any]]:
         rows = [self.public(u) for u in self.users.load()]
-        rows.sort(key=lambda r: (r["role"] != "admin", str(r["username"]).lower()))
+        rows.sort(key=lambda r: (ROLE_RANK.get(r["role"], 9), str(r["username"]).lower()))
         return [r for r in rows if r]
 
     def has_users(self) -> bool:
@@ -170,9 +173,9 @@ class AuthManager:
     @staticmethod
     def _guard_last_admin(data: list[dict[str, Any]], target: dict[str, Any], action: str) -> None:
         """最後の管理者を消すと誰も管理できなくなるため防ぐ。"""
-        if target.get("role") != "admin":
+        if target.get("role") != ROLE_ADMIN:
             return
-        others = [u for u in data if u.get("role") == "admin"
+        others = [u for u in data if u.get("role") == ROLE_ADMIN
                   and u.get("enabled", True) and u.get("id") != target.get("id")]
         if not others:
             raise AuthError(409, f"最後の管理者を{action}できません。先に別の管理者を作成してください")
@@ -215,7 +218,7 @@ class AuthManager:
         """
         if self.has_users():
             raise AuthError(403, "初期セットアップは既に完了しています")
-        return self.create_user(username, password, display_name, role="admin")
+        return self.create_user(username, password, display_name, role=ROLE_ADMIN)
 
     def bootstrap_from_env(self) -> dict[str, Any] | None:
         """LLM_LAUNCHER_ADMIN_USER / LLM_LAUNCHER_ADMIN_PASSWORD があれば初期管理者を作る。
@@ -229,7 +232,7 @@ class AuthManager:
         pwd = os.environ.get("LLM_LAUNCHER_ADMIN_PASSWORD") or ""
         if not name or not pwd:
             return None
-        return self.create_user(name, pwd, "", role="admin")
+        return self.create_user(name, pwd, "", role=ROLE_ADMIN)
 
 
     # --------------------------------------------------------- ユーザー更新

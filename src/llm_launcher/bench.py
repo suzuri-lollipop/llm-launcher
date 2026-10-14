@@ -22,6 +22,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from .process import VIA_BENCH
 from .store import JsonStore, new_id, now
 
 MAX_RUNS = 50        # 履歴として保持する最大件数 (完了分のみ整理)
@@ -415,7 +416,7 @@ class BenchManager:
             self._progress(run, phase="launching")
             self._save(run, force=True)
             try:
-                live = await self.manager.start(profile)
+                live = await self.manager.start(profile, via=VIA_BENCH)
                 run["auto_started"] = True
             except RuntimeError as e:
                 raise BenchError(f"サーバーの起動に失敗しました: {e}")
