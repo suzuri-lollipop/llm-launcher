@@ -70,6 +70,14 @@ button:disabled{opacity:.45;cursor:default}
 .fchip{border:1px solid var(--line);background:var(--bg2);color:var(--sub);border-radius:999px;
   padding:7px 14px;font-size:13px;white-space:nowrap;cursor:pointer;min-height:36px}
 .fchip.on{background:var(--acc);border-color:var(--acc);color:#04101f;font-weight:700}
+/* ---------------- セッション履歴 (行表示) ---------------- */
+.hrow{border:1px solid var(--line);border-radius:var(--r);background:var(--card);margin-bottom:10px}
+.hrow-hd{display:flex;align-items:center;gap:10px;padding:11px 13px;cursor:pointer;min-width:0}
+.hrow-hd:hover{background:var(--card2)}
+.hrow-m{display:flex;gap:10px;flex-wrap:wrap;font-size:11.5px;color:var(--sub);margin-top:2px}
+.hrow-act{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 13px 12px}
+.hrow-act button{min-height:34px;padding:6px 11px;font-size:12.5px}
+.hrow .logwrap{padding:0 13px 13px}
 /* ---------------- 左サイドバー: ハンバーガーメニュー ---------------- */
 nav#sidemen{
   position:fixed;left:0;top:0;bottom:0;z-index:30;width:56px;
@@ -293,7 +301,7 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
       </div>
     </div>
     <div class="card" style="margin-top:12px">
-      <div class="card-h">最近のセッション <button class="ghost" style="margin-left:auto;min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('servers')">すべて見る →</button></div>
+      <div class="card-h">最近のセッション <button class="ghost" style="margin-left:auto;min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('history')">すべて見る →</button></div>
       <div id="home-recent"></div>
     </div>
   </section>
@@ -305,9 +313,23 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
     <div class="grid c2" id="launch-grid"></div>
   </section>
 
-  <section id="view-servers" class="view hidden">
-    <h2 class="view-title">起動中・履歴</h2>
-    <div id="servers-list"></div>
+  <section id="view-running" class="view hidden">
+    <div class="row">
+      <h2 class="view-title" style="margin:0">稼働中 <span class="muted" id="running-sub"></span></h2>
+      <div class="grow"></div>
+      <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('launch')">▶ 起動する</button>
+    </div>
+    <div id="running-list" style="margin-top:10px"></div>
+  </section>
+
+  <section id="view-history" class="view hidden">
+    <h2 class="view-title">セッション履歴 <span class="muted">終了した起動のログ確認・再実行・削除</span></h2>
+    <div class="row" style="gap:8px">
+      <input type="text" id="hist-q" class="grow" style="min-width:140px" placeholder="🔍 プロファイル / バックエンドで絞り込み" oninput="S.hist.q=this.value;renderHistory()">
+    </div>
+    <div class="filters" id="hist-filters"></div>
+    <div class="muted" id="hist-count" style="font-size:11.5px;margin:-2px 2px 8px"></div>
+    <div id="history-list"></div>
   </section>
 
   <section id="view-profiles" class="view hidden">
@@ -446,7 +468,8 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
   <div class="menu-items" id="menu-items">
     <button class="mitem on" data-tab="home"><span class="ico">🏠</span>ホーム</button>
     <button class="mitem" data-tab="launch"><span class="ico">🚀</span>起動</button>
-    <button class="mitem" data-tab="servers"><span class="ico">🖥️</span>サーバー<span class="nbadge hidden" id="nb-servers"></span></button>
+    <button class="mitem" data-tab="running"><span class="ico">🖥️</span>稼働中<span class="nbadge run hidden" id="nb-running"></span></button>
+    <button class="mitem" data-tab="history"><span class="ico">🕘</span>セッション履歴<span class="nbadge hidden" id="nb-fail"></span></button>
     <button class="mitem" data-tab="playground"><span class="ico">🧪</span>プレイグラウンド</button>
     <button class="mitem" data-tab="bench"><span class="ico">📊</span>ベンチマーク<span class="nbadge hidden" id="nb-bench"></span></button>
     <button class="mitem" data-tab="profiles"><span class="ico">📋</span>プロファイル</button>
@@ -471,8 +494,9 @@ const S = {
   editing: null,           // ドラフト: {name,backend,values,on,extra_args,env,cwd,command,custom_only,note}
   hf: undefined,           // HF Hub キャッシュスキャン結果 (遅延取得)
   openLogs: new Set(), logCursor: {}, logBuf: {},   // logBuf: sid -> 蓄積ログ文字列
-  autoScroll: {}, busy: {}, _ssSig: "",
+  autoScroll: {}, busy: {}, _ssSig: "", _hsSig: "",
   pm: {q:"", sort:"updated", backend:"all", batch:false, sel:new Set()},   // 管理画面の状態
+  hist: {q:"", status:"all", limit:30},   // セッション履歴画面の状態
   pg: null,              // プレイグラウンド状態 (pgInit() で遅延初期化)
   bench: null,           // ベンチマーク状態 (bmInit() で初期化)
 };
@@ -491,6 +515,9 @@ const fmtUp = sec => {
   const h = Math.floor(sec/3600), m = Math.floor(sec%3600/60);
   return h ? `${h}h${String(m).padStart(2,"0")}m` : m ? `${m}m${String(sec%60).padStart(2,"0")}s` : `${sec}s`;
 };
+const fmtDT = ts => ts
+  ? new Date(ts * 1000).toLocaleString("ja-JP", {month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit"})
+  : "-";
 
 async function api(path, opts = {}) {
   const r = await fetch(path, {
@@ -517,6 +544,7 @@ const profileById = id => (S.state?.profiles || []).find(p => p.id === id);
 const isLive = s => s && ["running","starting","stopping"].includes(s.status);
 const liveSessions = () => (S.state?.sessions || []).filter(isLive);
 const liveOf = pid => (S.state?.sessions || []).find(s => s.profile_id === pid && isLive(s));
+const sessionById = sid => (S.state?.sessions || []).find(s => s.id === sid);
 
 function statusBadge(s) {
   if (!s) return `<span class="badge"><span class="dot"></span>未起動</span>`;
@@ -589,7 +617,8 @@ function renderAll(force) {
   renderTabBadges();
   if (S.tab === "home") renderHome();
   if (S.tab === "launch") renderLaunch();
-  if (S.tab === "servers") renderServers(force);
+  if (S.tab === "running") renderRunning(force);
+  if (S.tab === "history") renderHistory(force);
   if (S.tab === "profiles") renderProfiles();
   if (S.tab === "backends") renderBackends();
   if (S.tab === "playground") renderPlayground();
@@ -597,8 +626,11 @@ function renderAll(force) {
 }
 function renderTabBadges() {
   const n = liveSessions().length;
-  const nb = $("#nb-servers");
+  const nb = $("#nb-running");
   nb.classList.toggle("hidden", n === 0); nb.textContent = n;
+  const f = (S.state.sessions || []).filter(s => s.status === "failed").length;
+  const nf = $("#nb-fail");
+  nf.classList.toggle("hidden", f === 0); nf.textContent = f;
 }
 
 /* ============================================================= 認証 */
@@ -776,7 +808,7 @@ function renderHomeNotices(){
   for (const s of failed) notes.push(`<div class="card" style="border-color:#4d2323;background:#241213">
     <div class="row"><b style="color:var(--err)">⛔ 異常終了: ${esc(s.profile_name)}</b><span class="grow"></span>
     <span class="muted">${fmtAgo(s.finished_at)}</span>
-    <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('servers')">ログ確認 →</button></div>
+    <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="switchTab('history');openLog('${s.id}')">ログ確認 →</button></div>
     ${s.error?`<div class="muted mono" style="margin-top:4px;color:var(--err);word-break:break-all">${esc(s.error)}</div>`:""}</div>`);
   if (!S.state.profiles.length) notes.push(`<div class="card" style="border-color:#254059">
     <div class="row"><b>👋 ようこそ</b><span class="grow"></span>
@@ -795,11 +827,11 @@ function renderHomeTiles(){
   const gpuLoad = S.sys && S.sys.gpus && S.sys.gpus.length
     ? Math.round(S.sys.gpus.reduce((a,g)=>a+(g.util||0),0)/S.sys.gpus.length) : null;
   const tiles = [
-    {k:"ok", ic:"🟢", v:`${ready}`, s:`稼働中 / 起動含め ${running}`, t:"サーバー", go:"servers"},
+    {k:"ok", ic:"🟢", v:`${ready}`, s:`稼働中 / 起動含め ${running}`, t:"稼働中", go:"running"},
     {k:"acc", ic:"📋", v:`${S.state.profiles.length}`, s:"プロファイル", t:"起動画面", go:"launch"},
     {k: installed===totalB?"ok":"warn", ic:"🧩", v:`${installed}/${totalB}`, s:"バックエンド検出", t:"バックエンド", go:"backends"},
     {k: gpuLoad==null?"":(gpuLoad>=90?"err":gpuLoad>=70?"warn":"ok"), ic:"🎮", v: gpuLoad==null?"-":gpuLoad+"%", s:"GPU 平均使用率", t:"", go:""},
-    {k: recentFails?"err":"", ic:"⛔", v:`${recentFails}`, s:"異常終了履歴", t:"サーバー", go:"servers"},
+    {k: recentFails?"err":"", ic:"⛔", v:`${recentFails}`, s:"異常終了履歴", t:"セッション履歴", go:"history"},
     {k:"", ic:"⏱", v: h&&h.uptime?upHuman(h.uptime):"-", s:"ホスト稼働時間", t:"", go:""},
   ];
   $("#home-tiles").innerHTML = tiles.map(t=>
@@ -906,7 +938,7 @@ function renderHomeBackends(){
 function renderHomeRecent(){
   const el = $("#home-recent"); const ss = (S.state.sessions||[]).slice(0,6);
   if (!ss.length){ el.innerHTML = `<div class="muted" style="padding:8px 2px">まだ起動履歴がありません。</div>`; return; }
-  el.innerHTML = ss.map(s=>`<div class="mini">
+  el.innerHTML = ss.map(s=>`<div class="mini" style="cursor:pointer" title="このセッションを開く" onclick="gotoSession('${s.id}')">
     ${statusBadge(s)}
     <span class="grow ellip" style="font-size:13px">${esc(s.profile_name)}</span>
     <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
@@ -924,9 +956,9 @@ function renderLaunch() {
   const live = liveSessions();
   strip.innerHTML = live.length ? `<div class="card" style="border-color:#274d38">
     <div class="row"><b style="font-size:14px">▶ 起動中: ${live.length} サーバー</b><span class="grow"></span>
-    <button class="ghost" onclick="switchTab('servers')">管理へ →</button></div>
+    <button class="ghost" onclick="switchTab('running')">管理へ →</button></div>
     <div class="row" style="margin-top:8px">${live.map(s => `
-      <span class="badge ${s.ready?"ok":"warn"}" style="cursor:pointer" onclick="switchTab('servers')">
+      <span class="badge ${s.ready?"ok":"warn"}" style="cursor:pointer" onclick="switchTab('running')">
       <span class="dot"></span>${esc(s.profile_name)} · ${esc(s.backend_name)} · :${s.port||"-"}</span>`).join("")}
     </div></div>` : "";
   const bks = S.state.backends;
@@ -960,7 +992,7 @@ function renderLaunch() {
       <div class="row" style="margin-top:12px">
         ${s
           ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹'} 停止</button>
-             <button onclick="switchTab('servers');openLog('${s.id}')">ログ</button>
+             <button onclick="switchTab('running');openLog('${s.id}')">ログ</button>
              ${s.ready?`<button onclick="openPlayground('${s.id}')">🧪 Play</button>`:""}
              ${s.ready?`<button onclick="openBench('${p.id}')">📊 Bench</button>`:""}`
           : `<button class="primary" onclick="startProfile('${p.id}')" ${S.busy[p.id]?"disabled":""}>${S.busy[p.id]?'<span class="spin"></span>':'▶ 起動'}</button>
@@ -979,7 +1011,7 @@ async function startProfile(pid, force = false) {
     const s = await api("/api/sessions", {method:"POST", body:{profile_id: pid, force}});
     toast(`起動しました: ${s.profile_name} [${s.backend_name}] (pid ${s.pid})`);
     S.openLogs.add(s.id);
-    switchTab("servers");
+    switchTab("running");
   } catch (e) {
     if (e.status === 409 && /force/.test(e.message)) {
       if (confirm(e.message + "\n\n強制的に起動しますか?")) return startProfile(pid, true);
@@ -1012,87 +1044,22 @@ async function deleteSession(sid) {
   } catch (e) { toast("削除失敗: " + e.message); }
 }
 
-/* ---------------- servers view ---------------- */
-function sessionSig() {
-  return (S.state.sessions || []).map(s =>
-    [s.id, s.status, s.ready ? 1 : 0, s.pid, s.exit_code ?? "", s.error ?? "",
-     s.detached ? 1 : 0, s.port ?? "", s.mem_state || "", s.oom_suspect ? 1 : 0,
-     s.oom_swift_stop ? 1 : 0, s.oom ? `${s.oom.applied}/${s.oom.denied}/${s.oom.score}` : ""].join(":")).join("|");
+/* ---------------- 稼働中 / セッション履歴 (共通パーツ) ---------------- */
+/* ライブログパネル。logwrap- / logbox- の ID は pumpLogs・copyLog・downloadLog との共通契約 */
+function logPanel(sid, open) {
+  return `<div class="logwrap ${open ? "" : "hidden"}" id="logwrap-${sid}">
+    <div class="row" style="margin-top:8px">
+      <label class="switch" style="padding:4px 0;min-height:0"><input type="checkbox" ${S.autoScroll[sid]!==false?"checked":""} onchange="S.autoScroll['${sid}']=this.checked"><span class="track"></span><span class="lab" style="font-size:12px">自動スクロール</span></label>
+      <span class="grow"></span>
+      <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="downloadLog('${sid}')">⬇ DL</button>
+      <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="copyLog('${sid}')">📋 コピー</button>
+      <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="clearLogView('${sid}')">画面クリア</button>
+    </div>
+    <pre class="logbox" id="logbox-${sid}"></pre>
+  </div>`;
 }
-function renderServers(force) {
-  const list = $("#servers-list");
-  const ss = S.state.sessions || [];
-  if (!ss.length) {
-    S._ssSig = "";
-    list.innerHTML = `<div class="empty">起動中のサーバーはありません。<br>「起動」タブからプロファイルを選んでスタートしてください。</div>`;
-    return;
-  }
-  // 構造が変わらなければフル再構築をスキップ (ログの選択解除・「読み込み中…」化を防ぐ)
-  const sig = sessionSig();
-  if (!force && sig === S._ssSig && list.childElementCount) {
-    patchServersDynamic(ss);
-    return;
-  }
-  S._ssSig = sig;
-  const live = ss.filter(isLive);
-  const dead = ss.filter(s => !isLive(s));
-  const card = s => {
-    const open = S.openLogs.has(s.id);
-    const url = s.port ? `http://${esc(S.state.system.ip)}:${s.port}` : "";
-    const oomTxt = s.oom_swift_stop
-      ? `<span style="color:var(--warn)">🛡 メモリ逼迫により launcher が安全停止しました</span>`
-      : s.oom_suspect
-      ? `<span style="color:var(--err)">💀 OOM kill の可能性</span>`
-      : (s.oom && s.oom.applied)
-        ? `🛡 保護中 (oom_score_adj ${s.oom.score}${s.oom.via === "helper" ? " · sudo 経由" : ""} · ${s.oom.applied} プロセス)`
-        : (s.oom && s.oom.error)
-          ? `<span style="color:var(--warn)">🛡 未適用 — ${esc(s.oom.error)}</span>`
-          : `<span class="muted">保護 未適用 / 設定オフ</span>`;
-    const memTxt = (isLive(s) && s.mem_state && s.mem_state !== "ok")
-      ? ` <span style="color:${s.mem_state === "crit" ? "var(--err)" : "var(--warn)"}">· 空き ${esc(s.mem_available_gb)}GB</span>` : "";
-    return `<div class="card" data-sid="${s.id}">
-      <div class="row">
-        ${statusBadge(s)}
-        <b class="grow ellip" style="font-size:15px">${esc(s.profile_name)}</b>
-        <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
-      </div>
-      <div class="kvs" style="margin-top:8px">
-        <span>PID</span><span class="v mono">${s.pid}${s.detached ? ' <span class="muted">(前マネージャーから引き継ぎ)</span>' : ""}</span>
-        <span>稼働時間</span><span class="v"><span class="upt" data-sid="${s.id}">${
-          isLive(s) ? fmtUp(s.uptime) : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-")
-        }</span>${s.exit_code != null ? ` (code ${s.exit_code})` : ""}</span>
-        <span>API</span><span class="v mono">${url ? `<a href="${url}" target="_blank" rel="noopener">:${s.port} ↗</a>` : "-"}</span>
-        <span>OOM</span><span class="v" style="font-size:12.5px">${oomTxt}${memTxt}</span>
-      </div>
-      <pre class="cmdprev" style="max-height:44px">${esc(s.argv.join(" "))}</pre>
-      ${s.error ? `<div class="muted" style="color:var(--err);margin-top:6px">${esc(s.error)}</div>` : ""}
-      <div class="row" style="margin-top:10px">
-        ${isLive(s)
-          ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹ 停止'}</button>
-             <button onclick="restartSession('${s.id}')">↻ 再起動</button>`
-          : `<button onclick="rerunProfile('${s.profile_id}')">▶ 再起動</button>`}
-        <button onclick="toggleLog('${s.id}')">${open ? "ログ閉じる" : "📜 ログ"}</button>
-        ${isLive(s) && s.ready && s.port ? `<button onclick="openPlayground('${s.id}')">🧪 プレイグラウンド</button>` : ""}
-        ${isLive(s) && s.ready && s.port ? `<button onclick="openBench('${s.profile_id}')">📊 ベンチ</button>` : ""}
-        <span class="grow"></span>
-        ${!isLive(s) ? `<button class="ghost" onclick="deleteSession('${s.id}')">削除</button>` : ""}
-      </div>
-      <div class="logwrap ${open ? "" : "hidden"}" id="logwrap-${s.id}">
-        <div class="row" style="margin-top:8px">
-          <label class="switch" style="padding:4px 0;min-height:0"><input type="checkbox" ${S.autoScroll[s.id]!==false?"checked":""} onchange="S.autoScroll['${s.id}']=this.checked"><span class="track"></span><span class="lab" style="font-size:12px">自動スクロール</span></label>
-          <span class="grow"></span>
-          <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="downloadLog('${s.id}')">⬇ DL</button>
-          <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="copyLog('${s.id}')">📋 コピー</button>
-          <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="clearLogView('${s.id}')">画面クリア</button>
-        </div>
-        <pre class="logbox" id="logbox-${s.id}"></pre>
-      </div>
-    </div>`;
-  };
-  list.innerHTML =
-    (live.length ? `<h2 class="view-title">起動中 (${live.length})</h2>` + live.map(card).join("") : "") +
-    (dead.length ? `<h2 class="view-title" style="margin-top:18px">履歴 (${dead.length})</h2>` + dead.slice(0, 20).map(card).join("") : "");
-  // ビルド直後: 各オープン中のログにバッファを復元 (選択・「読み込み中…」化対策)
+/* ビルド直後: オープン中のログにバッファを復元 (テキスト選択の解除・「読み込み中…」化を防ぐ) */
+function restoreLogBuffers() {
   for (const sid of S.openLogs) {
     const el = $(`#logbox-${sid}`);
     if (!el) continue;
@@ -1101,12 +1068,174 @@ function renderServers(force) {
     el.scrollTop = el.scrollHeight;
   }
 }
-function patchServersDynamic(ss) {
-  for (const s of ss) {
-    const u = document.querySelector(`.upt[data-sid="${s.id}"]`);
-    if (u) u.textContent = isLive(s) ? fmtUp(s.uptime)
-                 : (s.finished_at ? fmtAgo(s.finished_at)+" に終了" : "-");
+
+/* ---------------- 稼働中 view ---------------- */
+function runningSig() {
+  return liveSessions().map(s =>
+    [s.id, s.status, s.ready ? 1 : 0, s.pid, s.detached ? 1 : 0, s.port ?? "", s.mem_state || "",
+     s.oom_suspect ? 1 : 0, s.oom_swift_stop ? 1 : 0,
+     s.oom ? `${s.oom.applied}/${s.oom.denied}/${s.oom.score}` : "",
+     S.openLogs.has(s.id) ? 1 : 0].join(":")).join("|");
+}
+function renderRunning(force) {
+  const list = $("#running-list");
+  const live = liveSessions();
+  $("#running-sub").textContent = live.length
+    ? `— ${live.length} 件 (API 応答待ち ${live.filter(s => !s.ready).length} 件)` : "";
+  if (!live.length) {
+    if (S._ssSig !== "empty") {
+      S._ssSig = "empty";
+      list.innerHTML = `<div class="empty">起動中のサーバーはありません。<br>
+        <span class="muted">「起動」タブからプロファイルを選んでスタートしてください。</span><br>
+        <button class="primary" style="margin-top:10px" onclick="switchTab('launch')">▶ 起動する</button></div>`;
+    }
+    return;
   }
+  // 構造が変わらなければフル再構築をスキップ (ログの選択解除・「読み込み中…」化を防ぐ)
+  const sig = runningSig();
+  if (!force && sig === S._ssSig && list.childElementCount) {
+    patchUptime(list, live);
+    return;
+  }
+  S._ssSig = sig;
+  list.innerHTML = live.map(sessionCard).join("");
+  restoreLogBuffers();
+}
+function sessionCard(s) {
+  const open = S.openLogs.has(s.id);
+  const url = s.port ? `http://${esc(S.state.system.ip)}:${s.port}` : "";
+  const oomTxt = s.oom_swift_stop
+    ? `<span style="color:var(--warn)">🛡 メモリ逼迫により launcher が安全停止しました</span>`
+    : s.oom_suspect
+    ? `<span style="color:var(--err)">💀 OOM kill の可能性</span>`
+    : (s.oom && s.oom.applied)
+      ? `🛡 保護中 (oom_score_adj ${s.oom.score}${s.oom.via === "helper" ? " · sudo 経由" : ""} · ${s.oom.applied} プロセス)`
+      : (s.oom && s.oom.error)
+        ? `<span style="color:var(--warn)">🛡 未適用 — ${esc(s.oom.error)}</span>`
+        : `<span class="muted">保護 未適用 / 設定オフ</span>`;
+  const memTxt = (s.mem_state && s.mem_state !== "ok")
+    ? ` <span style="color:${s.mem_state === "crit" ? "var(--err)" : "var(--warn)"}">· 空き ${esc(s.mem_available_gb)}GB</span>` : "";
+  return `<div class="card" data-sid="${s.id}">
+    <div class="row">
+      ${statusBadge(s)}
+      <b class="grow ellip" style="font-size:15px">${esc(s.profile_name)}</b>
+      <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
+    </div>
+    <div class="kvs" style="margin-top:8px">
+      <span>PID</span><span class="v mono">${s.pid}${s.detached ? ' <span class="muted">(前マネージャーから引き継ぎ)</span>' : ""}</span>
+      <span>稼働時間</span><span class="v"><span class="upt" data-sid="${s.id}">${fmtUp(s.uptime)}</span></span>
+      <span>API</span><span class="v mono">${url ? `<a href="${url}" target="_blank" rel="noopener">:${s.port} ↗</a>` : "-"}</span>
+      <span>OOM</span><span class="v" style="font-size:12.5px">${oomTxt}${memTxt}</span>
+    </div>
+    <pre class="cmdprev" style="max-height:44px">${esc(s.argv.join(" "))}</pre>
+    ${s.error ? `<div class="muted" style="color:var(--err);margin-top:6px">${esc(s.error)}</div>` : ""}
+    <div class="row" style="margin-top:10px">
+      <button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'⏹ 停止'}</button>
+      <button onclick="restartSession('${s.id}')">↻ 再起動</button>
+      <button onclick="toggleLog('${s.id}')">${open ? "ログ閉じる" : "📜 ログ"}</button>
+      ${s.ready && s.port ? `<button onclick="openPlayground('${s.id}')">🧪 プレイグラウンド</button>` : ""}
+      ${s.ready && s.port ? `<button onclick="openBench('${s.profile_id}')">📊 ベンチ</button>` : ""}
+    </div>
+    ${logPanel(s.id, open)}
+  </div>`;
+}
+function patchUptime(root, ss) {
+  for (const s of ss) {
+    const u = root.querySelector(`.upt[data-sid="${s.id}"]`);
+    if (u) u.textContent = fmtUp(s.uptime);
+  }
+}
+
+/* ---------------- セッション履歴 view ---------------- */
+const HIST_FILTERS = [
+  {id:"all",    n:"すべて",   f: () => true},
+  {id:"failed", n:"異常終了", f: s => s.status === "failed"},
+  {id:"exited", n:"終了",     f: s => s.status === "exited"},
+  {id:"lost",   n:"切断記録", f: s => s.status === "lost"},
+];
+const deadSessions = () => (S.state.sessions || []).filter(s => !isLive(s));
+function histFiltered() {
+  const q = S.hist.q.trim().toLowerCase();
+  const flt = HIST_FILTERS.find(f => f.id === S.hist.status) || HIST_FILTERS[0];
+  return deadSessions().filter(s => flt.f(s) &&
+    (!q || `${s.profile_name} ${s.backend_name} ${s.backend}`.toLowerCase().includes(q)));
+}
+function histSig() {
+  return [S.hist.q.trim(), S.hist.status, S.hist.limit].join("|") + "::" +
+    histFiltered().slice(0, S.hist.limit).map(s =>
+      [s.id, s.status, s.exit_code ?? "", s.error ? 1 : 0, s.finished_at ?? "",
+       S.openLogs.has(s.id) ? 1 : 0].join(":")).join("|");
+}
+function renderHistory(force) {
+  const list = $("#history-list");
+  const all = deadSessions();
+  const fh = HIST_FILTERS.map(f =>
+    `<button class="fchip ${S.hist.status===f.id?"on":""}" onclick="setHistStatus('${f.id}')">${f.n} <span class="muted" style="color:inherit">${all.filter(f.f).length}</span></button>`).join("");
+  const fel = $("#hist-filters");
+  if (fel.innerHTML !== fh) fel.innerHTML = fh;   // ポーリング毎の作り直し (フォーカス喪失) を避ける
+  const rows = histFiltered();
+  const shown = rows.slice(0, S.hist.limit);
+  $("#hist-count").textContent = all.length
+    ? `終了した起動 全 ${all.length} 件 — 条件一致 ${rows.length} 件 / 表示 ${shown.length} 件` : "";
+  if (!all.length) {
+    if (S._hsSig !== "empty") {
+      S._hsSig = "empty";
+      list.innerHTML = `<div class="empty">履歴はまだありません。<br>
+        <span class="muted">サーバーを停止すると、ここにログ・再実行・削除が並びます。</span></div>`;
+    }
+    return;
+  }
+  if (!rows.length) {
+    if (S._hsSig !== "nohit") {
+      S._hsSig = "nohit";
+      list.innerHTML = `<div class="empty">条件に合う履歴がありません。<br>
+        <button class="ghost" style="margin-top:10px" onclick="clearHistFilter()">条件をクリア</button></div>`;
+    }
+    return;
+  }
+  // 構造が変わらなければフル再構築をスキップ (ログの選択解除を防ぐ)
+  const sig = histSig();
+  if (!force && sig === S._hsSig && list.childElementCount) return;
+  S._hsSig = sig;
+  list.innerHTML = shown.map(histRow).join("") +
+    (rows.length > shown.length
+      ? `<button class="ghost" style="width:100%" onclick="S.hist.limit+=30;renderHistory(true)">さらに表示 (残り ${rows.length - shown.length} 件)</button>`
+      : "");
+  restoreLogBuffers();
+}
+function clearHistFilter() {
+  S.hist.q = ""; S.hist.status = "all"; S.hist.limit = 30;
+  const q = $("#hist-q"); if (q) q.value = "";
+  renderHistory(true);
+}
+function setHistStatus(id) { S.hist.status = id; S.hist.limit = 30; renderHistory(true); }
+function histRow(s) {
+  const open = S.openLogs.has(s.id);
+  const span = s.finished_at && s.started_at ? s.finished_at - s.started_at : null;
+  return `<div class="hrow" data-sid="${s.id}">
+    <div class="hrow-hd" onclick="toggleLog('${s.id}')">
+      ${statusBadge(s)}
+      <span class="grow" style="min-width:0">
+        <span class="hrow-t ellip" style="display:block">${esc(s.profile_name)}</span>
+        <span class="hrow-m">
+          <span class="mono">${fmtDT(s.started_at)} → ${fmtDT(s.finished_at)}</span>
+          <span>稼働 ${fmtUp(span)}</span>
+          ${s.exit_code != null ? `<span class="mono">code ${s.exit_code}</span>` : ""}
+          <span class="mono">PID ${s.pid}</span>
+        </span>
+      </span>
+      <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
+      <span class="muted" style="flex:none">${open ? "▲" : "▼"}</span>
+    </div>
+    ${s.error ? `<div class="hrow-act"><span class="mono" style="color:var(--err);word-break:break-all">${esc(s.error)}</span></div>` : ""}
+    <div class="hrow-act">
+      <button onclick="event.stopPropagation();toggleLog('${s.id}')">${open ? "ログ閉じる" : "📜 ログ"}</button>
+      <button onclick="event.stopPropagation();rerunProfile('${s.profile_id}')">▶ 再実行</button>
+      <span class="grow"></span>
+      <button class="ghost" onclick="event.stopPropagation();deleteSession('${s.id}')">削除</button>
+    </div>
+    ${logPanel(s.id, open)}
+  </div>`;
 }
 function rerunProfile(pid) {
   if (profileById(pid)) return startProfile(pid);
@@ -1115,7 +1244,7 @@ function rerunProfile(pid) {
 function toggleLog(sid) {
   if (S.openLogs.has(sid)) S.openLogs.delete(sid);
   else { S.openLogs.add(sid); pumpLogs(); }
-  renderServers(true);
+  if (isLive(sessionById(sid))) renderRunning(true); else renderHistory(true);
 }
 function clearLogView(sid) {
   S.logBuf[sid] = "";
@@ -1177,6 +1306,11 @@ async function pumpLogs() {
   }
 }
 function openLog(sid) { if (!S.openLogs.has(sid)) toggleLog(sid); }
+/* セッション単位で正しいタブへ飛ぶ (稼働中 → 稼働中タブ / 終了済み → 履歴タブ) */
+function gotoSession(sid) {
+  switchTab(isLive(sessionById(sid)) ? "running" : "history");
+  openLog(sid);
+}
 
 /* ---------------- profiles 管理画面 ---------------- */
 function profUsage(pid) {
