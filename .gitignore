@@ -23,3 +23,9 @@ module/fork/*/
 
 # 開発用スクラッチ (検証スクリプト・テスト一時ファイル)
 .scratch/
+
+# バックエンド実験環境置き場 experiments/
+# 追跡は experiments/ フォルダの目印 (.gitkeep) まで。
+# 配下に作る実験環境 (クローン・venv・ビルド成果物・ログ・チェックポイント等) は一切追跡しない。
+/experiments/*
+!/experiments/.gitkeep
