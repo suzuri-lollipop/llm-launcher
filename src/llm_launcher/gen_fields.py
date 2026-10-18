@@ -288,14 +288,8 @@ def gen_llamacpp(root: Path) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------- Strata
-def gen_strata(root: Path) -> dict[str, Any]:
-    """Strata の CLI は serve/server.py の argparse が全て。
-
-    エンジン本体の引数 (--native / --max-context / --mtp ...) は CLI ではなく
-    setup.py が書く strata-<model>.json の "args" 配列に入るため、ここでは
-    サーバープロセス自体の起動フラグだけを正表化する。
-    """
-    src = (_repo(root, "strata") / "serve" / "server.py").read_text()
+def _argparse_table(src: str) -> dict[str, Any]:
+    """Python argparse ソース (AST) から add_argument を正表化するのが共通手順。"""
     tree = ast.parse(src)
     out: dict[str, Any] = {}
     for node in ast.walk(tree):
@@ -336,6 +330,30 @@ def gen_strata(root: Path) -> dict[str, Any]:
             spec["help"] = kw["help"].value.value[:200]
         out[prim] = spec
     return out
+
+
+def gen_strata(root: Path) -> dict[str, Any]:
+    """Strata の CLI は serve/server.py の argparse が全て。
+
+    エンジン本体の引数 (--native / --max-context / --mtp ...) は CLI ではなく
+    setup.py が書く strata-<model>.json の "args" 配列に入るため、ここでは
+    サーバープロセス自体の起動フラグだけを正表化する。
+    """
+    src = (_repo(root, "strata") / "serve" / "server.py").read_text()
+    return _argparse_table(src)
+
+
+# ---------------------------------------------------------------------- Maya
+def gen_maya(root: Path) -> dict[str, Any]:
+    """Project Maya の CLI は maya.py (セットアップ+起動ラッパ) の argparse が全て。
+
+    モデル本体の設定 (コンテキスト長・expert 設定など) は setup が書く
+    maya-<model>.json の "args"/"env" に入るため、ここでは maya.py が起動時に
+    受け付けるフラグだけを正表化する (--setup/--model 等のセットアップ系は
+    GUI に出さないが、正表自体には含まれる)。
+    """
+    src = (_repo(root, "maya") / "maya.py").read_text()
+    return _argparse_table(src)
 
 
 def _literal(s: Any) -> Any:
@@ -380,6 +398,11 @@ def build(root: Path) -> dict[str, dict[str, Any]]:
         tables["strata"] = gen_strata(root)
     else:
         print("strata: module/strata が未クローンのため skip", flush=True)
+    # Project Maya (module/maya): submodule 取得済みなら maya.py の argparse から生成
+    if (_repo(root, "maya") / "maya.py").exists():
+        tables["maya"] = gen_maya(root)
+    else:
+        print("maya: module/maya が未クローンのため skip", flush=True)
     # フォーク (module/fork/freetoken): clone 済みなら fork ソースから正表を生成。
     # 未 clone 時は skip し、backends.py の TABLE_FALLBACK で基底表が流用される。
     if (_repo(root, "fork/freetoken") / "python/freetoken/server/args.py").exists():

@@ -1,0 +1,165 @@
+{
+ "--api-key": {
+  "aliases": [],
+  "help": "require this key from API clients and the dashboard",
+  "type": "str"
+ },
+ "--backend": {
+  "aliases": [],
+  "choices": [
+   "cuda",
+   "hip"
+  ],
+  "help": "GPU backend (HIP: experimental gfx1100/gfx1201/gfx1151 on Linux and Windows)",
+  "type": "str"
+ },
+ "--bench": {
+  "aliases": [],
+  "help": "a standard speed test of the installed model (a few minutes, with Maya stopped): decode on three questions and prefill at 2k / 8k tokens; writes maya-bench.txt",
+  "type": "bool"
+ },
+ "--calibrate": {
+  "aliases": [],
+  "help": "tune the engine's CPU lane for this PC (the PCIe share and the CPU threads, ~10-15 minutes), then start the model (with --no-start: only tune)",
+  "type": "bool"
+ },
+ "--check": {
+  "aliases": [],
+  "help": "only check this PC and exit",
+  "type": "bool"
+ },
+ "--config": {
+  "aliases": [],
+  "help": "the installed JSON config to start (its run-maya-<model>.sh does), or for --bench or --report (default: most recently used)",
+  "type": "str"
+ },
+ "--context": {
+  "aliases": [],
+  "type": "int"
+ },
+ "--download-model": {
+  "aliases": [],
+  "help": "download the model without asking (the commands and the size are still printed)",
+  "type": "bool"
+ },
+ "--draft": {
+  "aliases": [],
+  "type": "str"
+ },
+ "--env": {
+  "aliases": [],
+  "help": "an engine setting kept in the config, e.g. STRATA_GLM_RAM_HEADROOM_GB=4 (docs/SETTINGS.md)",
+  "metavar": "KEY=VALUE",
+  "type": "str"
+ },
+ "--gguf-dir": {
+  "aliases": [],
+  "help": "use GLM-5.3-Flash GGUF files you already have: the folder with all of them, or the .gguf file (the first one of a split model) when the folder holds several models; it must be writable - the pack is w",
+  "type": "str"
+ },
+ "--gpu": {
+  "aliases": [],
+  "help": "run on this one GPU (CUDA: nvidia-smi; HIP: KFD topology order, on Windows hipInfo's)",
+  "type": "int"
+ },
+ "--gpus": {
+  "aliases": [],
+  "type": "str"
+ },
+ "--host": {
+  "aliases": [],
+  "help": "where the server listens: 127.0.0.1 = this machine only (default), 0.0.0.0 = also other devices on your network (set --api-key too)",
+  "type": "str"
+ },
+ "--host-compiler": {
+  "aliases": [],
+  "help": "the C++ compiler nvcc uses, e.g. g++-12 (when the default g++ is newer than your CUDA accepts)",
+  "type": "str"
+ },
+ "--llama-dir": {
+  "aliases": [],
+  "help": "a llama.cpp checkout at the pinned commit, instead of downloading its source",
+  "type": "str"
+ },
+ "--model": {
+  "aliases": [],
+  "type": "str"
+ },
+ "--models-dir": {
+  "aliases": [],
+  "help": "where downloaded models go, each in a folder named after it, e.g. <DIR>/Maya-L/ (default: Maya-data/models next to this folder); use a fast NVMe SSD with ~100 GB free",
+  "type": "str"
+ },
+ "--no-speed-calibration": {
+  "aliases": [],
+  "help": "with --draft dflash2: keep DFlash2 without measuring it against the MTP block",
+  "type": "bool"
+ },
+ "--no-start": {
+  "aliases": [],
+  "help": "set up, but do not start the dashboard",
+  "type": "bool"
+ },
+ "--no-vision": {
+  "aliases": [],
+  "help": "text only: no image encoder (saves its build and its 1.1 GB of files)",
+  "type": "bool"
+ },
+ "--nvcc": {
+  "aliases": [],
+  "help": "the CUDA toolkit's nvcc to build with (default: the newest that fits your GPUs)",
+  "type": "str"
+ },
+ "--parallel": {
+  "aliases": [],
+  "help": "answer up to N requests at once (1-8, default 1), kept in the config: on one GPU they are decoded together, more tokens per second in all; each extra conversation keeps its own context in VRAM, which ",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--plain": {
+  "aliases": [],
+  "help": "the setup in plain text, the answers typed (not on the setup's own screen)",
+  "type": "bool"
+ },
+ "--port": {
+  "aliases": [],
+  "help": "the dashboard's and the API's port (default 8080)",
+  "type": "int"
+ },
+ "--rebuild": {
+  "aliases": [],
+  "help": "compile the engine again",
+  "type": "bool"
+ },
+ "--repack": {
+  "aliases": [],
+  "help": "build the pack again",
+  "type": "bool"
+ },
+ "--report": {
+  "aliases": [],
+  "help": "write maya-report.txt - this PC, the setup and the engine's speed lines - to attach when you report a problem or a speed (nothing is sent anywhere)",
+  "type": "bool"
+ },
+ "--setup": {
+  "aliases": [],
+  "help": "set up again instead of starting the installed model",
+  "type": "bool"
+ },
+ "--speed-calibration": {
+  "aliases": [],
+  "help": "measure on this PC whether the DFlash2 drafter decodes faster than the MTP block (sustained speed, ~5-20 minutes, the model loaded twice) and keep the faster; then start the model (with --no-start: on",
+  "type": "bool"
+ },
+ "--vram-reserve-mib": {
+  "aliases": [],
+  "help": "VRAM in MiB the expert pool leaves free on each GPU for the driver, the desktop and other programs (default 700), kept in the config",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--yes": {
+  "aliases": [],
+  "help": "take the recommended answers (the model download still needs --download-model)",
+  "type": "bool"
+ }
+}

@@ -1,6 +1,6 @@
 # llm-launcher
 
-vLLM / SGLang / llama.cpp / FreeToken / Strata を **サブモジュールとして `module/` 配下に登録** し、
+vLLM / SGLang / llama.cpp / FreeToken / Strata / Project Maya を **サブモジュールとして `module/` 配下に登録** し、
 Web UI から **起動プロファイル管理・ワンタップ起動・ログ確認・停止** まで行える管理アプリです。
 スマホ (同一 LAN) からもブラウザで操作できます。
 
@@ -13,7 +13,8 @@ llm-launcher/
 │   ├── sglang/           # https://github.com/sgl-project/sglang
 │   ├── llama.cpp/        # https://github.com/ggml-org/llama.cpp
 │   ├── freetoken/        # https://github.com/FlashML-org/FreeToken
-│   └── strata/           # https://github.com/Niko1221/Strata
+│   ├── strata/           # https://github.com/Niko1221/Strata
+│   └── maya/             # https://github.com/mw00/project-maya
 ├── module/fork/          # フォーク専用クローン置き場 (フォルダのみ追跡・内容は追跡外)
 │   └── freetoken/        # 例: https://github.com/suzuri-lollipop/FreeToken を clone
 ├── src/llm_launcher/     # 管理アプリ本体 (FastAPI + 静的 SPA)
@@ -52,10 +53,12 @@ uv run llm-launcher
   - **vLLM / SGLang / FreeToken**: 各 `module/<name>` 内で `uv sync` (または `uv pip install -e .`) して作られる **`module/<name>/.venv` を自動検出**して使います。解決順は `明示設定 > module/<name>/.venv > GUI(llm-launcher)の .venv > launcher 自身`。検出時は各候補で実際の import を試し、成功した python を起動に使用します (バックエンド画面の「検出詳細」に試行結果を表示)
   - llama.cpp: `module/llama.cpp` をビルドすると `build/bin/llama-server` を自動検出。PATH 上の `llama-server` も対象。ビルド前でもバックエンド画面でパスを直接指定できます
   - **Strata**: サーバー本体は `module/strata/serve/server.py` (Python)。初回に `./setup.sh` を実行すると `.venv`・エンジン・モデル設定 JSON (`strata-<model>.json`) が生成されます。検出は `module/strata` を cwd にして `serve.server` を**実 import** して行うため、setup 前 (依存の jinja2 が無い) は未検出になります。モデル・コンテキスト長などの本体設定は CLI ではなく `strata-<model>.json` の `args` に入るため、GUI からは `--config` でその JSON を指すだけで起動できます
+  - **Project Maya**: 入口は `module/maya/maya.sh` → `maya.py` (セットアップ+起動ラッパ、Strata 系の GLM-5.3-Flash 専用エンジン)。初回に `./maya.sh` を実行すると `.venv`・エンジンビルド・モデル (~100GB) DL を対話的に済ませます。セットアップ済みなら GUI からの起動は対話なしで最新 (または `--config` で選んだ) `maya-<model>.json` を立てます。検出は `module/maya` を cwd にして `serve.server` を実 import (依存は遅延 import なので GUI .venv でも通るが、setup 済みなら `module/maya/.venv` が最優先で選ばれる)。モデル・コンテキスト長などの本体設定は `maya-<model>.json` の `args` / `env` に入るため、GUI からは起動フラグ (config 選択 / GPU / サーバー) だけを出す
 
 ```bash
 cd module/llama.cpp && cmake -B build -DGGML_CUDA=ON && cmake --build build -j
 cd module/strata && ./setup.sh          # .venv + エンジン + strata-<model>.json を生成 (対話的)
+cd module/maya && ./maya.sh             # .venv + エンジン + モデル DL + ダッシュボード起動 (対話的・初回のみ)
 ```
 
 ## systemctl に登録 (常駐運用)
@@ -85,14 +88,14 @@ scripts/systemd-install.sh --uninstall  # 停止 + 登録解除 + ユニット�
 | 🕘 セッション履歴 | **終了した起動 (履歴) を探す画面**。行一覧で開始→終了時刻・稼働時間・終了コード・PID・バックエンドを表示し、検索 (プロファイル / バックエンド) と状態フィルタ (すべて / 異常終了 / 終了 / 切断記録、件数付き) で絞り込み。行タップでログ展開 (追従・DL・コピー)、`▶ 再実行` で元プロファイルを起動、削除が可能。件数は上限なく `さらに表示` で30件ずつ展開でき、サイドバーに異常終了件数のバッジを表示 |
 | 🧪 プレイグラウンド | **起動中のサーバーと直接チャットできる Playground**。サーバー / モデル選択 (`/v1/models`)、システムプロンプト、temperature / top_p / max_tokens、SSE ストリーム描画 (思考内容 = reasoning の折りたたみ表示、所要時間 / first token 遅延 (TTFT) / **生成速度 tok/s をストリーミング中にリアルタイム表示** / トークン数 (prompt→completion) の統計)、Enter 送信 / Shift+Enter 改行 / Stop ボタンで中断、会話はブラウザ (localStorage・サーバー毎) に自動保存。コードフェンスのシンタックス風表示とコピーボタン付き。稼働中サーバーのカード / ホーム / 稼働中画面の 🧪 ボタンからも入室可 |
 | 📊 ベンチマーク | **作成済みプロファイルのサーバーを直接計測する組み込みベンチ**。対象プロファイルを選択 (未起動なら自動起動、完了後の自動停止も可) し、並列度リスト (例 `1,8,32`) を各 1 ステージとして逐次実行。リクエスト数 / prompt 語数 / max_tokens / temperature / エンドポイント (chat・completions) / stream / warmup を設定でき、プロンプトはリクエスト毎に重複しないランダム文章で prefix cache を抑制。ステージごとに **出力 tok/s・合計 tok/s・req/s・TTFT (avg/p99)・遅延分布 (p50/p99)・decode tok/s** を算出し、実行中はライブ進行バー (フェーズ・累積 tok/s)。履歴は `data/bench.json` に最大 50 件保存され、結果テーブル展開 / 設定の再読込 / JSON エクスポート / 削除 / 中断が可能。トークン数は API の `usage` 優先、非対応サーバーは文字数推定 (結果テーブルに注記)。同時実走は 1 件 (GPU 計測の互干渉防止)。追加依存なしの標準ライブラリのみで動作 |
-| 📋 プロファイル | **プロファイル管理画面**。一覧に検索 (名前/モデル/バックエンド/メモ)、並び替え (更新/名前/バックエンド/使用回数)、バックエンド別フィルタ (件数表示)。カードで有効パラメータ数・使用履歴 (起動回数/最終利用/異常終了数) を確認でき、起動/編集/複製/削除/JSON エクスポートを実行。**一括選択モード**でのまとめて削除/エクスポート、**JSON インポート** (他マシンへの移行・バックアップ) も可。編集画面はプルダウンでバックエンドを選ぶと起動パラメータが全項目リスト化・既定値入りで表示され、☑ で各フラグの送出 ON/OFF を制御 (vLLM 44項目 / SGLang 62項目 / llama.cpp 40項目 / FreeToken 45項目 / FreeToken (fork) 56項目 / Strata 18項目。fork は MTP 投機的デコード `--speculative` やカーネル最適化など fork 独自項目を含む) |
+| 📋 プロファイル | **プロファイル管理画面**。一覧に検索 (名前/モデル/バックエンド/メモ)、並び替え (更新/名前/バックエンド/使用回数)、バックエンド別フィルタ (件数表示)。カードで有効パラメータ数・使用履歴 (起動回数/最終利用/異常終了数) を確認でき、起動/編集/複製/削除/JSON エクスポートを実行。**一括選択モード**でのまとめて削除/エクスポート、**JSON インポート** (他マシンへの移行・バックアップ) も可。編集画面はプルダウンでバックエンドを選ぶと起動パラメータが全項目リスト化・既定値入りで表示され、☑ で各フラグの送出 ON/OFF を制御 (vLLM 44項目 / SGLang 62項目 / llama.cpp 40項目 / FreeToken 45項目 / FreeToken (fork) 56項目 / Strata 18項目 / Project Maya 11項目。fork は MTP 投機的デコード `--speculative` やカーネル最適化など fork 独自項目を含む) |
 | 👥 ユーザー | **管理者のみ表示できるユーザー管理画面**。ロール権限カード (メンテナーに開示する機能の ON/OFF、簡易画面に表示するプロファイルの一覧と連絡先メッセージ) を筆頭に、ユーザー一覧 (ロール / 有効状態 / 最終ログイン)、新規作成・編集・有効化 / 無効化・削除、パスワードリセット、API キーの発行 / 再生成 / 失効 (平文は発行時の 1 回だけ表示)。認証を無効化して起動している場合は利用不可の案内を表示 |
 | ⚙️ バックエンド | 各 submodule の状態 (取得済み / インストール検出)、起動コマンドテンプレートや python / バイナリパスの上書き設定、再検出 |
 | 👤 簡易画面 `/simple` | **ロール `user` のユーザー向けの別ページ** (`http://<host>:8036/simple`)。開始・停止だけを押せます。詳細は [簡易画面](#簡易画面-simple) |
 
 ### プロファイル作成画面の流れ
 
-1. バックエンドのプルダウンを選択 (vLLM / SGLang / llama.cpp / FreeToken / Strata)
+1. バックエンドのプルダウンを選択 (vLLM / SGLang / llama.cpp / FreeToken / Strata / Project Maya)
 2. 選んだ瞬間に、そのバックエンドの全起動パラメータがセクション別に並ぶ
    (モデル・提供設定 / 並列・分散 / スケジューリング・メモリ / 実行エンジン / サーバー・API / ツール呼び出し・LoRA / サンプリング / ログ)
 3. 各項目には実プロダクトの**推奨値がプリフィル**され、さらに **☑「送信」チェックボックス**で各フラグを出す/出さないを切り替えられます。
@@ -106,7 +109,7 @@ scripts/systemd-install.sh --uninstall  # 停止 + 登録解除 + ユニット�
 最終 argv = コマンドテンプレート (プロファイル上書き > バックエンド設定 > 既定)
 + リスト項目 (フォーム値) から生成した `--flag 群` (+ 古いプロファイルに残った追加引数)
 
-- 各フラグの **型・選択肢・既定値は `src/llm_launcher/fields/<backend>.json` 正表が権威**で、これは `python -m llm_launcher.gen_fields --root .` で submodule の実ソース (vllm の tool_parsers/reasoning レジストリ・config dataclass の Literal、sglang の arg_groups/fields AST、freetoken の argparse、llama.cpp の common/arg.cpp、strata の serve/server.py の argparse) から生成されます。**submodule を `git submodule update` したら再生成してください**。`--only freetoken-fork` を付けると 1 バックエンド分だけ再生成できます (fork 版正表は `module/fork/freetoken` のソースから生成。未 clone 時は基底 FreeToken 表を流用。strata 表は `module/strata` が未クローンのとき skip)。Strata はサーバー起動フラグ (--config / --engine / --host / --port など) のみが CLI にあり、モデル・コンテキスト長などの本体設定は `strata-<model>.json` の `args` 側に入るため正表には含めません
+- 各フラグの **型・選択肢・既定値は `src/llm_launcher/fields/<backend>.json` 正表が権威**で、これは `python -m llm_launcher.gen_fields --root .` で submodule の実ソース (vllm の tool_parsers/reasoning レジストリ・config dataclass の Literal、sglang の arg_groups/fields AST、freetoken の argparse、llama.cpp の common/arg.cpp、strata の serve/server.py の argparse、Project Maya の maya.py の argparse) から生成されます。**submodule を `git submodule update` したら再生成してください**。`--only freetoken-fork` を付けると 1 バックエンド分だけ再生成できます (fork 版正表は `module/fork/freetoken` のソースから生成。未 clone 時は基底 FreeToken 表を流用。strata 表は `module/strata` が未クローンのとき skip、maya 表は `module/maya` が未クローンのとき skip)。Strata はサーバー起動フラグ (--config / --engine / --host / --port など) のみが CLI にあり、モデル・コンテキスト長などの本体設定は `strata-<model>.json` の `args` 側に入るため正表には含めません。Project Maya も同様に、モデル本体設定は `maya-<model>.json` の `args` / `env` 側に入り、正表には起動ラッパ maya.py のフラグ (セットアップ系も含む。GUI に出すのは起動系のみ) が入ります
 - 生成器が追いきれない箇所 (llama.cpp の一部、sglang の動的 choices 等) は `backends.py` の補完表にソース照合済み値を持っています。CLI に無い GUI 独自項目 (例: FreeToken (fork) の「カーネル最適化」= 環境変数マッピング) は、正表に `--` 始まり以外の key (例: `kernel_optimization`) で記録しておけば再生成後も自動で引き継がれます
 - テンプレート内トークン: `{python}` `{llama_server}` `{module}` `{root}`、および `{model}` `{port}` などプロファイル変数
 - 「追加引数」textarea は廃止しました。既存プロファイルに値が入っていた場合のみ、編集画面の「レガシー項目」として自動表示され保持されます
@@ -212,5 +215,5 @@ sudo scripts/oom-protect-install.sh --uninstall  # 削除
 llm-launcher 本体は **MIT License** ([LICENSE](LICENSE)) です。
 
 `module/` 配下のサブモジュールは本リポジトリの一部ではなく、各自の upstream ライセンスに従います
-(vLLM: Apache-2.0 / SGLang: MIT / llama.cpp: MIT / FreeToken: 各リポジトリ参照 / Strata: MIT)。
+(vLLM: Apache-2.0 / SGLang: MIT / llama.cpp: MIT / FreeToken: 各リポジトリ参照 / Strata: MIT / Project Maya: MIT)。
 本アプリはこれらをサブプロセスとして起動するだけでコードをリンクしないため、ライセンス上の制約は及びません。

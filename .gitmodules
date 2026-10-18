@@ -13,3 +13,6 @@
 [submodule "module/strata"]
 	path = module/strata
 	url = https://github.com/Niko1221/Strata
+[submodule "module/maya"]
+	path = module/maya
+	url = https://github.com/mw00/project-maya.git

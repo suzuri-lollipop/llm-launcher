@@ -1,4 +1,4 @@
-"""バックエンド(vllm / sglang / llama.cpp / FreeToken / Strata)の定義と起動コマンド組み立て。
+"""バックエンド(vllm / sglang / llama.cpp / FreeToken / Strata / Project Maya)の定義と起動コマンド組み立て。
 
 各バックエンドは通常 `module/` 配下の git submodule だが、
 フォーク (freetoken-fork) は `module/fork/` 配下の非追跡 clone を使う
@@ -562,6 +562,49 @@ def build_strata() -> dict[str, Any]:
     return _backend_meta(b, fields)
 
 
+def build_maya() -> dict[str, Any]:
+    """Project Maya (https://github.com/mw00/project-maya) — GLM-5.3-Flash (321B MoE) を
+    VRAM/RAM/SSD の階層キャッシュでローカル実行するエンジン + OpenAI/Anthropic 互換サーバー
+    + ダッシュボード (Strata 系)。
+
+    起動の入口はリポジトリ直下の maya.py (セットアップ+起動ラッパ)。既定コマンドは
+    maya.sh 経由で、module/maya/.venv が無ければ自作し、あればそれを使って起動する。
+    セットアップ済みなら対話なしで最新 (または --config で選んだ) maya-<model>.json を起動し、
+    サーバー本体は serve/server.py --engine strata --config maya-<model>.json が立つ。
+    モデル・コンテキスト長などの本体設定は setup が書く maya-<model>.json の args/env 側に入る
+    ため、GUI からは maya.py の起動フラグ (config 選択 / GPU / サーバー) だけを出す。
+    """
+    b = "maya"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--config", "モデル設定 JSON (maya-<model>.json)",
+          placeholder="空 = 最近使った設定を自動選択",
+          help="setup.sh / maya.sh が生成する実行設定。モデル・コンテキスト長などはこの args に入る"),
+        F("--gpu", "GPU 指定 (単一カード)", section="parallel", placeholder="0",
+          help="nvidia-smi の番号。空 = config の gpu"),
+        F("--gpus", "GPU 分割 (層分散)", section="parallel", placeholder="0,1 / 0,1,2,3",
+          help="この起動だけ対象のカードを変える。空 = config の gpu"),
+        F("--parallel", "同時リクエスト数 (1-8)", section="parallel", placeholder="1",
+          help="指定すると config に保存される。1 枚で複数リクエストをまとめてデコードし総スループット向上。"
+               "1 リクエスト増えるごとに VRAM のコンテキスト分だけ expert キャッシュが減る"),
+        F("--vram-reserve-mib", "GPU ごとの空き VRAM 確保 (MiB)", section="sched", placeholder="700",
+          help="ドライバ・デスクトップ等向けの余白。指定すると config に保存される"),
+        F("--calibrate", "起動前にこの PC 向け調整 (~10-15分)", section="sched",
+          help="PCIe 共有率と CPU スレッドを実測調整してから起動する (毎回やる必要はない)"),
+        F("--backend", "GPU バックエンド", section="exec", choices=["cuda", "hip"],
+          help="cuda = NVIDIA / hip = AMD (実験的)。空 = config から自動判定"),
+        F("--env", "エンジン設定 KEY=VALUE", section="exec",
+          placeholder="STRATA_GLM_RAM_HEADROOM_GB=4",
+          help="エンジンへ渡す設定を 1 つ (docs/SETTINGS.md 参照。複数ある場合は追加引数へ)"),
+        F("--host", "ホスト", section="server", default="0.0.0.0",
+          help="0.0.0.0 で LAN 公開 (その場合は APIキーを推奨)。127.0.0.1 = この PC のみ"),
+        F("--port", "ポート", section="server", default="8080"),
+        F("--api-key", "APIキー", section="server", placeholder="LAN 公開時は必須",
+          help="API クライアントとダッシュボードにキーを必須化する"),
+    ]
+    return _backend_meta(b, fields)
+
+
 # モジュール側が自動導出する項目: GUI 既定値で上書きしないよう既定 OFF (チェックで ON にすると送信)
 DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     "vllm": {"dtype", "load_format", "kv_cache_dtype", "generation_config",
@@ -595,6 +638,9 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     # Strata: 正解を strata-<model>.json (config) が既に持っている項目は既定 OFF
     "strata": {"tokenizer", "gpu", "replicas", "idle_unload", "min_free_vram_mib",
                "slot_save_path", "before_load", "mcp_config", "script"},
+    # Project Maya: 同様に maya-<model>.json (config) が正解を持つ項目 / 起動のたびに不要な項目は既定 OFF
+    "maya": {"config", "gpu", "gpus", "parallel", "vram_reserve_mib", "calibrate",
+             "backend", "env"},
 }
 
 # 常に送信する (無効化できない) 項目
@@ -604,6 +650,7 @@ REQUIRED_KEYS: dict[str, set[str]] = {
     "llamacpp": {"model", "host", "port"},
     "freetoken": {"model_path", "host", "port"},
     "strata": {"config", "engine", "host", "port"},
+    "maya": {"host", "port"},
 }
 
 # fork バックエンドは基底 (freetoken) と同じ送信ポリシー (コピーして派生 = 個別追加可)
@@ -693,6 +740,23 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["ready: http"],
         "default_port": "8080",
     },
+    "maya": {
+        "id": "maya", "name": "Project Maya",
+        "repo": "https://github.com/mw00/project-maya",
+        "module_path": "module/maya", "kind": "python",
+        "desc": "GLM-5.3-Flash (321B MoE) を VRAM/RAM/SSD 階層キャッシュでローカル実行するエンジン"
+                " (OpenAI/Anthropic 互換 + ダッシュボード)。初回は module/maya で ./maya.sh を実行し"
+                " エンジンビルドとモデルダウンロード (~100GB) を済ませる。",
+        # maya.sh が module/maya/.venv を用意 (あれば再利用) して maya.py を exec。
+        # セットアップ済みなら対話なしで serve/server.py --engine strata --config maya-<model>.json を起動する
+        "default_command": "sh {root}/module/maya/maya.sh",
+        # serve はリポジトリ直下のパッケージ (未 install) → submodule を cwd に実 import して判定。
+        # 依存 (psutil/PIL/strata_tokenizer) は遅延 import なので GUI .venv でも import は通るが、
+        # module/maya/.venv (setup 済み) が最優先で選ばれる
+        "check_module": "serve.server", "check_cwd": True, "health_path": "/health",
+        "ready_markers": ["ready: http"],
+        "default_port": "8080",
+    },
 }
 
 BACKENDS: dict[str, dict[str, Any]] = {
@@ -702,6 +766,7 @@ BACKENDS: dict[str, dict[str, Any]] = {
     "freetoken": build_freetoken(),
     "freetoken-fork": build_freetoken("freetoken-fork"),
     "strata": build_strata(),
+    "maya": build_maya(),
 }
 
 
