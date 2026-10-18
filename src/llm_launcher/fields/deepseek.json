@@ -1,0 +1,59 @@
+{
+ "--dense-device": {
+  "aliases": [],
+  "default": "cuda:0",
+  "type": "str"
+ },
+ "--device": {
+  "aliases": [],
+  "default": "auto",
+  "type": "str"
+ },
+ "--expert-cache-gb": {
+  "aliases": [],
+  "default": 24.0,
+  "type": "float"
+ },
+ "--expert-device": {
+  "aliases": [],
+  "default": "cuda:1",
+  "type": "str"
+ },
+ "--hf": {
+  "aliases": [],
+  "type": "str"
+ },
+ "--host": {
+  "aliases": [],
+  "default": "127.0.0.1",
+  "type": "str"
+ },
+ "--max-seq-len": {
+  "aliases": [],
+  "default": 16384,
+  "type": "int"
+ },
+ "--model": {
+  "aliases": [],
+  "type": "str"
+ },
+ "--port": {
+  "aliases": [],
+  "default": 8199,
+  "type": "int"
+ },
+ "--prefill-chunk": {
+  "aliases": [],
+  "default": 512,
+  "type": "int"
+ },
+ "--resident-gb": {
+  "aliases": [],
+  "default": 18.0,
+  "type": "float"
+ },
+ "--spec": {
+  "aliases": [],
+  "type": "bool"
+ }
+}

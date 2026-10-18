@@ -740,6 +740,18 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["ready: http"],
         "default_port": "8080",
     },
+    "deepseek": {
+        "id": "deepseek", "name": "DeepSeek-V4.1 3-bit (fork)",
+        "repo": "https://github.com/suzuri-lollipop/Strata",
+        "module_path": "module/fork/strata/deepseek", "kind": "python",
+        "desc": "DeepSeek-V4.1-Flash-1017 (590B MoE) の 3bit (IQ3_S) 量子化を NVMe/RAM/VRAM "
+                "階層ストリーミングで実行する OpenAI 互換サーバー (deepseek/ ツールキット、"
+                "module/fork/strata)。初回は deepseek/README.md の fetch/quantize/calib を実行する",
+        "default_command": "sh {root}/module/fork/strata/deepseek/serve.sh",
+        "check_module": "dsv41.serve", "check_cwd": True, "health_path": "/health",
+        "ready_markers": ["[serve] http"],
+        "default_port": "8199",
+    },
     "maya": {
         "id": "maya", "name": "Project Maya",
         "repo": "https://github.com/mw00/project-maya",
@@ -759,6 +771,30 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
     },
 }
 
+def build_deepseek() -> dict[str, Any]:
+    """DeepSeek-V4.1-Flash-1017 3-bit (module/fork/strata/deepseek) — この fork の
+    deepseek/ ツールキットが量子化した IQ3_S GGUF を NVMe/RAM/VRAM 階層でストリーミング実行する
+    OpenAI 互換サーバー (dsv41.serve)。モデルは /media/nvme2 想定。"""
+    b = "deepseek"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--model", "量子化モデル目录 (manifest.json がある dir)",
+          default="/media/nvme2/models/DeepSeek-V4.1-Flash-1017-IQ3",
+          help="dsv41.quantize の出力先。既定は /media/nvme2/models/DeepSeek-V4.1-Flash-1017-IQ3"),
+        F("--host", "ホスト", section="server", default="127.0.0.1",
+          help="0.0.0.0 で LAN 公開 (非推奨: API キーなし)。127.0.0.1 = この PC のみ"),
+        F("--resident-gb", "エキスパート常駐 VRAM (GB)", section="sched", default="18",
+          help="expert 側 GPU に常駐させる 3bit コードの予算。0 = 無効"),
+        F("--expert-cache-gb", "エキスパート RAM キャッシュ (GB)", section="sched", default="24",
+          help="3bit コードの RAM LRU 予算"),
+        F("--spec", "DSpark 投機デコード", section="sched",
+          help="モデル同梱の MTP drafter で greedy decode を加速 (出力は greedy と同一)"),
+        F("--max-seq-len", "最大コンテキスト", section="sched", default="16384",
+          help="KV/圧縮KV キャッシュの上限トークン数"),
+    ]
+    return _backend_meta(b, fields)
+
+
 BACKENDS: dict[str, dict[str, Any]] = {
     "vllm": build_vllm(),
     "sglang": build_sglang(),
@@ -767,6 +803,7 @@ BACKENDS: dict[str, dict[str, Any]] = {
     "freetoken-fork": build_freetoken("freetoken-fork"),
     "strata": build_strata(),
     "maya": build_maya(),
+    "deepseek": build_deepseek(),
 }
 
 

@@ -23,3 +23,18 @@ python のパスはバックエンド設定から明示指定も可能です
 
 起動引数の正表 (`src/llm_launcher/fields/freetoken-fork.json`) は
 fork を更新した後 `python -m llm_launcher.gen_fields` で再生成できます。
+
+## strata (suzuri-lollipop/Strata)
+
+llm-launcher のルートディレクトリで:
+
+```bash
+git clone https://github.com/suzuri-lollipop/Strata module/fork/strata
+```
+
+upstream submodule の `module/strata` (Niko1221/Strata) とは別のクローンです。
+`deepseek/` サブフォルダに、project-maya (`module/maya/tools/maya_quant`) を参考にした
+**DeepSeek-V4.1-Flash-1017 の 3bit (IQ3_S) 量子化 + 実行ツールキット** が入っています
+(GGUF 量子化、NVMe/RAM/VRAM の階層ストリーミング実行、FP8 原本との品質比較)。
+使い方と実測値は `module/fork/strata/deepseek/README.md`。
+モデル本体は `/media/nvme2/models/DeepSeek-V4.1-Flash-1017{,-IQ3}` に置きます。

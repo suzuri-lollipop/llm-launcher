@@ -409,6 +409,12 @@ def build(root: Path) -> dict[str, dict[str, Any]]:
         tables["freetoken-fork"] = gen_freetoken(root, "fork/freetoken")
     else:
         print("freetoken-fork: module/fork/freetoken が未クローンのため skip", flush=True)
+    # DeepSeek-V4.1 3-bit (module/fork/strata/deepseek): serve.py の argparse が正表
+    ds = _repo(root, "fork/strata/deepseek") / "dsv41" / "serve.py"
+    if ds.exists():
+        tables["deepseek"] = _argparse_table(ds.read_text())
+    else:
+        print("deepseek: module/fork/strata が未クローンのため skip", flush=True)
     return tables
 
 
