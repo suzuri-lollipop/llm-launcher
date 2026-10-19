@@ -25,6 +25,20 @@ def _repo(root: Path, mod: str) -> Path:
     return root / "module" / mod
 
 
+def _fork_dir(root: Path, name: str) -> Path | None:
+    """module/fork/ 配下の実ディレクトリ (大小文字無視: git clone 既定の Strata / FreeToken 表記でも探す)。"""
+    base = root / "module" / "fork"
+    if (base / name).is_dir():
+        return base / name
+    try:
+        for p in sorted(base.iterdir()):
+            if p.is_dir() and p.name.lower() == name.lower():
+                return p
+    except OSError:
+        pass
+    return None
+
+
 # ---------------------------------------------------------------- FreeToken
 def gen_freetoken(root: Path, mod: str = "freetoken") -> dict[str, Any]:
     from .util_ast import collect_dataclass_defaults, collect_module_constants
@@ -338,7 +352,7 @@ def gen_strata(root: Path, sub: str = "strata") -> dict[str, Any]:
     エンジン本体の引数 (--native / --max-context / --mtp ...) は CLI ではなく
     setup.py が書く strata-<model>.json の "args" 配列に入るため、ここでは
     サーバープロセス自体の起動フラグだけを正表化する。
-    sub: "strata" (upstream submodule) または "fork/strata-fork" (フォークの worktree)。
+    sub: "strata" (upstream submodule) またはフォーク clone の実パス ("fork/strata", "fork/Strata" など)。
     """
     src = (_repo(root, sub) / "serve" / "server.py").read_text()
     return _argparse_table(src)
@@ -404,25 +418,21 @@ def build(root: Path) -> dict[str, dict[str, Any]]:
         tables["maya"] = gen_maya(root)
     else:
         print("maya: module/maya が未クローンのため skip", flush=True)
-    # フォーク (module/fork/freetoken): clone 済みなら fork ソースから正表を生成。
+    # フォーク (module/fork/<name>): clone 済みなら fork ソースから正表を生成。
+    # ディレクトリ名は大小文字を無視して解決 (git clone 既定のリポジトリ名 Strata / FreeToken にも対応)。
     # 未 clone 時は skip し、backends.py の TABLE_FALLBACK で基底表が流用される。
-    if (_repo(root, "fork/freetoken") / "python/freetoken/server/args.py").exists():
-        tables["freetoken-fork"] = gen_freetoken(root, "fork/freetoken")
+    ft = _fork_dir(root, "freetoken")
+    if ft and (ft / "python/freetoken/server/args.py").exists():
+        tables["freetoken-fork"] = gen_freetoken(root, str(ft.relative_to(root / "module")))
     else:
         print("freetoken-fork: module/fork/freetoken が未クローンのため skip", flush=True)
-    # DeepSeek-V4.1 3-bit (module/fork/strata/deepseek): serve.py の argparse が正表
-    ds = _repo(root, "fork/strata/deepseek") / "dsv41" / "serve.py"
-    if ds.exists():
-        tables["deepseek"] = _argparse_table(ds.read_text())
+    # Strata (fork) (module/fork/strata): フォーク clone の serve/server.py から正表を生成。
+    # (deepseek/ ツールキットと同じ clone。DeepSeek 専用バックエンドは廃止 = フォークへ合流予定のため)
+    sf = _fork_dir(root, "strata")
+    if sf and (sf / "serve" / "server.py").exists():
+        tables["strata-fork"] = gen_strata(root, str(sf.relative_to(root / "module")))
     else:
-        print("deepseek: module/fork/strata が未クローンのため skip", flush=True)
-    # Strata (fork) (module/fork/strata-fork): フォーク clone の git worktree
-    # (suzuri/parallel-perf 等) が展開済みなら、その serve/server.py から正表を生成。
-    # 未展開時は skip し、backends.py の TABLE_FALLBACK で基底 (strata) 表が流用される。
-    if (_repo(root, "fork/strata-fork") / "serve" / "server.py").exists():
-        tables["strata-fork"] = gen_strata(root, "fork/strata-fork")
-    else:
-        print("strata-fork: module/fork/strata-fork が未展開のため skip", flush=True)
+        print("strata-fork: module/fork/strata が未クローンのため skip", flush=True)
     return tables
 
 

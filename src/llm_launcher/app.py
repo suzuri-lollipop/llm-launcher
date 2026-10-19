@@ -23,8 +23,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
-from .backends import (SECTIONS_JA, BACKENDS, python_candidates, resolve_port,
-                       sections_order)
+from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, backend_for, fork_dir,
+                       python_candidates, resolve_port, sections_order)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
@@ -436,7 +436,7 @@ def create_app(root: Path) -> FastAPI:
     detect_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     async def detect(backend_id: str, force: bool = False) -> dict[str, Any]:
-        b = BACKENDS[backend_id]
+        b = backend_for(root, backend_id)
         ts_cached = detect_cache.get(backend_id)
         if not force and ts_cached and time.monotonic() - ts_cached[0] < DETECT_TTL:
             return ts_cached[1]
@@ -500,7 +500,7 @@ def create_app(root: Path) -> FastAPI:
         return info
 
     def backend_public(bid: str, det: dict[str, Any]) -> dict[str, Any]:
-        b = BACKENDS[bid]
+        b = backend_for(root, bid)
         st = manager._backend_setting(bid)
         return {
             "id": bid,
@@ -804,8 +804,11 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/api/state")
     async def get_state(request: Request) -> dict[str, Any]:
-        dets = await asyncio.gather(*[detect(bid) for bid in BACKENDS])
-        backends = [backend_public(bid, det) for bid, det in zip(BACKENDS, dets)]
+        # フォーク系バックエンドは module/fork/ に clone が無い (未インストール) 場合、UI に出さない
+        visible = [bid for bid in BACKENDS
+                   if bid not in FORK_CLONE_DIRS or fork_dir(root, FORK_CLONE_DIRS[bid])]
+        dets = await asyncio.gather(*[detect(bid) for bid in visible])
+        backends = [backend_public(bid, det) for bid, det in zip(visible, dets)]
         system = {
             "hostname": socket.gethostname(),
             "ip": lan_ip(),

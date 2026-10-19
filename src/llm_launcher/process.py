@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from . import oom
-from .backends import (BACKENDS, python_candidates, render_argv, resolve_binary,
-                       resolve_port)
+from .backends import (BACKENDS, backend_for, python_candidates, render_argv,
+                       resolve_binary, resolve_port)
 from .oom import MemoryGuardError
 from .store import JsonStore, new_id, now
 
@@ -175,7 +175,7 @@ class ProcessManager:
         cached = self._py_choice.get(backend_id)
         if cached and Path(cached).exists():
             return cached
-        b = BACKENDS.get(backend_id) or {}
+        b = backend_for(self.root, backend_id) if backend_id in BACKENDS else {}
         for _, path in python_candidates(self.root, b.get("module_path")):
             if Path(path).exists():
                 return path
@@ -186,11 +186,12 @@ class ProcessManager:
         self._py_choice[backend_id] = path
 
     def resolve_binary(self, backend_id: str) -> str:
-        b = BACKENDS[backend_id]
+        b = backend_for(self.root, backend_id)
         return resolve_binary(self.root, b, override=self._backend_setting(backend_id).get("command_binary") or "")
 
     def base_command(self, backend_id: str) -> str:
-        return self._backend_setting(backend_id).get("command") or BACKENDS[backend_id]["default_command"]
+        return (self._backend_setting(backend_id).get("command")
+                or backend_for(self.root, backend_id)["default_command"])
 
     def find_profile(self, profile_id: str) -> dict[str, Any] | None:
         return next((p for p in self.profiles.load() if p["id"] == profile_id), None)
@@ -200,7 +201,7 @@ class ProcessManager:
         bid = profile.get("backend")
         if bid not in BACKENDS:
             raise ValueError("このプロファイルにバックエンドが設定されていません")
-        backend = BACKENDS[bid]
+        backend = backend_for(self.root, bid)
         command = (profile.get("command") or "").strip() or self.base_command(bid)
         rendered = {**profile, "command": command}
         argv = render_argv(
@@ -230,7 +231,7 @@ class ProcessManager:
         bid = profile.get("backend")
         if bid not in BACKENDS:
             raise RuntimeError("このプロファイルにバックエンドが設定されていません")
-        backend = BACKENDS[bid]
+        backend = backend_for(self.root, bid)
         argv = self.build_argv(profile)
         port = resolve_port(backend, profile, argv)
 

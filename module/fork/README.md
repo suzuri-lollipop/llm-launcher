@@ -30,28 +30,21 @@ llm-launcher のルートディレクトリで:
 
 ```bash
 git clone https://github.com/suzuri-lollipop/Strata module/fork/strata
+# (clone 先を指定しないと git は既定でリポジトリ名の module/fork/Strata を作りますが、
+#  ランチャーは大小文字を無視して認識するのでどちらでも動きます)
+ln -s ../../strata/.venv module/fork/strata/.venv   # 検出/起動用 python (module/strata の setup 済み venv を共有)
 ```
 
-upstream submodule の `module/strata` (Niko1221/Strata) とは別のクローンです。
-`deepseek/` サブフォルダに、project-maya (`module/maya/tools/maya_quant`) を参考にした
-**DeepSeek-V4.1-Flash-1017 の 3bit (IQ3_S) 量子化 + 実行ツールキット** が入っています
-(GGUF 量子化、NVMe/RAM/VRAM の階層ストリーミング実行、FP8 原本との品質比較)。
-使い方と実測値は `module/fork/strata/deepseek/README.md`。
-モデル本体は `/media/nvme2/models/DeepSeek-V4.1-Flash-1017{,-IQ3}` に置きます。
-
-## strata-fork (suzuri-lollipop/Strata の並列チューニング worktree)
-
-`module/fork/strata` clone (deepseek 系ブランチ使用中でも可) から **git worktree** で
-`module/fork/strata-fork` に展開します。WebUI のバックエンド一覧に **Strata (fork)** として表示され、
-`--parallel / --batch-groups / --batch-mtp / --adapt-async / --adapt-every / --piped-concurrent / --yield-chunks`
-(2026-10 の並列チューニング) を含む 25 項目を出します。
-
-```bash
-cd module/fork/strata
-git fetch ../../strata suzuri/parallel-perf:suzuri/parallel-perf   # submodule 側からブランチ取得 (push 不要)
-git worktree add ../strata-fork suzuri/parallel-perf
-ln -s ../../strata/.venv ../strata-fork/.venv                      # 検出/起動用 python (module/strata の setup 済み venv)
-```
+WebUI のバックエンド一覧に **Strata (fork)** として表示されます (clone が無い環境では非表示)。
+現在の `suzuri/deepseek-v41` ブランチには並列チューニング (`suzuri/parallel-perf` の内容:
+`--parallel / --batch-groups / --batch-mtp / --adapt-async / --adapt-every / --piped-concurrent /
+--yield-chunks` と layer split + arena での `--adapt-async` 対応) が cherry-pick 済みで、
+`deepseek/` ツールキット (DeepSeek-V4.1 の量子化・階層ストリーミング実行、将来このフォークへ合流予定)
+と同じ clone に同居します。専用バックエンドだった **DeepSeek-V4.1 3-bit (fork) はランチャーから削除済み**
+(ツールキット自体は `deepseek/README.md` のとおり CLI で使えます)。
 
 エンジンバイナリと `strata-<model>.json` は module/strata のものを `--config` で共有できます
-(config の "exe" が絶対パスのため)。fork 専用エンジンが必要なときは strata-fork 内で ./setup.sh を実行。
+(config の "exe" が絶対パスのため)。fork 専用エンジンが必要なときはこの clone で ./setup.sh を実行。
+
+起動引数の正表 (`src/llm_launcher/fields/strata-fork.json`) は fork を更新した後
+`python -m llm_launcher.gen_fields --only strata-fork` で再生成できます。

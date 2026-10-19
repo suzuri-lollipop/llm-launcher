@@ -30,6 +30,25 @@ FIELDS_DIR = Path(__file__).parent / "fields"
 # `python -m llm_launcher.gen_fields` で fork ソースから生成すればそれが優先される。
 TABLE_FALLBACK: dict[str, str] = {"freetoken-fork": "freetoken", "strata-fork": "strata"}
 
+# フォーク系バックエンドのクローンディレクトリ名 (module/fork/ 直下)。
+# `git clone` は既定でリポジトリ同名のディレクトリを作る (Strata / FreeToken = 大文字始まり)ため、
+# 実ディレクトリは大小文字を無視して解決する (fork_dir / backend_for)。
+FORK_CLONE_DIRS: dict[str, str] = {"freetoken-fork": "freetoken", "strata-fork": "strata"}
+
+
+def fork_dir(root: Path, name: str) -> str | None:
+    """module/fork/<name> の実在ディレクトリを (大小文字を問わず) 相対パスで返す。無ければ None。"""
+    base = root / "module" / "fork"
+    if (base / name).is_dir():
+        return f"module/fork/{name}"
+    try:
+        for p in sorted(base.iterdir()):
+            if p.is_dir() and p.name.lower() == name.lower():
+                return f"module/fork/{p.name}"
+    except OSError:
+        pass
+    return None
+
 _tables: dict[str, dict[str, Any]] = {}
 
 
@@ -774,32 +793,19 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
     "strata-fork": {
         "id": "strata-fork", "name": "Strata (fork)",
         "repo": "https://github.com/suzuri-lollipop/Strata",
-        "module_path": "module/fork/strata-fork", "kind": "python",
-        "desc": "Strata フォーク (suzuri-lollipop/Strata) の並列チューニングブランチ "
-                "(suzuri/parallel-perf: --parallel / --batch-groups / --batch-mtp / --adapt-async / "
-                "--adapt-every / --piped-concurrent / --yield-chunks と layer split + arena での "
-                "--adapt-async 対応エンジン)。module/fork/strata clone の git worktree として "
-                "module/fork/strata-fork に展開する (deepseek ブランチと同居可)。エンジンバイナリと "
-                "strata-<model>.json は module/strata のものを --config で共有できる",
-        # 展開: cd module/fork/strata && git fetch <module/strata のパス> suzuri/parallel-perf:suzuri/parallel-perf
-        #       && git worktree add ../strata-fork suzuri/parallel-perf
-        #       && ln -s ../../strata/.venv ../strata-fork/.venv
-        "default_command": "{python} {root}/module/fork/strata-fork/serve/server.py",
+        "module_path": "module/fork/strata", "kind": "python",
+        "desc": "Strata フォーク (suzuri-lollipop/Strata) の serve/server.py — 並列チューニング "
+                "(--parallel / --batch-groups / --batch-mtp / --adapt-async / --adapt-every / "
+                "--piped-concurrent / --yield-chunks と layer split + arena での --adapt-async 対応) を含む。"
+                "module/fork/ への clone で有効化 (ディレクトリ名は strata / Strata どちらでも自動認識)。"
+                "現在のチェックアウト suzuri/deepseek-v41 に suzuri/parallel-perf の内容を cherry-pick 済みで、"
+                "deepseek/ ツールキット (DeepSeek-V4.1 量子化・実行、将来このフォークへ合流予定) と同じ clone に同居。"
+                "エンジンバイナリと strata-<model>.json は module/strata のものを --config で共有できる "
+                "(config の \"exe\" が絶対パスのため)。検出用 .venv は module/strata/.venv へのシンボリックリンク",
+        "default_command": "{python} {root}/module/fork/strata/serve/server.py",
         "check_module": "serve.server", "check_cwd": True, "health_path": "/health",
         "ready_markers": ["ready: http"],
         "default_port": "8080",
-    },
-    "deepseek": {
-        "id": "deepseek", "name": "DeepSeek-V4.1 3-bit (fork)",
-        "repo": "https://github.com/suzuri-lollipop/Strata",
-        "module_path": "module/fork/strata/deepseek", "kind": "python",
-        "desc": "DeepSeek-V4.1-Flash-1017 (590B MoE) の 3bit (IQ3_S) 量子化を NVMe/RAM/VRAM "
-                "階層ストリーミングで実行する OpenAI 互換サーバー (deepseek/ ツールキット、"
-                "module/fork/strata)。初回は deepseek/README.md の fetch/quantize/calib を実行する",
-        "default_command": "sh {root}/module/fork/strata/deepseek/serve.sh",
-        "check_module": "dsv41.serve", "check_cwd": True, "health_path": "/health",
-        "ready_markers": ["[serve] http"],
-        "default_port": "8199",
     },
     "maya": {
         "id": "maya", "name": "Project Maya",
@@ -820,30 +826,6 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
     },
 }
 
-def build_deepseek() -> dict[str, Any]:
-    """DeepSeek-V4.1-Flash-1017 3-bit (module/fork/strata/deepseek) — この fork の
-    deepseek/ ツールキットが量子化した IQ3_S GGUF を NVMe/RAM/VRAM 階層でストリーミング実行する
-    OpenAI 互換サーバー (dsv41.serve)。モデルは /media/nvme2 想定。"""
-    b = "deepseek"
-    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
-    fields = [
-        F("--model", "量子化モデル目录 (manifest.json がある dir)",
-          default="/media/nvme2/models/DeepSeek-V4.1-Flash-1017-IQ3",
-          help="dsv41.quantize の出力先。既定は /media/nvme2/models/DeepSeek-V4.1-Flash-1017-IQ3"),
-        F("--host", "ホスト", section="server", default="127.0.0.1",
-          help="0.0.0.0 で LAN 公開 (非推奨: API キーなし)。127.0.0.1 = この PC のみ"),
-        F("--resident-gb", "エキスパート常駐 VRAM (GB)", section="sched", default="18",
-          help="expert 側 GPU に常駐させる 3bit コードの予算。0 = 無効"),
-        F("--expert-cache-gb", "エキスパート RAM キャッシュ (GB)", section="sched", default="24",
-          help="3bit コードの RAM LRU 予算"),
-        F("--spec", "DSpark 投機デコード", section="sched",
-          help="モデル同梱の MTP drafter で greedy decode を加速 (出力は greedy と同一)"),
-        F("--max-seq-len", "最大コンテキスト", section="sched", default="16384",
-          help="KV/圧縮KV キャッシュの上限トークン数"),
-    ]
-    return _backend_meta(b, fields)
-
-
 BACKENDS: dict[str, dict[str, Any]] = {
     "vllm": build_vllm(),
     "sglang": build_sglang(),
@@ -853,8 +835,24 @@ BACKENDS: dict[str, dict[str, Any]] = {
     "strata": build_strata(),
     "strata-fork": build_strata("strata-fork"),
     "maya": build_maya(),
-    "deepseek": build_deepseek(),
 }
+
+
+def backend_for(root: Path, backend_id: str) -> dict[str, Any]:
+    """BACKENDS[backend_id] の fork 版: module_path と default_command を module/fork/ 配下の
+    実ディレクトリ名 (clone 既定の Strata / FreeToken 等の大文字表記も含む) に解決して返す。
+    フォーク以外、またはディレクトリが既定名と一致する場合は BACKENDS のエントリそのもの。"""
+    b = BACKENDS[backend_id]
+    name = FORK_CLONE_DIRS.get(backend_id)
+    if not name:
+        return b
+    actual = fork_dir(root, name)
+    if actual is None or actual == b.get("module_path"):
+        return b
+    b = dict(b)
+    b["module_path"] = actual
+    b["default_command"] = b["default_command"].replace(f"module/fork/{name}", actual)
+    return b
 
 
 # ---------------------------------------------------------------------------
