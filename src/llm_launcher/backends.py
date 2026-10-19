@@ -801,7 +801,9 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
                 "現在のチェックアウト suzuri/deepseek-v41 に suzuri/parallel-perf の内容を cherry-pick 済みで、"
                 "deepseek/ ツールキット (DeepSeek-V4.1 量子化・実行、将来このフォークへ合流予定) と同じ clone に同居。"
                 "エンジンバイナリと strata-<model>.json は module/strata のものを --config で共有できる "
-                "(config の \"exe\" が絶対パスのため)。検出用 .venv は module/strata/.venv へのシンボリックリンク",
+                "(config の \"exe\" が絶対パスのため)。"
+                "起動時 unrecognized arguments (exit 2) で落ちる = checkout が古い: 並列チューニング commit "
+                "(suzuri/parallel-perf 相当) を git am / cherry-pick で適用するかブランチを更新する",
         "default_command": "{python} {root}/module/fork/strata/serve/server.py",
         "check_module": "serve.server", "check_cwd": True, "health_path": "/health",
         "ready_markers": ["ready: http"],
