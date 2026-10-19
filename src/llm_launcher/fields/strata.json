@@ -1,4 +1,15 @@
 {
+ "--adapt-async": {
+  "aliases": [],
+  "help": "the adaptive VRAM expert tier's rounds do not block the windows (needs the resident RAM mode or the expert arena; also \"adapt_async\": true in the config)",
+  "type": "bool"
+ },
+ "--adapt-every": {
+  "aliases": [],
+  "help": "an adaptive-tier round every N windows (the engine's default: 4; also \"adapt_every\" in the config)",
+  "metavar": "N",
+  "type": "int"
+ },
  "--api-key": {
   "aliases": [],
   "help": "require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY. Several keys: separate them with commas (key1,key2), as llama.cpp does",
@@ -7,6 +18,17 @@
  "--api-monitor": {
   "aliases": [],
   "help": "the API request monitor at /api-monitor: keeps the last 100 requests' prompts and answers in memory (also \"api_monitor\": true in the config; off by default)",
+  "type": "bool"
+ },
+ "--batch-groups": {
+  "aliases": [],
+  "help": "with a layer split and --parallel: the slots in G groups pipelined through the GPUs, or \"auto\"; 1 = one serial window over every slot, where the adaptive tier and --batch-mtp run (also \"batch_groups\" ",
+  "metavar": "G",
+  "type": "str"
+ },
+ "--batch-mtp": {
+  "aliases": [],
+  "help": "each batch slot verifies one MTP proposal per window (needs the config's --mtp and serial windows; also \"batch_mtp\": true in the config)",
   "type": "bool"
  },
  "--before-load": {
@@ -69,6 +91,17 @@
   "help": "open the local page in the browser once the model is ready",
   "type": "bool"
  },
+ "--parallel": {
+  "aliases": [],
+  "help": "run up to N requests at once in the engine's batch slots (its --batch); more wait their turn (also \"parallel\" in the config; default: one at a time)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--piped-concurrent": {
+  "aliases": [],
+  "help": "with pipelined batch groups: read a long prompt on a thread of its own while the slots keep decoding (sets STRATA_PIPED_CONCURRENT=1 for the engine; the joining prompt pays)",
+  "type": "bool"
+ },
  "--port": {
   "aliases": [],
   "default": 8095,
@@ -95,5 +128,11 @@
   "aliases": [],
   "help": "pack tokenizer directory (falls back to a byte tokenizer if absent)",
   "type": "str"
+ },
+ "--yield-chunks": {
+  "aliases": [],
+  "help": "a prompt read with nothing decoding takes pieces of N chunks, so a waiting shorter request can cut in at their boundaries (sets STRATA_BATCH_YIELD_CHUNKS; the engine's default: 8, 1 = every chunk)",
+  "metavar": "N",
+  "type": "int"
  }
 }

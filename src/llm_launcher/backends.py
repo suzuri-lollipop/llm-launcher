@@ -534,6 +534,29 @@ def build_strata() -> dict[str, Any]:
           help="nvidia-smi の番号。空 = config の gpu"),
         F("--replicas", "データ並列レプリカ数", section="parallel", placeholder="空=1",
           help="gpu リストを N 群に分割し、群ごとにエンジンを起動してリクエストを分散"),
+        F("--parallel", "並列バッチスロット数", section="parallel", placeholder="空=config (既定は1リクエストずつ)",
+          help="エンジン内のバッチスロットで最大 N リクエストを同時処理 (超過はキュー待ち)。"
+               "config の \"parallel\" と同等で、指定時はそれが優先"),
+        F("--batch-groups", "バッチグループ数 (直列/パイプライン)", section="parallel",
+          placeholder="空=エンジン既定 (layer split ではパイプライン)",
+          help="1 = 全スロットを 1 ウィンドウで直列デコード (適応エキスパート tier と Batch MTP が有効)。"
+               "auto/N = layer split のステージ毎 N 群でパイプライン (4+ 並列の総スループットは最速だが MTP/tier 無し)。"
+               "config の \"batch_groups\" と同等"),
+        F("--batch-mtp", "Batch MTP ドラフト", section="parallel",
+          help="各バッチスロットでも MTP 提案を検証 (config の --mtp と直列ウィンドウが必要)。"
+               "1-2 並列主体で有効、CPU エキスパート負荷が高い機種では不利。\"batch_mtp\": true と同等"),
+        F("--adapt-async", "適応エキスパート tier の非ブロック化", section="parallel",
+          help="適応 VRAM tier のラウンドでウィンドウを止めない (resident RAM / expert arena 構成向け)。"
+               "実測: ソロ +5-10%、直列 4 並列 89.3→95.9 tok/s。\"adapt_async\": true と同等"),
+        F("--adapt-every", "適応 tier ラウンド間隔 (ウィンドウ数)", section="parallel", placeholder="空=4"),
+        F("--piped-concurrent", "プロンプト読み込み中もデコード継続", section="parallel",
+          help="パイプライン群で長いプロンプトを別スレッド読み込みし、スロットはデコード継続 "
+               "(実測: 読み込み中のストリーム最大停止 39.5s→1.4s、joiner の TTFT は +24% 程度の代償)。"
+               "エンジン env STRATA_PIPED_CONCURRENT=1"),
+        F("--yield-chunks", "長い読みの譲り合い単位 (チャンク数)", section="parallel", placeholder="空=8",
+          help="デコード無しのプロンプト読み込みを N チャンク単位で区切り、短いリクエストの割り込みを許可 "
+               "(1 = 毎チャンク: 実測 割り込み TTFT 30s→6.5s、長い読みは +33%)。"
+               "エンジン env STRATA_BATCH_YIELD_CHUNKS"),
         F("--lazy", "遅延ロード (初回リクエストで起動)", section="sched",
           help="API は未ロードで待ち受け、最初のリクエストでエンジンとビジョンエンコーダを起動"),
         F("--idle-unload", "アイドル自動アンロード秒", section="sched", ftype="float",
@@ -637,7 +660,10 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
                   "decode_log_interval", "tool_call_parser", "reasoning_parser"},
     # Strata: 正解を strata-<model>.json (config) が既に持っている項目は既定 OFF
     "strata": {"tokenizer", "gpu", "replicas", "idle_unload", "min_free_vram_mib",
-               "slot_save_path", "before_load", "mcp_config", "script"},
+               "slot_save_path", "before_load", "mcp_config", "script",
+               # 並列チューニング系 (2026-10): config キー / env が正解を持つので既定 OFF (ON にすると CLI が優先)
+               "parallel", "batch_groups", "batch_mtp", "adapt_async", "adapt_every",
+               "piped_concurrent", "yield_chunks"},
     # Project Maya: 同様に maya-<model>.json (config) が正解を持つ項目 / 起動のたびに不要な項目は既定 OFF
     "maya": {"config", "gpu", "gpus", "parallel", "vram_reserve_mib", "calibrate",
              "backend", "env"},
