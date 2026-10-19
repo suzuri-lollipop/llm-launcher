@@ -48,6 +48,34 @@ def port_in_use(port: int, host: str = "0.0.0.0") -> bool:
         return s.connect_ex(("127.0.0.1", port)) == 0
 
 
+# Strata 系エンジンは expert arena (数十 GiB) を cudaHostRegister でピン留めする。
+# サーバープロセスを止めてもエンジン子プロセスの終了処理(ピンの解除)に数十秒かかり、
+# その間 RSS は解放されない。そこで「停止直後の起動」が重なると実 RAM を超えて
+# アリーナを二重確保し、OS ごと固まる。stop() は解放完了を待ち、start() は
+# 解放中のエンジンが残っている間は(force でない限り)起動を拒否する。
+STRATA_ENGINE_BACKENDS = {"strata", "strata-fork", "maya"}
+_STRATA_ENGINE_EXES = {"strata", "strata.exe"}
+
+
+def lingering_engine_pids() -> list[int]:
+    """まだ生きている strata 系エンジン (--serve) の pid 一覧。非 Linux / 未取得なら []。"""
+    if os.name != "posix" or not Path("/proc").is_dir():
+        return []
+    out: list[int] = []
+    for d in Path("/proc").iterdir():
+        if not d.name.isdigit():
+            continue
+        try:
+            cmd = (d / "cmdline").read_bytes()
+        except OSError:
+            continue
+        argv = [a for a in cmd.split(b"\0") if a]
+        if len(argv) >= 2 and Path(argv[0].decode("utf-8", "replace")).name in _STRATA_ENGINE_EXES \
+                and b"--serve" in cmd:
+            out.append(int(d.name))
+    return out
+
+
 class ProcessManager:
     def __init__(self, root: Path, runs_store: JsonStore, profiles_store: JsonStore,
                  settings_store: JsonStore):
@@ -243,6 +271,16 @@ class ProcessManager:
         if not g["ok"] and not force:
             raise MemoryGuardError(g["message"] + "。空きを空けるか、force で起動してください。")
 
+        # 停止直後の起動ガード: 前のエンジンが arena を解放中なら RAM が二重確保されて
+        # OS ごと固まりうる (実測で停止後の解放に数十秒)。force でなければ拒否する。
+        ling = lingering_engine_pids()
+        if ling and not force:
+            raise MemoryGuardError(
+                f"前のエンジン (pid {', '.join(map(str, ling[:4]))}) がまだメモリを解放中です "
+                "(Strata のピン留め arena は数十 GiB で、解放に数十秒かかります)。"
+                "このまま起動すると RAM 過コミットで OS が固まるため拒否しました。"
+                "数秒待って再試行するか、force で起動してください。")
+
         env = os.environ.copy()
         # venv の python を絶対パスで直接起動しても bin/ は PATH に入らない
         # (追加するのは activate スクリプトの仕事)。flashinfer JIT のように
@@ -387,6 +425,21 @@ class ProcessManager:
                 await asyncio.wait_for(asyncio.shield(mon), 2.0)
             except asyncio.TimeoutError:
                 pass
+        # Strata 系: エンジン子プロセスの arena 解放(ピン解除)を待つ。status は "stopping" の
+        # ままなので UI は「停止中」を表示し続け、解放完了前に再起動される窓を閉じる。
+        if s.get("backend") in STRATA_ENGINE_BACKENDS:
+            drain_s = float(os.environ.get("LLM_LAUNCHER_STOP_DRAIN_S", "240"))
+            ling = lingering_engine_pids()
+            if ling:
+                self._log_note(sid, f"engine drain: 解放待ち pid {ling[:4]} (最大 {drain_s:.0f}s)")
+                t0 = time.monotonic()
+                while ling and time.monotonic() - t0 < drain_s:
+                    await asyncio.sleep(1.0)
+                    ling = lingering_engine_pids()
+                if ling:
+                    self._log_note(sid, f"engine drain: {drain_s:.0f}s 経過も未解放 pid {ling[:4]} (そのまま終了扱い)")
+                else:
+                    self._log_note(sid, f"engine drain: 解放完了 ({time.monotonic() - t0:.0f}s)")
         if self.sessions[sid]["status"] == "stopping":
             s = self.sessions[sid]
             s["status"] = "exited"
