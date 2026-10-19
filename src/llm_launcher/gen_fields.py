@@ -332,14 +332,15 @@ def _argparse_table(src: str) -> dict[str, Any]:
     return out
 
 
-def gen_strata(root: Path) -> dict[str, Any]:
+def gen_strata(root: Path, sub: str = "strata") -> dict[str, Any]:
     """Strata の CLI は serve/server.py の argparse が全て。
 
     エンジン本体の引数 (--native / --max-context / --mtp ...) は CLI ではなく
     setup.py が書く strata-<model>.json の "args" 配列に入るため、ここでは
     サーバープロセス自体の起動フラグだけを正表化する。
+    sub: "strata" (upstream submodule) または "fork/strata-fork" (フォークの worktree)。
     """
-    src = (_repo(root, "strata") / "serve" / "server.py").read_text()
+    src = (_repo(root, sub) / "serve" / "server.py").read_text()
     return _argparse_table(src)
 
 
@@ -415,6 +416,13 @@ def build(root: Path) -> dict[str, dict[str, Any]]:
         tables["deepseek"] = _argparse_table(ds.read_text())
     else:
         print("deepseek: module/fork/strata が未クローンのため skip", flush=True)
+    # Strata (fork) (module/fork/strata-fork): フォーク clone の git worktree
+    # (suzuri/parallel-perf 等) が展開済みなら、その serve/server.py から正表を生成。
+    # 未展開時は skip し、backends.py の TABLE_FALLBACK で基底 (strata) 表が流用される。
+    if (_repo(root, "fork/strata-fork") / "serve" / "server.py").exists():
+        tables["strata-fork"] = gen_strata(root, "fork/strata-fork")
+    else:
+        print("strata-fork: module/fork/strata-fork が未展開のため skip", flush=True)
     return tables
 
 

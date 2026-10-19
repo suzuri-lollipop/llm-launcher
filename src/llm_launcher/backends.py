@@ -28,7 +28,7 @@ FIELDS_DIR = Path(__file__).parent / "fields"
 
 # 派生バックエンド (fork 等) は専用の fields/<id>.json があるまで基底の正表を流用する。
 # `python -m llm_launcher.gen_fields` で fork ソースから生成すればそれが優先される。
-TABLE_FALLBACK: dict[str, str] = {"freetoken-fork": "freetoken"}
+TABLE_FALLBACK: dict[str, str] = {"freetoken-fork": "freetoken", "strata-fork": "strata"}
 
 _tables: dict[str, dict[str, Any]] = {}
 
@@ -511,16 +511,19 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
     return _backend_meta(b, fields)
 
 
-def build_strata() -> dict[str, Any]:
+def build_strata(bid: str = "strata") -> dict[str, Any]:
     """Strata (https://github.com/Niko1221/Strata) — MoE エキスパートを RAM/SSD に階層化して
     consumer GPU で大型モデルを動かすエンジン + OpenAI/Anthropic 互換サーバー。
 
     起動するのはリポジトリ直下の serve/server.py (Python) で、モデル本体の設定
     (GGUF・コンテキスト長・MTP など) は serve 層の CLI ではなく setup.py が生成する
     strata-<model>.json の "args" 配列に入る。よって GUI から出すのはサーバープロセスの
-    起動フラグ (--config / --host / --port など) だけ。
+    起動フラグ (--config / --host / --port と並列チューニング系) だけ。
+
+    bid="strata-fork": フォーク (module/fork/strata-fork worktree) 用。フィールド定義は共通で、
+    型・help の正表だけ fields/strata-fork.json (フォークの server.py から生成) を参照する。
     """
-    b = "strata"
+    b = bid
     F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
     fields = [
         F("--config", "モデル設定 JSON (strata-<model>.json)",
@@ -682,6 +685,8 @@ REQUIRED_KEYS: dict[str, set[str]] = {
 # fork バックエンドは基底 (freetoken) と同じ送信ポリシー (コピーして派生 = 個別追加可)
 DEFAULT_OFF_KEYS["freetoken-fork"] = set(DEFAULT_OFF_KEYS["freetoken"])
 REQUIRED_KEYS["freetoken-fork"] = set(REQUIRED_KEYS["freetoken"])
+DEFAULT_OFF_KEYS["strata-fork"] = set(DEFAULT_OFF_KEYS["strata"])
+REQUIRED_KEYS["strata-fork"] = set(REQUIRED_KEYS["strata"])
 
 
 def _backend_meta(bid: str, fields: list[dict[str, Any]]) -> dict[str, Any]:
@@ -766,6 +771,24 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["ready: http"],
         "default_port": "8080",
     },
+    "strata-fork": {
+        "id": "strata-fork", "name": "Strata (fork)",
+        "repo": "https://github.com/suzuri-lollipop/Strata",
+        "module_path": "module/fork/strata-fork", "kind": "python",
+        "desc": "Strata フォーク (suzuri-lollipop/Strata) の並列チューニングブランチ "
+                "(suzuri/parallel-perf: --parallel / --batch-groups / --batch-mtp / --adapt-async / "
+                "--adapt-every / --piped-concurrent / --yield-chunks と layer split + arena での "
+                "--adapt-async 対応エンジン)。module/fork/strata clone の git worktree として "
+                "module/fork/strata-fork に展開する (deepseek ブランチと同居可)。エンジンバイナリと "
+                "strata-<model>.json は module/strata のものを --config で共有できる",
+        # 展開: cd module/fork/strata && git fetch <module/strata のパス> suzuri/parallel-perf:suzuri/parallel-perf
+        #       && git worktree add ../strata-fork suzuri/parallel-perf
+        #       && ln -s ../../strata/.venv ../strata-fork/.venv
+        "default_command": "{python} {root}/module/fork/strata-fork/serve/server.py",
+        "check_module": "serve.server", "check_cwd": True, "health_path": "/health",
+        "ready_markers": ["ready: http"],
+        "default_port": "8080",
+    },
     "deepseek": {
         "id": "deepseek", "name": "DeepSeek-V4.1 3-bit (fork)",
         "repo": "https://github.com/suzuri-lollipop/Strata",
@@ -828,6 +851,7 @@ BACKENDS: dict[str, dict[str, Any]] = {
     "freetoken": build_freetoken(),
     "freetoken-fork": build_freetoken("freetoken-fork"),
     "strata": build_strata(),
+    "strata-fork": build_strata("strata-fork"),
     "maya": build_maya(),
     "deepseek": build_deepseek(),
 }

@@ -38,3 +38,20 @@ upstream submodule の `module/strata` (Niko1221/Strata) とは別のクロー�
 (GGUF 量子化、NVMe/RAM/VRAM の階層ストリーミング実行、FP8 原本との品質比較)。
 使い方と実測値は `module/fork/strata/deepseek/README.md`。
 モデル本体は `/media/nvme2/models/DeepSeek-V4.1-Flash-1017{,-IQ3}` に置きます。
+
+## strata-fork (suzuri-lollipop/Strata の並列チューニング worktree)
+
+`module/fork/strata` clone (deepseek 系ブランチ使用中でも可) から **git worktree** で
+`module/fork/strata-fork` に展開します。WebUI のバックエンド一覧に **Strata (fork)** として表示され、
+`--parallel / --batch-groups / --batch-mtp / --adapt-async / --adapt-every / --piped-concurrent / --yield-chunks`
+(2026-10 の並列チューニング) を含む 25 項目を出します。
+
+```bash
+cd module/fork/strata
+git fetch ../../strata suzuri/parallel-perf:suzuri/parallel-perf   # submodule 側からブランチ取得 (push 不要)
+git worktree add ../strata-fork suzuri/parallel-perf
+ln -s ../../strata/.venv ../strata-fork/.venv                      # 検出/起動用 python (module/strata の setup 済み venv)
+```
+
+エンジンバイナリと `strata-<model>.json` は module/strata のものを `--config` で共有できます
+(config の "exe" が絶対パスのため)。fork 専用エンジンが必要なときは strata-fork 内で ./setup.sh を実行。

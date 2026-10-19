@@ -1,0 +1,138 @@
+{
+ "--adapt-async": {
+  "aliases": [],
+  "help": "the adaptive VRAM expert tier's rounds do not block the windows (needs the resident RAM mode or the expert arena; also \"adapt_async\": true in the config)",
+  "type": "bool"
+ },
+ "--adapt-every": {
+  "aliases": [],
+  "help": "an adaptive-tier round every N windows (the engine's default: 4; also \"adapt_every\" in the config)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--api-key": {
+  "aliases": [],
+  "help": "require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY. Several keys: separate them with commas (key1,key2), as llama.cpp does",
+  "type": "str"
+ },
+ "--api-monitor": {
+  "aliases": [],
+  "help": "the API request monitor at /api-monitor: keeps the last 100 requests' prompts and answers in memory (also \"api_monitor\": true in the config; off by default)",
+  "type": "bool"
+ },
+ "--batch-groups": {
+  "aliases": [],
+  "help": "with a layer split and --parallel: the slots in G groups pipelined through the GPUs, or \"auto\"; 1 = one serial window over every slot, where the adaptive tier and --batch-mtp run (also \"batch_groups\" ",
+  "metavar": "G",
+  "type": "str"
+ },
+ "--batch-mtp": {
+  "aliases": [],
+  "help": "each batch slot verifies one MTP proposal per window (needs the config's --mtp and serial windows; also \"batch_mtp\": true in the config)",
+  "type": "bool"
+ },
+ "--before-load": {
+  "aliases": [],
+  "help": "a command run before the model is loaded again (e.g. to unload another server's model; also \"before_load\" in the config, a string or a list)",
+  "type": "str"
+ },
+ "--config": {
+  "aliases": [],
+  "help": "strata engine config (JSON: exe, args, cwd, tokenizer, model_name), written by setup.py",
+  "type": "str"
+ },
+ "--engine": {
+  "aliases": [],
+  "choices": [
+   "mock",
+   "strata"
+  ],
+  "default": "mock",
+  "type": "str"
+ },
+ "--fit-max-tokens": {
+  "aliases": [],
+  "help": "clamp max_tokens to the remaining context instead of rejecting the request (default: reject with 400, like llama.cpp; also \"fit_max_tokens\": true in the config)",
+  "type": "bool"
+ },
+ "--gpu": {
+  "aliases": [],
+  "help": "the GPU to run on, as nvidia-smi numbers them, or several for a layer split (\"0,2\"; also \"gpu\" in the config)",
+  "type": "str"
+ },
+ "--host": {
+  "aliases": [],
+  "help": "the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices on your network (set an API key); also \"host\" in the config",
+  "type": "str"
+ },
+ "--idle-unload": {
+  "aliases": [],
+  "help": "unload the model after this many seconds without requests, so other programs (games, other model servers) can use the VRAM; the next request loads it again (also \"idle_unload_s\" in the config; default",
+  "metavar": "SECONDS",
+  "type": "float"
+ },
+ "--lazy": {
+  "aliases": [],
+  "help": "start the API unloaded (the engine and the vision encoder start with the first request)",
+  "type": "bool"
+ },
+ "--mcp-config": {
+  "aliases": [],
+  "help": "a JSON file with MCP servers in Claude Desktop's format ({\"mcpServers\": {...}}); the web app's chat can use their tools (also \"mcp_servers\" in the config)",
+  "type": "str"
+ },
+ "--min-free-vram-mib": {
+  "aliases": [],
+  "help": "load an unloaded model only when this much VRAM is free, else answer 503 (also \"min_free_vram_mib\" in the config; default: always load)",
+  "type": "int"
+ },
+ "--open": {
+  "aliases": [],
+  "help": "open the local page in the browser once the model is ready",
+  "type": "bool"
+ },
+ "--parallel": {
+  "aliases": [],
+  "help": "run up to N requests at once in the engine's batch slots (its --batch); more wait their turn (also \"parallel\" in the config; default: one at a time)",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--piped-concurrent": {
+  "aliases": [],
+  "help": "with pipelined batch groups: read a long prompt on a thread of its own while the slots keep decoding (sets STRATA_PIPED_CONCURRENT=1 for the engine; the joining prompt pays)",
+  "type": "bool"
+ },
+ "--port": {
+  "aliases": [],
+  "default": 8095,
+  "type": "int"
+ },
+ "--replicas": {
+  "aliases": [],
+  "help": "data-parallel replicas (opt-in): cut the \"gpu\" list into N equal groups and run one engine on each, requests spread over them (also \"replicas\" in the config: a number, or [{\"gpus\": [0, 1]}, {\"gpus\": [",
+  "metavar": "N",
+  "type": "int"
+ },
+ "--script": {
+  "aliases": [],
+  "help": "the mock engine's answer (default: a short greeting); given more than once, requests get them in turn and the last one repeats",
+  "type": "str"
+ },
+ "--slot-save-path": {
+  "aliases": [],
+  "help": "enable POST /slots/0?action=save|restore {\"filename\": NAME} (llama-server's API): the conversation the engine holds, to or from DIR/NAME (also \"slot_save_path\" in the config)",
+  "metavar": "DIR",
+  "type": "str"
+ },
+ "--tokenizer": {
+  "aliases": [],
+  "help": "pack tokenizer directory (falls back to a byte tokenizer if absent)",
+  "type": "str"
+ },
+ "--yield-chunks": {
+  "aliases": [],
+  "help": "a prompt read with nothing decoding takes pieces of N chunks, so a waiting shorter request can cut in at their boundaries (sets STRATA_BATCH_YIELD_CHUNKS; the engine's default: 8, 1 = every chunk)",
+  "metavar": "N",
+  "type": "int"
+ }
+}
