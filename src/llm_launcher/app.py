@@ -23,8 +23,9 @@ from pydantic import BaseModel, Field, model_validator
 
 from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
-from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, backend_for, fork_dir,
-                       python_candidates, resolve_port, sections_order)
+from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv,
+                       backend_for, fork_dir, python_candidates, resolve_port,
+                       sections_order)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
@@ -1043,14 +1044,18 @@ def create_app(root: Path) -> FastAPI:
     # vLLM 等は CORS ヘッダを返さずブラウザから直叩きできないため、
     # launcher 同一オリジン経由で中継する (127.0.0.1 のセッションポートへ)。
 
-    def playground_base(sid: str) -> str:
+    def playground_base(sid: str) -> tuple[str, dict[str, str]]:
+        """(base URL, 認証ヘッダ) を返す。バックエンドに --api-key が付いている場合、
+        launcher 経由のリクエストにも Bearer を付けないと 401 になる。"""
         s = manager.sessions.get(sid)
         if not s:
             raise HTTPException(404, "セッションが見つかりません")
         port = s.get("port")
         if not port:
             raise HTTPException(400, "このセッションはポートを解決できていません (プロファイルの port を確認してください)")
-        return f"http://127.0.0.1:{port}"
+        key = api_key_from_argv(s.get("argv") or [])
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        return f"http://127.0.0.1:{port}", headers
 
     def playground_open(req: urllib.request.Request):
         """接続確立までを同期実行。失敗は HTTPException に変換する。"""
@@ -1066,10 +1071,11 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/api/playground/{sid}/models")
     async def playground_models(sid: str) -> dict[str, Any]:
-        base = playground_base(sid)
+        base, auth = playground_base(sid)
 
         def _get() -> dict[str, Any]:
-            with urllib.request.urlopen(f"{base}/v1/models", timeout=8) as r:
+            req = urllib.request.Request(f"{base}/v1/models", headers=auth)
+            with urllib.request.urlopen(req, timeout=8) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
         try:
             return await asyncio.to_thread(_get)
@@ -1082,7 +1088,7 @@ def create_app(root: Path) -> FastAPI:
 
     @app.post("/api/playground/{sid}/chat")
     async def playground_chat(sid: str, body: PlaygroundChatBody) -> Any:
-        base = playground_base(sid)
+        base, auth = playground_base(sid)
         payload: dict[str, Any] = {"messages": body.messages, "stream": body.stream}
         if body.stream:
             # OpenAI 標準の stream_options を付与し、ストリームの最終チャンクに
@@ -1099,7 +1105,8 @@ def create_app(root: Path) -> FastAPI:
             f"{base}/v1/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
             headers={"Content-Type": "application/json",
-                     "Accept": "text/event-stream" if body.stream else "application/json"},
+                     "Accept": "text/event-stream" if body.stream else "application/json",
+                     **auth},
             method="POST",
         )
         if not body.stream:

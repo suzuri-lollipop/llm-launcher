@@ -22,6 +22,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
+from .backends import api_key_from_argv
 from .process import VIA_BENCH
 from .store import JsonStore, new_id, now
 
@@ -78,17 +79,27 @@ def est_tokens(s: str) -> int:
 # ------------------------------------------------------------------- http
 
 
-def _health_ok(url: str) -> bool:
+def auth_headers(sess: dict[str, Any]) -> dict[str, str]:
+    """セッションの argv に --api-key があれば Bearer ヘッダを作る。
+    バックエンド側で Bearer 認証を有効化している場合、launcher 内の
+    ベンチマークが 401 で全滅するのを防ぐ。"""
+    key = api_key_from_argv(sess.get("argv") or [])
+    return {"Authorization": f"Bearer {key}"} if key else {}
+
+
+def _health_ok(url: str, auth: dict[str, str] | None = None) -> bool:
     try:
-        with urllib.request.urlopen(url, timeout=2.0) as r:
+        req = urllib.request.Request(url, headers=auth or {})
+        with urllib.request.urlopen(req, timeout=2.0) as r:
             return 200 <= r.status < 400
     except OSError:
         return False
 
 
-def _first_model(base: str) -> str | None:
+def _first_model(base: str, auth: dict[str, str] | None = None) -> str | None:
     try:
-        with urllib.request.urlopen(f"{base}/v1/models", timeout=8) as r:
+        req = urllib.request.Request(f"{base}/v1/models", headers=auth or {})
+        with urllib.request.urlopen(req, timeout=8) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return None
@@ -101,7 +112,8 @@ def _first_model(base: str) -> str | None:
 
 
 def _one_request(base: str, path: str, payload: dict[str, Any],
-                 stream: bool, timeout: float) -> dict[str, Any]:
+                 stream: bool, timeout: float,
+                 auth: dict[str, str] | None = None) -> dict[str, Any]:
     """OpenAI 互換リクエストを 1 本実行し、所要時間・TTFT・トークン数を返す。
 
     例外は投げず ok/error で結果を返す (ワーカー側を集計しやすくするため)。"""
@@ -110,7 +122,8 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
         base + path,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
         headers={"Content-Type": "application/json",
-                 "Accept": "text/event-stream" if stream else "application/json"},
+                 "Accept": "text/event-stream" if stream else "application/json",
+                 **(auth or {})},
         method="POST",
     )
 
@@ -378,18 +391,19 @@ class BenchManager:
             raise BenchError("このセッションはポートを解決できていません "
                              "(プロファイルの port 設定を確認してください)")
         base = f"http://127.0.0.1:{port}"
+        auth = auth_headers(sess)
         run["port"] = port
         self._progress(run, phase="waiting")
         await self._wait_ready(run, base, sess.get("health_path") or "/health",
-                               int(params["ready_timeout"]), sess["id"])
-        model = params.get("model") or await self._resolve_model(base)
+                               int(params["ready_timeout"]), sess["id"], auth)
+        model = params.get("model") or await self._resolve_model(base, auth)
         run["model"] = model
         path = "/v1/chat/completions" if params["endpoint"] == "chat" else "/v1/completions"
         seed0 = int(hashlib.md5(run["id"].encode()).hexdigest()[:8], 16)
         for si, conc in enumerate(params["concurrency"]):
             self._check_cancel(run)
             stage = await self._stage(run, si, base, path, model, params, conc,
-                                      seed0 + si * 1_000_003)
+                                      seed0 + si * 1_000_003, auth)
             run["stages"].append(stage)
             self._save(run, force=True)
             if stage["ok"] == 0:
@@ -424,23 +438,25 @@ class BenchManager:
         return live
 
     async def _wait_ready(self, run: dict[str, Any], base: str, health: str,
-                          timeout: int, sid: str) -> None:
+                          timeout: int, sid: str,
+                          auth: dict[str, str] | None = None) -> None:
         t0 = time.monotonic()
         while True:
             self._check_cancel(run)
             s = self.manager.sessions.get(sid)
             if s and s.get("status") not in ("running", "starting"):
                 raise BenchError("サーバーが起動途中で終了しました。サーバータブのログを確認してください")
-            if await asyncio.to_thread(_health_ok, f"{base}{health}"):
+            if await asyncio.to_thread(_health_ok, f"{base}{health}", auth):
                 return
             if time.monotonic() - t0 > timeout:
                 raise BenchError(f"{timeout}s 経ってもサーバーが health に応答しません。"
                                  "サーバータブのログを確認してください")
             await asyncio.sleep(1.5)
 
-    async def _resolve_model(self, base: str) -> str:
+    async def _resolve_model(self, base: str,
+                             auth: dict[str, str] | None = None) -> str:
         for i in range(3):
-            mid = await asyncio.to_thread(_first_model, base)
+            mid = await asyncio.to_thread(_first_model, base, auth)
             if mid:
                 return mid
             if i < 2:
@@ -463,7 +479,8 @@ class BenchManager:
         return body
 
     async def _stage(self, run: dict[str, Any], si: int, base: str, path: str, model: str,
-                     params: dict[str, Any], conc: int, seed: int) -> dict[str, Any]:
+                     params: dict[str, Any], conc: int, seed: int,
+                     auth: dict[str, str] | None = None) -> dict[str, Any]:
         n = int(params["num_prompts"])
         warm = int(params["warmup"])
         stream = bool(params["stream"])
@@ -484,7 +501,7 @@ class BenchManager:
                     self._check_cancel(run)
                     await loop.run_in_executor(
                         ex, functools.partial(_one_request, base, path, make_body(i),
-                                              stream, timeout))
+                                              stream, timeout, auth))
             finally:
                 ex.shutdown(wait=False)
 
@@ -509,7 +526,7 @@ class BenchManager:
                     return
                 r = await loop.run_in_executor(
                     ex, functools.partial(_one_request, base, path, make_body(i),
-                                          stream, timeout))
+                                          stream, timeout, auth))
                 results.append(r)
                 prog = run["progress"]
                 prog["done"] += 1

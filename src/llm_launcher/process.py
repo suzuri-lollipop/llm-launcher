@@ -16,8 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from . import oom
-from .backends import (BACKENDS, backend_for, python_candidates, render_argv,
-                       resolve_binary, resolve_port)
+from .backends import (BACKENDS, api_key_from_argv, backend_for, python_candidates,
+                       render_argv, resolve_binary, resolve_port)
 from .oom import MemoryGuardError
 from .store import JsonStore, new_id, now
 
@@ -545,10 +545,13 @@ class ProcessManager:
     @staticmethod
     async def _probe(s: dict[str, Any]) -> bool:
         url = f"http://127.0.0.1:{s['port']}{s.get('health_path', '/health')}"
+        key = api_key_from_argv(s.get("argv") or [])
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
 
         def _get() -> bool:
             try:
-                with urllib.request.urlopen(url, timeout=1.5) as r:
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=1.5) as r:
                     return 200 <= r.status < 400
             except OSError:
                 return False
