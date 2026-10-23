@@ -21,6 +21,10 @@ module/*/build-*/
 # 配下に clone したフォークリポジトリ自体は一切追跡しない (submodule 化もしない)
 module/fork/*/
 
+# Maya の実行時データ置き場 module/Maya-data/
+# GGUF 重み・トークナイザ等の巨大なモデルファイルを置くため一切追跡しない。
+module/Maya-data/
+
 # 開発用スクラッチ (検証スクリプト・テスト一時ファイル)
 .scratch/
 
