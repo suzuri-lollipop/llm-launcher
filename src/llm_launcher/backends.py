@@ -997,3 +997,21 @@ def resolve_port(backend: dict[str, Any], profile: dict[str, Any], argv: list[st
         return p
     d = str(backend.get("default_port", "")).strip()
     return int(d) if d.isdigit() else None
+
+
+def api_key_from_argv(argv: list[str]) -> str:
+    """レンダリング済み argv から --api-key の値を取り出す (Bearer 認証用)。
+
+    --api-key <key> / --api-key=<key> の両形式に対応し、カンマ区切りで複数
+    指定されている場合は最初の 1 つを返す。キー無し (未設定) は空文字。
+    launcher 内蔵のプレイグラウンド / ベンチマーク / ヘルスプローブが
+    Bearer 認証を要求するバックエンドへ中継する際に使う。"""
+    for i, tok in enumerate(argv):
+        if tok == "--api-key" and i + 1 < len(argv):
+            val = argv[i + 1]
+        elif tok.startswith("--api-key="):
+            val = tok.split("=", 1)[1]
+        else:
+            continue
+        return val.split(",", 1)[0].strip()
+    return ""
