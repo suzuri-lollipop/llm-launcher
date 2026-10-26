@@ -100,6 +100,17 @@ RestartSec=5s
 # restart / stop で稼働中サーバーを巻き添えにしない (再起動後「引き継ぎ」で再検出)。
 # systemd はこの設定を非推奨扱いだが、本アプリの設計 (README 動作仕様メモ) に合わせている
 KillMode=process
+# --- OOM 対策 (実測: キャリブレーションの --mmap-experts off が 81 GB を RAM へコピーし、
+#     launcher の cgroup が 117.2 GB に達したところで systemd-oomd が launcher を kill) ---
+# ManagedOOMPreference=avoid: systemd-oomd の kill 候補からこの unit を外す。oomd は
+#   oom_score_adj を見ず cgroup のメモリ使用量 / 圧迫で選ぶため、子プロセスの score を
+#   下げても launcher が選ばれてしまう。ユニット側で除外するのが正しい (ユーザーマネージャー
+#   でもこのキーは効くことを実機確認済み)。
+ManagedOOMPreference=avoid
+# MemoryHigh: 上限に近づくとカーネルがその cgroup を throttle する (kill ではなく待たせ)。
+#   実際メモリの 88%。MemoryMax を書かないのは、超過時に oomd ではなくカーネルの内圧での
+#   ページ回収に委ねるため (MemoryMax は即 kill に繋がる)。
+MemoryHigh=88%
 
 [Install]
 WantedBy=default.target

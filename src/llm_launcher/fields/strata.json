@@ -1,15 +1,4 @@
 {
- "--adapt-async": {
-  "aliases": [],
-  "help": "the adaptive VRAM expert tier's rounds do not block the windows (needs the resident RAM mode or the expert arena; also \"adapt_async\": true in the config)",
-  "type": "bool"
- },
- "--adapt-every": {
-  "aliases": [],
-  "help": "an adaptive-tier round every N windows (the engine's default: 4; also \"adapt_every\" in the config)",
-  "metavar": "N",
-  "type": "int"
- },
  "--api-key": {
   "aliases": [],
   "help": "require this key on /v1/* (Authorization: Bearer ... or x-api-key); also $STRATA_API_KEY. Several keys: separate them with commas (key1,key2), as llama.cpp does",
@@ -22,14 +11,12 @@
  },
  "--batch-groups": {
   "aliases": [],
-  "help": "with a layer split and --parallel: the slots in G groups pipelined through the GPUs, or \"auto\"; 1 = one serial window over every slot, where the adaptive tier and --batch-mtp run (also \"batch_groups\" ",
-  "metavar": "G",
+  "help": "pipeline groups: auto or a positive integer, without changing the saved config",
   "type": "str"
  },
- "--batch-mtp": {
+ "--batch-telemetry": {
   "aliases": [],
-  "help": "each batch slot verifies one MTP proposal per window (needs the config's --mtp and serial windows; also \"batch_mtp\": true in the config)",
-  "type": "bool"
+  "help": "opt in to low-rate engine decode-window samples for /v1/telemetry"
  },
  "--before-load": {
   "aliases": [],
@@ -52,7 +39,7 @@
  },
  "--fit-max-tokens": {
   "aliases": [],
-  "help": "clamp max_tokens to the remaining context instead of rejecting the request (default: reject with 400, like llama.cpp; also \"fit_max_tokens\": true in the config)",
+  "help": "clamp max_tokens to the remaining context instead of rejecting the request (the default; kept so older scripts keep working)",
   "type": "bool"
  },
  "--gpu": {
@@ -76,6 +63,11 @@
   "help": "start the API unloaded (the engine and the vision encoder start with the first request)",
   "type": "bool"
  },
+ "--max-queue": {
+  "aliases": [],
+  "help": "maximum inference calls waiting beyond effective engine slots; 0 refuses overload",
+  "type": "int"
+ },
  "--mcp-config": {
   "aliases": [],
   "help": "a JSON file with MCP servers in Claude Desktop's format ({\"mcpServers\": {...}}); the web app's chat can use their tools (also \"mcp_servers\" in the config)",
@@ -86,26 +78,49 @@
   "help": "load an unloaded model only when this much VRAM is free, else answer 503 (also \"min_free_vram_mib\" in the config; default: always load)",
   "type": "int"
  },
+ "--no-api-key": {
+  "aliases": [],
+  "help": "serve on the network without an API key (anyone who can reach the port can use the model; also \"api_key\": \"none\" in the config). Warns once, never refuses",
+  "type": "bool"
+ },
+ "--no-fit-max-tokens": {
+  "aliases": [],
+  "help": "answer 400 when prompt + max_tokens does not fit the context, like llama.cpp (also \"fit_max_tokens\": false in the config). A prompt that alone does not fit is always 400",
+  "type": "bool"
+ },
+ "--offline": {
+  "aliases": [],
+  "help": "do not fetch remote image URLs or start MCP/tool subprocesses",
+  "type": "bool"
+ },
  "--open": {
   "aliases": [],
   "help": "open the local page in the browser once the model is ready",
   "type": "bool"
  },
- "--parallel": {
+ "--owner-fd": {
   "aliases": [],
-  "help": "run up to N requests at once in the engine's batch slots (its --batch); more wait their turn (also \"parallel\" in the config; default: one at a time)",
-  "metavar": "N",
   "type": "int"
  },
- "--piped-concurrent": {
+ "--parallel": {
   "aliases": [],
-  "help": "with pipelined batch groups: read a long prompt on a thread of its own while the slots keep decoding (sets STRATA_PIPED_CONCURRENT=1 for the engine; the joining prompt pays)",
-  "type": "bool"
+  "help": "request this many simultaneous engine slots without changing the saved config",
+  "type": "int"
  },
  "--port": {
   "aliases": [],
   "default": 8095,
   "type": "int"
+ },
+ "--queue-timeout": {
+  "aliases": [],
+  "help": "maximum seconds waiting for the first engine turn (0.1..600; off by default)",
+  "type": "float"
+ },
+ "--ready-file": {
+  "aliases": [],
+  "help": "write a JSON instance record once the API is bound and model state is known",
+  "type": "str"
  },
  "--replicas": {
   "aliases": [],
@@ -118,6 +133,22 @@
   "help": "the mock engine's answer (default: a short greeting); given more than once, requests get them in turn and the last one repeats",
   "type": "str"
  },
+ "--script-cycle": {
+  "aliases": [],
+  "help": "with --script given more than once: repeat the scripts by position instead of advancing to the last one and staying there, so extra requests a harness makes (a session title, a re-ask after a tool res",
+  "type": "bool"
+ },
+ "--script-delay": {
+  "aliases": [],
+  "default": 0.0,
+  "help": "seconds to wait between the mock engine's tokens, so a turn stays live long enough for a client to cancel it; the mock honours cancellation between tokens",
+  "type": "float"
+ },
+ "--shutdown-timeout": {
+  "aliases": [],
+  "help": "opt-in graceful drain deadline in seconds (0..300) before owned requests are cancelled",
+  "type": "float"
+ },
  "--slot-save-path": {
   "aliases": [],
   "help": "enable POST /slots/0?action=save|restore {\"filename\": NAME} (llama-server's API): the conversation the engine holds, to or from DIR/NAME (also \"slot_save_path\" in the config)",
@@ -128,11 +159,5 @@
   "aliases": [],
   "help": "pack tokenizer directory (falls back to a byte tokenizer if absent)",
   "type": "str"
- },
- "--yield-chunks": {
-  "aliases": [],
-  "help": "a prompt read with nothing decoding takes pieces of N chunks, so a waiting shorter request can cut in at their boundaries (sets STRATA_BATCH_YIELD_CHUNKS; the engine's default: 8, 1 = every chunk)",
-  "metavar": "N",
-  "type": "int"
  }
 }
