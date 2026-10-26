@@ -47,6 +47,8 @@ CAPS: tuple[dict[str, Any], ...] = (
      "desc": "プロファイルの値・起動コマンド・環境変数。OFF にすると API 側でマスクする"},
     {"key": "bench", "label": "ベンチマーク", "default": False,
      "desc": "組み込みベンチマークの実行と履歴"},
+    {"key": "calibrate", "label": "キャリブレーション", "default": False,
+     "desc": "Maya / Strata のワンクリック・キャリブレーション (エンジン起動とconfig書き換えを伴う)"},
     {"key": "profiles.edit", "label": "プロファイル編集", "default": False,
      "desc": "新規・編集・削除・インポート・コマンドプレビュー"},
     {"key": "backends.edit", "label": "バックエンド設定", "default": False,
@@ -132,6 +134,9 @@ def required_cap(method: str, path: str) -> str | None:
         return "playground"
     if p.startswith("/api/benchmarks"):
         return "bench"
+    if p.startswith("/api/calibrations"):
+        # 実行はエンジン起動 + config 書き換え。閲覧も config パス・CLI ログを含むので同じ権限にする
+        return "calibrate"
     return None
 
 

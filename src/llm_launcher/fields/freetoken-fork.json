@@ -11,6 +11,18 @@
   "help": "Comma-separated hostname allowlist for client-supplied image URLs. Empty (default) allows any domain.",
   "type": "str"
  },
+ "--anthropic-inline-system": {
+  "aliases": [],
+  "choices": [],
+  "default": "auto",
+  "help": "Preserve inline system instructions when supported by the renderer, or fold them into nearby user/tool content without hoisting the prompt prefix."
+ },
+ "--api-key": {
+  "aliases": [],
+  "default": "field(default=None, repr=False)",
+  "help": "Require this key on every route except /health, sent as 'Authorization: Bearer <key>' or 'x-api-key: <key>'. Defaults to $FREETOKEN_API_KEY; unset serves without authentication.",
+  "type": "str"
+ },
  "--attention-backend": {
   "aliases": [
    "--attn"
@@ -55,6 +67,12 @@
   "aliases": [],
   "help": "Disable PyNCCL for tensor parallelism."
  },
+ "--distributed-timeout": {
+  "aliases": [],
+  "default": 60.0,
+  "help": "Seconds a TP rank waits on a collectives barrier/all-reduce before the watchdog tears the group down. Ranks that build or load for minutes (a large expert-bank tier split) need this above the 60 s def",
+  "type": "float"
+ },
  "--dtype": {
   "aliases": [],
   "choices": [
@@ -71,6 +89,15 @@
   "aliases": [],
   "help": "Use dummy weights for testing.",
   "type": "bool"
+ },
+ "--embed-weights": {
+  "aliases": [],
+  "choices": [
+   "gpu",
+   "host"
+  ],
+  "default": "gpu",
+  "help": "Where the input token embedding table lives. 'gpu' (default) keeps it in VRAM; 'host' keeps it in pinned host RAM and each lookup reads its rows over PCIe, so its VRAM goes to the expert cache and KV."
  },
  "--enable-cache-report": {
   "aliases": [],
@@ -98,6 +125,12 @@
   "aliases": [],
   "default": "()",
   "help": "GPU(s) to run on, comma-separated; entry i is TP rank i. Each entry is a GPU UUID (GPU-xxxx..., as nvidia-smi -L prints) or an nvidia-smi index",
+  "type": "str"
+ },
+ "--hf-overrides": {
+  "aliases": [],
+  "default": "None",
+  "help": "JSON object applied to the checkpoint config the model is built from, as vLLM's --hf-overrides: a nested config section is updated key by key, any other value is replaced whole. A YaRN rope_parameters",
   "type": "str"
  },
  "--host": {
@@ -209,6 +242,12 @@
   "help": "JSON object of extra keyword arguments for the checkpoint's image processor call, for family-specific knobs; applied after the token budget.",
   "type": "str"
  },
+ "--mmproj": {
+  "aliases": [],
+  "default": "None",
+  "help": "llama.cpp vision tower (mmproj GGUF) for a GGUF model. Default: a *mmproj*.gguf that fits the model in the model file's folder (BF16 > F32 > F16 > quantized when several are there); none found, or fil",
+  "type": "str"
+ },
  "--model-path": {
   "aliases": [
    "--model"
@@ -238,11 +277,23 @@
   "default": "argparse.SUPPRESS",
   "help": "[Deprecated] Use --moe-strategy."
  },
+ "--moe-bank-profile": {
+  "aliases": [],
+  "default": "None",
+  "help": "FTXP expert profile (ft-profile write-round-robin / inspect) ranking every (layer, expert) pair. With --moe-disk-tier auto and a profile given, a fraction (--moe-hot-frac, default 0.25) of the host RA",
+  "type": "str"
+ },
  "--moe-cache-auto": {
   "aliases": [],
   "default": "False",
   "help": "Auto-pick --moe-cache-size from free VRAM and expert size, MoE-priority (KV gets --kv-reserve-tokens as a floor). Not supported for owned-KV models.",
   "type": "bool"
+ },
+ "--moe-cache-mem": {
+  "aliases": [],
+  "default": "None",
+  "help": "GPU memory for the MoE expert slot cache, e.g. 12GiB or 800MiB (G, GB and GiB all mean GiB); the slot count is this over the bytes per slot.",
+  "type": "str"
  },
  "--moe-cache-policy": {
   "aliases": [],
@@ -258,11 +309,29 @@
   "help": "The fraction of all MoE experts to keep in GPU cache.",
   "type": "str"
  },
+ "--moe-cache-scope": {
+  "aliases": [],
+  "choices": [],
+  "default": "unified",
+  "help": "How MoE layers share the GPU expert slot cache: unified = one LRU pool per expert quant (all layers when they share one quant format); per-layer = each layer has its own pool. Pools are sized by --moe"
+ },
  "--moe-cache-size": {
   "aliases": [],
   "default": 0,
   "help": "The number of unified MoE expert slots on GPU.",
   "type": "int"
+ },
+ "--moe-cache-split": {
+  "aliases": [],
+  "default": "equal",
+  "help": "How pools share the slots: equal (by layer count), or profile:<path> = by expert use from a profile file. With --moe-strategy offload, a pool smaller than the expert count limits the decode batch to i",
+  "type": "str"
+ },
+ "--moe-collect-stats": {
+  "aliases": [],
+  "default": "False",
+  "help": "With the offload-family strategies: after each decode log line, log the decode MoE stats since the previous one (hit rate, and per layer-step the misses, experts fetched to the GPU and experts compute",
+  "type": "bool"
  },
  "--moe-cpu-layers": {
   "aliases": [],
@@ -276,11 +345,22 @@
   "help": "Number of CPU worker threads for --moe-strategy cpu decode experts. 0 = auto (physical cores).",
   "type": "int"
  },
- "--moe-flat-residency": {
+ "--moe-disk-tier": {
   "aliases": [],
-  "default": "False",
-  "help": "With --moe-strategy offload and a slot cache covering every expert (--moe-cache-size >= num_moe_layers * num_experts), pin each expert to a fixed GPU slot instead of cycling an LRU over them: experts ",
-  "type": "bool"
+  "choices": [
+   "auto",
+   "off",
+   "all"
+  ],
+  "default": "auto",
+  "help": "NVMe tier for the expert banks when they exceed host RAM. 'auto' (default): map the head+tail MoE layers' banks from a repacked FTW sidecar (built one-time on first serve; FREETOKEN_BANKS_DIR override",
+  "type": "str"
+ },
+ "--moe-hot-frac": {
+  "aliases": [],
+  "default": 0.25,
+  "help": "Fraction of the host RAM budget spent on the profile's hot experts (0..1; default 0.25). The rest keeps pinning whole layers.",
+  "type": "float"
  },
  "--moe-hybrid-max-fetch": {
   "aliases": [],
@@ -288,11 +368,47 @@
   "help": "For --moe-strategy hybrid: max experts fetched over PCIe per (layer, decode step); the rest of that step's misses are computed on the CPU, overlapped. -1 (default) = auto: fetch the benched pcie/cpu b",
   "type": "int"
  },
+ "--moe-locked-fetch": {
+  "aliases": [],
+  "default": -1.0,
+  "help": "For --moe-strategy hybrid with locked layers (banks over the pin quota, OS-locked instead of pinned): the share of a locked layer's misses fetched per decode step into GPU slots of its own pools, thro",
+  "type": "float"
+ },
+ "--moe-locked-max-fetch": {
+  "aliases": [],
+  "default": 8,
+  "help": "For --moe-locked-fetch: the most experts a locked layer fetches per decode step. Sizes the pinned staging: this many rows of the widest expert, per bank.",
+  "type": "int"
+ },
  "--moe-prefill-hit-d2d": {
   "aliases": [],
   "default": "False",
-  "help": "During prefill prefetch, copy cache-resident experts device-side into the double buffer and stream only the misses over PCIe (cudaMemcpyBatchAsync, CUDA >= 13.0). Effective with --moe-cache-size > 2 *",
+  "help": "During prefill prefetch, copy cache-resident experts device-side into the double buffer and stream only the misses over PCIe (CUDA >= 13.0 or HIP with batch-copy support). Effective with --moe-cache-s",
   "type": "bool"
+ },
+ "--moe-profile-out": {
+  "aliases": [],
+  "default": "None",
+  "help": "With --moe-collect-stats (implied): accumulate the decode routing histogram and write an FTXP expert profile here at shutdown, ranked hottest-first from your workload's actual routing. Feed it back wi",
+  "type": "str"
+ },
+ "--moe-ram-budget": {
+  "aliases": [],
+  "default": 0.0,
+  "help": "Machine-wide host RAM ceiling in GiB the expert banks may pin (0 = auto from MemAvailable minus headroom). Raise it only with room for the dense staging, KV host caches and page cache that ride on top",
+  "type": "float"
+ },
+ "--moe-skip-keep": {
+  "aliases": [],
+  "default": 2,
+  "help": "Routes per token the expert skip never drops (default 2).",
+  "type": "int"
+ },
+ "--moe-skip-minw": {
+  "aliases": [],
+  "default": 0.0,
+  "help": "Hybrid decode expert skip: drop CPU-computed routes whose routing weight is under this fraction of the token's routed total (top --moe-skip-keep routes always stay). 0 (default) computes every route e",
+  "type": "float"
  },
  "--moe-strategy": {
   "aliases": [],
@@ -304,7 +420,7 @@
    "hybrid"
   ],
   "default": "auto",
-  "help": "How the routed experts are served. 'auto' resolves a MoE model to the offload family (offload, or hybrid when a `ft bench bw` profile recommends it); resident 'fused' experts must be requested explici"
+  "help": "How the routed experts are served. 'auto' resolves a MoE model to 'offload', and to resident 'fused' experts on unified-memory GPUs (GB10 / DGX Spark)."
  },
  "--no-decode-fetch-overlap": {
   "aliases": [],
@@ -357,11 +473,10 @@
   "aliases": [],
   "choices": [
    "pinned",
-   "disk",
-   "swap"
+   "disk"
   ],
   "default": "disk",
-  "help": "Where a PLE n-gram table lives. 'disk' (default) reads rows straight from the checkpoint files; 'swap' maps those files read-only and lets the OS page cache hold the hot rows, so a fill costs a memory"
+  "help": "Where a PLE n-gram table lives. 'disk' (default) reads rows straight from the checkpoint files; 'pinned' preloads the whole table into page-locked host RAM."
  },
  "--port": {
   "aliases": [],
@@ -393,7 +508,8 @@
    "minimax",
    "minimax_m3",
    "muse_glimmer",
-   "gemma4"
+   "gemma4",
+   "flint"
   ],
   "default": "auto",
   "help": "Reasoning parser that splits chain-of-thought into reasoning_content for OpenAI responses. 'auto' selects per model family (gpt-oss Harmony, <think> for qwen3/glm/minimax, <mm:think> for minimax-m3, A",
@@ -424,10 +540,20 @@
   "aliases": [],
   "choices": [
    "none",
-   "mtp"
+   "mtp",
+   "lookup"
   ],
   "default": "none",
-  "help": "Speculative decoding backend. 'mtp' builds the checkpoint's MTP head (qwen4_exp only for now) and drafts one extra token per step at small batch sizes; the scheduler disables it automatically when mor"
+  "help": "Speculative decoding backend. 'mtp' builds the checkpoint's MTP head (qwen4_exp only for now) and drafts one extra token per step at small batch sizes; 'lookup' drafts up to four tokens that followed "
+ },
+ "--swa-decoder-replay": {
+  "aliases": [],
+  "choices": [
+   "bounded",
+   "exact"
+  ],
+  "default": "bounded",
+  "help": "DeepSeek-V4.1 Decoder SWA Bounded Replay. 'bounded' (default) runs the 20 decoder layers on each prompt's last 128 tokens with their sliding window truncated there, as in the tech report; 'exact' runs"
  },
  "--tensor-parallel-size": {
   "aliases": [
@@ -453,6 +579,7 @@
    "qwen3_coder",
    "mistral",
    "deepseekv32",
+   "deepseekv41",
    "gemma4",
    "glm47",
    "minimax",

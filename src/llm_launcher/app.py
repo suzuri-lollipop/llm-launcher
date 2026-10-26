@@ -10,6 +10,7 @@ import platform
 import re
 import shlex
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -29,6 +30,7 @@ from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
+from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from . import oom
 from . import rbac
 from . import sysinfo
@@ -164,6 +166,14 @@ class BenchBody(BaseModel):
         d.pop("profile_id")
         d["model"] = self.model.strip()
         return d
+
+
+class CalibrateBody(BaseModel):
+    """ワンクリック・キャリブレーション。profile_id のプロファイルを対象に、
+    Maya / Strata の「この PC 向け調整」を 1 ボタンで実行する (バックエンドはプロファイルから決まる)。"""
+    profile_id: str = Field(min_length=1)
+    # 調整後にサーバーを起動し直す (adjust 前の停止の代わり。既定 OFF)
+    restart_after: bool = False
 
 
 class PlaygroundChatBody(BaseModel):
@@ -427,6 +437,8 @@ def create_app(root: Path) -> FastAPI:
     sessions_store = JsonStore(data_dir / "sessions.json", [])
     manager = ProcessManager(root, runs_store, profiles_store, settings_store)
     bench = BenchManager(bench_store, profiles_store, manager)
+    calibrations_store = JsonStore(data_dir / "calibrations.json", [])
+    calibrate = CalibrationManager(root, profiles_store, calibrations_store, manager)
     auth = AuthManager(users_store, sessions_store)
     auth_enabled = auth_enabled_from_env()
     if auth_enabled:
@@ -530,6 +542,12 @@ def create_app(root: Path) -> FastAPI:
     async def _startup() -> None:
         migrate_profiles(profiles_store)
         bench.on_startup()
+        # キャリブレーションは 10-40 分の fire-and-forget ジョブ。launcher が OOM kill / restart されると
+        # task は死ぬがファイル上の status は "running" のまま残るので、起動時に "lost" へ回復する。
+        lost = calibrate.on_startup()
+        if lost:
+            print(f"calibration recovery: {len(lost)} 件の中断ジョブを lost にしました "
+                  f"({', '.join(lost[:4])})", file=sys.stderr)
         await manager.start_tick()
 
     @app.on_event("shutdown")
@@ -1311,6 +1329,69 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(403, "この機械は簡易画面から停止できません")
         await manager.stop(sid)
         return manager.session_public(sid)
+
+    # ------------------------------------------------------- キャリブレーション
+    # Maya / Strata の「この PC 向け調整」を 1 ボタンで実行する。エンジン起動と
+    # config 書き換えを伴うため、同じプロファイルのサーバーを止めて GPU を独占して
+    # 実行する (10-40 分の長時間ジョブ = ベンチマークと同じ live ジョブ方式)。
+    # 結果 (調整値・適用記録) は data/calibrations.json に履歴として残す。
+
+    @app.get("/api/calibrations")
+    async def list_calibrations() -> dict[str, Any]:
+        """履歴 + 実行中ジョブ。supported: キャリブレーションを持つバックエンド id 一覧。"""
+        return {"jobs": calibrate.list_jobs(), "active": calibrate.active_id,
+                "supported": sorted(CAL_BACKENDS)}
+
+    @app.get("/api/calibrations/{jid}")
+    async def get_calibration(jid: str) -> dict[str, Any]:
+        job = calibrate.get(jid)
+        if not job:
+            raise HTTPException(404, "キャリブレーションが見つかりません")
+        return job
+
+    @app.get("/api/calibrations/{jid}/log")
+    async def calibration_log(jid: str, cursor: int = 0) -> dict[str, Any]:
+        try:
+            return calibrate.live_log(jid, cursor)
+        except KeyError:
+            raise HTTPException(404, "キャリブレーションが見つかりません")
+
+    @app.post("/api/calibrations", status_code=201)
+    async def start_calibration(body: CalibrateBody, request: Request) -> dict[str, Any]:
+        profile = manager.find_profile(body.profile_id)
+        if not profile:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        bid = profile.get("backend")
+        if bid not in BACKENDS:
+            raise HTTPException(400, "このプロファイルにバックエンドが設定されていません")
+        if bid not in CAL_BACKENDS:
+            raise HTTPException(400, f"{BACKENDS[bid]['name']} はキャリブレーションに対応していません"
+                                     " (Maya / Strata のプロファイルで実行できます)")
+        try:
+            job = await calibrate.start(profile, bid, restart_after=body.restart_after,
+                                        actor=current_user(request))
+        except CalibrateError as e:
+            raise HTTPException(409, str(e))
+        return job
+
+    @app.post("/api/calibrations/{jid}/cancel")
+    async def cancel_calibration(jid: str) -> dict[str, Any]:
+        try:
+            calibrate.cancel(jid)
+        except KeyError:
+            raise HTTPException(404, "キャリブレーションが見つかりません")
+        except CalibrateError as e:
+            raise HTTPException(409, str(e))
+        return calibrate.get(jid) or {"ok": True}
+
+    @app.delete("/api/calibrations/{jid}")
+    async def delete_calibration(jid: str) -> dict[str, Any]:
+        if calibrate.get(jid) is None:
+            raise HTTPException(404, "キャリブレーションが見つかりません")
+        if calibrate.active_id == jid:
+            raise HTTPException(409, "実行中のキャリブレーションは削除できません。中断してから削除してください")
+        calibrate.delete(jid)
+        return {"ok": True}
 
     # -------------------------------------------------------------- static
 
