@@ -758,17 +758,22 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "check_module": "freetoken", "health_path": "/health",
         "ready_markers": ["Uvicorn running", "Application startup complete"],
         "default_port": "1919",
+        # 起動 JSON 主体モード (Strata 方式): values.config の JSON が argv/env の正になり、
+        # キャリブレーションの勝者もそこへ自動記載される (calibrate_lookup spec と同一形式)
+        "launch_json": True,
     },
     "freetoken-fork": {
         "id": "freetoken-fork", "name": "FreeToken (fork)",
         "repo": "https://github.com/suzuri-lollipop/FreeToken",
         "module_path": "module/fork/freetoken", "kind": "python",
         "desc": "FreeToken フォーク。module/fork/freetoken の clone を直接使用する"
-                " (llm-launcher 側ではフォルダのみ追跡、内容は追跡しない)。",
+                " (llm-launcher 側ではフォルダのみ追跡、内容は追跡しない)。未 clone / 未 install の"
+                " 状態でもセットアップタブ (📦) で clone から pip install までシェル無しで実行できる。",
         "default_command": "{python} -m freetoken",
         "check_module": "freetoken", "health_path": "/health",
         "ready_markers": ["Uvicorn running", "Application startup complete"],
         "default_port": "1919",
+        "launch_json": True,
     },
     "strata": {
         "id": "strata", "name": "Strata",
@@ -912,6 +917,42 @@ def resolve_command_tokens(root: Path, template: str, *, python: str, binary: st
 TRUTHY = {"1", "true", "yes", "on", "はい"}
 
 
+def launch_json_path(root: Path, profile: dict[str, Any]) -> Path | None:
+    """起動 JSON (Strata 方式の起動構成ファイル) のパス。config 主体モードでなければ None。"""
+    cfg = str((profile.get("values") or {}).get("config") or "").strip()
+    if not cfg:
+        return None
+    p = Path(cfg)
+    return p if p.is_absolute() else root / cfg
+
+
+def load_launch_json(root: Path, profile: dict[str, Any]) -> dict[str, Any] | None:
+    """起動 JSON を読む。形式は fork の calibrate_lookup spec と同一
+    ({python, argv, cwd, env, port, model_name}) — lookup 校正にそのまま渡せる。"""
+    p = launch_json_path(root, profile)
+    if p is None:
+        return None
+    if not p.is_file():
+        raise ValueError(f"起動 JSON が見つかりません: {p}")
+    try:
+        doc = json.loads(p.read_text("utf-8"))
+    except ValueError as e:
+        raise ValueError(f"起動 JSON を解析できません ({p.name}): {e}")
+    if not isinstance(doc, dict) or not doc.get("argv"):
+        raise ValueError(f"起動 JSON に argv がありません: {p}")
+    return doc
+
+
+def replace_arg(argv: list[str], flag: str, value: str) -> list[str]:
+    """argv 内の --flag 値を差し替える (無ければ末尾に追加)。"""
+    out = list(argv)
+    for i, tok in enumerate(out):
+        if tok == flag and i + 1 < len(out):
+            out[i + 1] = value
+            return out
+    return out + [flag, value]
+
+
 def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str,
                 binary: str, root: Path) -> list[str]:
     """バックエンド + プロファイルから最終 argv を組み立てる。"""
@@ -919,31 +960,49 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
     on = profile.get("on")
     if not isinstance(on, dict):
         on = None
-    command = (profile.get("command") or "").strip() or backend["default_command"]
-    resolved = resolve_command_tokens(root, command, python=python, binary=binary,
-                                      values=values)
-    if backend["kind"] == "binary" and not binary:
-        raise ValueError("llama-server が見つかりません。バックエンド設定でパスを指定するか、"
-                         "module/llama.cpp をビルドしてください")
-    if not resolved.strip():
-        raise ValueError("起動コマンドが空です")
-    argv = shlex.split(resolved)
-    for field in ([] if profile.get("custom_only") else backend.get("fields", [])):
-        key = field["key"]
-        # 送信 ON/OFF: on dict が明示されたプロファイルのみ尊重 (無い=旧来動作=値があれば送信)
-        if on is not None and field["type"] != "bool" and not field.get("required"):
-            if not bool(on.get(key, field.get("default_on", True))):
+    # 起動 JSON 主体モード (launch_json バックエンド + values.config): エンジン引数は
+    # JSON が正で、フォームはユーザー最小パラメータ (port / api_key) の上書きだけ担う
+    launch = load_launch_json(root, profile) if backend.get("launch_json") else None
+    if launch is not None:
+        # JSON が正: python / argv / env すべて JSON を優先する。これにより
+        # standalone (python -m freetoken.serve_spec <json>) と起動が一致し、
+        # キャリブレーション勝者の env も start 実プロセスへ効くようになる。
+        py = str(launch.get("python") or "").strip() or python
+        argv = [py, *[str(a) for a in launch["argv"]]]
+        for key, flag in (("port", "--port"), ("api_key", "--api-key")):
+            v = str(values.get(key) or "").strip()
+            if v:
+                argv = replace_arg(argv, flag, v)
+        merged = {str(k): str(v) for k, v in (launch.get("env") or {}).items()}
+        merged.update({str(k): str(v) for k, v in (profile.get("env") or {}).items()})
+        if merged:
+            profile["_resolved_env"] = merged
+    else:
+        command = (profile.get("command") or "").strip() or backend["default_command"]
+        resolved = resolve_command_tokens(root, command, python=python, binary=binary,
+                                          values=values)
+        if backend["kind"] == "binary" and not binary:
+            raise ValueError("llama-server が見つかりません。バックエンド設定でパスを指定するか、"
+                             "module/llama.cpp をビルドしてください")
+        if not resolved.strip():
+            raise ValueError("起動コマンドが空です")
+        argv = shlex.split(resolved)
+        for field in ([] if profile.get("custom_only") else backend.get("fields", [])):
+            key = field["key"]
+            # 送信 ON/OFF: on dict が明示されたプロファイルのみ尊重 (無い=旧来動作=値があれば送信)
+            if on is not None and field["type"] != "bool" and not field.get("required"):
+                if not bool(on.get(key, field.get("default_on", True))):
+                    continue
+            val = values.get(key)
+            if val is None:
                 continue
-        val = values.get(key)
-        if val is None:
-            continue
-        sval = str(val).strip()
-        if field["type"] == "bool":
-            if sval.lower() in TRUTHY:
-                argv.append(field["flag"])
-        else:
-            if sval and field["flag"]:
-                argv += [field["flag"], sval]
+            sval = str(val).strip()
+            if field["type"] == "bool":
+                if sval.lower() in TRUTHY:
+                    argv.append(field["flag"])
+            else:
+                if sval and field["flag"]:
+                    argv += [field["flag"], sval]
     extra = (profile.get("extra_args") or "").strip()
     if extra:
         try:
@@ -954,6 +1013,9 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
     # カーネル最適化の環境変数を設定
     kernel_opt = str(values.get("kernel_optimization", "")).strip()
     env = profile.get("env") or {}
+    if launch is not None:
+        # JSON の env が校正済みの正、profile.env はユーザーの一時上書き (LATENCY 等)
+        env = {**{str(k): str(v) for k, v in (launch.get("env") or {}).items()}, **env}
     if kernel_opt == "fp8_decode_linear":
         env = {**env, "FREETOKEN_FP8_DECODE_LINEAR": "1"}
     elif kernel_opt == "none":
