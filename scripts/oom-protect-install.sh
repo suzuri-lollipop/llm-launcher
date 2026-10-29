@@ -16,6 +16,10 @@
 #        systemd-oomd がスワップ逼迫で kill を始める前に (SwapUsedLimit 既定 90%)
 #        MemoryHigh でカーネルが自発的にスロットリングする。ユーザーセッション
 #        (systemd-run --user) では OOMScoreAdjust が無視されるため、必ずシステム側。
+#      → プロキシ: サービスは .bashrc を読まないため、対象ユーザーの .bashrc から
+#        HTTP(S)_PROXY / ALL_PROXY / NO_PROXY を抽出して EnvironmentFile
+#        (/etc/llm-launcher/env) に焼き込む。セットアップタブの git / uv / pip /
+#        HF ダウンロードがログインシェルと同じプロキシで走る。
 #   3. --swap: スワップを追加。MemAvailable 確保とスワップ監視の両方に効く。
 #
 set -euo pipefail
@@ -25,6 +29,7 @@ LIB_DIR="/usr/local/lib/llm-launcher"
 HELPER="${LLM_LAUNCHER_OOM_HELPER:-$LIB_DIR/oom-protect}"
 SUDOERS="/etc/sudoers.d/llm-launcher-oom-protect"
 UNIT="/etc/systemd/system/llm-launcher.service"
+ENV_FILE="/etc/llm-launcher/env"
 SWAPFILE="/swapfile"
 MODE="helper"
 USERS=()
@@ -61,9 +66,9 @@ if [[ ! -r "$HELPER_SRC" ]]; then
 fi
 
 if [[ "$MODE" == "uninstall" ]]; then
-  rm -f "$SUDOERS" "$HELPER" "$UNIT"
+  rm -f "$SUDOERS" "$HELPER" "$UNIT" "$ENV_FILE"
   systemctl daemon-reload 2>/dev/null || true
-  echo "削除しました: $HELPER $SUDOERS $UNIT"
+  echo "削除しました: $HELPER $SUDOERS $UNIT $ENV_FILE"
   echo "(llm-launcher 側は自動で 'sudo ヘルパー未導入' に戻ります)"
   exit 0
 fi
@@ -135,6 +140,22 @@ if [[ "$MODE" == "helper+systemd" ]]; then
   [[ ${mem_kb:-0} -gt 0 ]] || mem_kb=$((16 * 1024 * 1024))
   MEM_HIGH="$(( mem_kb * 85 / 100 / 1024 ))M"
   MEM_MAX="$(( mem_kb * 92 / 100 / 1024 ))M"
+  # プロキシ受け渡し: サービスは .bashrc を読まない (非ログイン / 非対話)。
+  # 対象ユーザーの .bashrc からプロキシ export を抽出して EnvironmentFile に。
+  # 以後はファイル自体を編集しても再起動で反映される (.bashrc 変更時は再実行でも可)。
+  OWNER_HOME="$(getent passwd "${USERS[0]}" | cut -d: -f6)"
+  [[ -n "$OWNER_HOME" ]] || OWNER_HOME="/home/${USERS[0]}"
+  PROXY_EXTRACTOR="$(dirname "$HELPER_SRC")/proxy-env-from-bashrc.sh"
+  install -d -m 0755 "$(dirname "$ENV_FILE")"
+  : >"$ENV_FILE" 2>/dev/null || true; chmod 600 "$ENV_FILE"   # 先に作成し権限を締めてから内容を書く (資格情報混入対策)
+  { echo "# scripts/oom-protect-install.sh が生成 — サービス再起動で反映される"
+    echo "# 出典: $OWNER_HOME/.bashrc の export *_PROXY (ここを直接編集しても可)"
+    if [[ -r "$PROXY_EXTRACTOR" ]]; then
+      bash "$PROXY_EXTRACTOR" "$OWNER_HOME/.bashrc" || true
+    fi
+  } >>"$ENV_FILE"
+  chmod 640 "$ENV_FILE"
+  chown "root:${USERS[0]}" "$ENV_FILE" 2>/dev/null || true
   cat >"$UNIT" <<UNIT
 [Unit]
 Description=llm-launcher (model server launcher)
@@ -149,6 +170,9 @@ WorkingDirectory=$PROJECT_ROOT
 Environment=PYTHONPATH=$PROJECT_ROOT/src
 Environment=LLM_LAUNCHER_HOST=127.0.0.1
 Environment=LLM_LAUNCHER_PORT=8088
+# サービスは .bashrc を読まないため、インストール時に抽出したプロキシをここで
+# 引き渡す (- 頭 = ファイル無しも起動失敗にしない。中身は再実行 or 編集で更新)
+EnvironmentFile=-$ENV_FILE
 ExecStart=$PY -m llm_launcher
 Restart=on-failure
 RestartSec=5s
@@ -168,6 +192,12 @@ WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
   echo "✔ ユニット作成: $UNIT (OOMScoreAdjust=-1000, MemoryHigh=$MEM_HIGH, MemoryMax=$MEM_MAX)"
+  if grep -q '_proxy=' "$ENV_FILE"; then
+    echo "  プロキシ: $OWNER_HOME/.bashrc から抽出 → $ENV_FILE (変更時はこのインストーラ再実行か $ENV_FILE を編集 → systemctl restart)"
+  else
+    echo "  プロキシ: $OWNER_HOME/.bashrc に *_PROXY の export なし — ダイレクト接続です"
+    echo "  (後から効かせる: $ENV_FILE に HTTP_PROXY=... 等を追記して sudo systemctl restart llm-launcher)"
+  fi
   echo "  起動: sudo systemctl enable --now llm-launcher"
   echo "  ※ これ以降 llm-launcher は systemctl で起動してください (run.sh との二重起動注意)"
   echo "  ※ MemoryHigh/MemoryMax は実メモリに合わせて $UNIT を編集してください"
