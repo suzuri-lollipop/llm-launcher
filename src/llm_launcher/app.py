@@ -31,7 +31,8 @@ from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
-from .installer import INSTALL_SPECS, ActiveJobError, InstallError, InstallManager
+from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
+                        clone_exists, current_ref)
 from . import oom
 from . import rbac
 from . import sysinfo
@@ -189,6 +190,8 @@ class InstallBody(BaseModel):
     clean: bool = False
     # 追加 extras (未指定ならバックエンド既定の "accel"、"" でコア依存のみ)
     extras: str | None = None
+    # clone / 切替先のブランチ (未指定ならバックエンド既定)。spec の refs 一覧内の名前だけ通る
+    ref: str = ""
 
 
 class ModelDownloadBody(BaseModel):
@@ -1582,8 +1585,13 @@ def create_app(root: Path) -> FastAPI:
 
     def _installable_public() -> list[dict[str, Any]]:
         # clone 前は /api/state に出ない fork でもセットアップタブで選べるよう、表示情報をここで返す
+        # refs = ブランチ選択の一覧、current_ref = 既存 clone が今いるブランチ (UI の既定選択に使う)
         return [{"id": bid, "name": BACKENDS[bid]["name"], "repo": spec["clone"],
-                 "ref": spec["ref"], "module_path": spec["module_path"], "extras": spec["extras"],
+                 "ref": spec.get("ref", ""),
+                 "refs": [{"ref": str(r["ref"]), "label": str(r.get("label") or r["ref"])}
+                          for r in (spec.get("refs") or [])],
+                 "current_ref": current_ref(root, spec), "cloned": clone_exists(root, spec),
+                 "module_path": spec["module_path"], "extras": spec["extras"],
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
                                 if BACKENDS[bid].get("model_data") else "")}
                 for bid, spec in INSTALL_SPECS.items() if bid in BACKENDS]
@@ -1612,7 +1620,7 @@ def create_app(root: Path) -> FastAPI:
     async def start_install(body: InstallBody, request: Request) -> dict[str, Any]:
         try:
             job = await installs.start_install(body.backend, clean=body.clean,
-                                               extras=body.extras,
+                                               extras=body.extras, ref=body.ref,
                                                actor=current_user(request))
         except ActiveJobError as e:
             raise HTTPException(409, str(e))
