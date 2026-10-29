@@ -32,8 +32,21 @@ cd module/fork/freetoken && ./setup.sh          # .venv 作成 + install + serve
   エンジン引数・python・env の正がこの JSON になる (キャリブレーション勝者の env も
   ここ経由で起動実プロセスへ効く)。フォームはポートと API キーの上書きだけ担う
 
-どちらの経路も同じインタープリタ・同じ env・同じ argv で起動します。従来どおり
-`./setup.sh --model ID` のように引数を直接渡す起動 (JSON を読まない) もできます。
+どちらの経路も同じインタープリタ・同じ env・同じ argv で起動します。
+
+**Strata 方式の一発起動 (setup 完結)**: `./setup.sh --model <repo id>` が
+Hugging Face から `module/fork/Freetoken-data/models/<org>--<name>` へ
+resume 対応でダウンロードし (Strata-data / Maya-data と同じ「フォルダ隣接」方式、
+`--data-dir` / `FREETOKEN_DATA_DIR` で変更可)、実パスを `freetoken-launch.json` に
+書き込み、`run-<model>.sh` 相当の **`run.sh`** を clone 先に生成します。
+以降は `./run.sh` だけで standalone 起動できます (`--model <ローカルフォルダ>` なら
+ダウンロードせず JSON にパスを記入するだけ)。JSON を読ませず引数を直接 engine へ
+渡す起動 (`./setup.sh --port 8080 ...`) も従来どおり使えます。
+
+WebUI のセットアップタブ (モデルダウンロード) でも同じ置き場を選べます: 保存先で
+「FreeToken (fork) のデータフォルダ」を選ぶと `module/fork/Freetoken-data/models/<org>--<name>`
+へ落とし (setup.sh と同一規則・同一 env)、完了後 `freetoken-launch.json` の
+`--model-path` / `model_name` だけを更新し、モデル欄のプルダウン (📦 表示) にも出ます。
 
 WebUI のバックエンド一覧には **FreeToken (fork)** として表示され、
 upstream submodule の `module/freetoken` (FreeToken) とは別々に起動できます。

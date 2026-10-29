@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
 import shutil
@@ -774,6 +775,9 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["Uvicorn running", "Application startup complete"],
         "default_port": "1919",
         "launch_json": True,
+        # fork の setup.sh と同じモデル置き場 (clone 隣接の Freetoken-data)。
+        # UI ダウンロードの保存先候補と、完了後の起動 JSON への記入に使われる
+        "model_data": "Freetoken-data",
     },
     "strata": {
         "id": "strata", "name": "Strata",
@@ -915,6 +919,19 @@ def resolve_command_tokens(root: Path, template: str, *, python: str, binary: st
 
 
 TRUTHY = {"1", "true", "yes", "on", "はい"}
+
+
+def fork_model_root(root: Path, backend: dict[str, Any]) -> Path | None:
+    """model_data バックエンドのモデル置き場。fork の setup.sh と同じ規則で
+    clone 隣接の <data>/models (Strata-data / Maya-data 方式)。
+    FREETOKEN_DATA_DIR 環境変数があればそれが最優先 (setup.sh も読む同じ env)。"""
+    rel = backend.get("model_data")
+    if not rel:
+        return None
+    env = os.environ.get("FREETOKEN_DATA_DIR", "").strip()
+    if env:
+        return Path(env).expanduser() / "models"
+    return (root / str(backend.get("module_path", ""))).parent / str(rel) / "models"
 
 
 def launch_json_path(root: Path, profile: dict[str, Any]) -> Path | None:

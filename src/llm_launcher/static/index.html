@@ -510,10 +510,11 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
     </div>
     <div class="card">
       <div class="row"><b style="font-size:15px">モデルダウンロード</b>
-        <span class="muted" style="font-size:12px">Hugging Face Hub からキャッシュ <span id="ins-hfdir" class="mono"></span> へ。完了後に対応モデル一覧へ反映します</span></div>
+        <span class="muted" style="font-size:12px">Hugging Face Hub から保存先へ (既定のキャッシュ <span id="ins-hfdir" class="mono"></span>)。完了後に対応モデル一覧へ反映します</span></div>
       <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
         <input type="text" id="dl-repo" class="mono grow" placeholder="repo id (例: Qwen/Qwen3-30B-A3B-Instruct)" style="min-width:220px">
         <input type="text" id="dl-rev" class="mono" placeholder="revision (省略可)" style="max-width:160px">
+        <select id="dl-dest" title="保存先"></select>
       </div>
       <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap">
         <input type="text" id="dl-patterns" class="mono grow" placeholder="ファイル名の絞り込み (カンマ区切り、省略可。例: *.safetensors,config.json)" style="min-width:220px">
@@ -1757,22 +1758,22 @@ function hfPickerHtml(f) {
   const hf = S.hf;
   if (hf === undefined) return `<div class="muted" style="font-size:11.5px;margin-top:4px">HFキャッシュを確認中…</div>`;
   const dirNote = `<div class="muted mono" style="font-size:10.5px;margin-top:3px">${esc(hf.cache_dir)} · <a href="#" onclick="hfReload();return false">再スキャン</a></div>`;
-  if (!hf.exists) return `<div class="muted" style="font-size:11.5px;margin-top:4px">HFキャッシュ未作成</div>${dirNote}`;
   const isGguf = S.editing?.backend === "llamacpp";
   const opts = [];
   for (const m of (hf.models || [])) {
+    const tag = m.source === "data" ? "📦 " : "";
     if (isGguf) {
-      for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
+      for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
       if (!(m.gguf || []).length && m.has_weights !== false)
-        opts.push({v: m.snapshot, label: `${m.repo_id} · (ggufなし・ディレクトリ指定)`});
+        opts.push({v: m.snapshot, label: `${tag}${m.repo_id} · (ggufなし・ディレクトリ指定)`});
     } else {
-      opts.push({v: m.snapshot, label: `${m.repo_id}${m.revision ? " · rev " + m.revision : ""}`});
+      opts.push({v: m.snapshot, label: `${tag}${m.repo_id}${m.revision ? " · rev " + m.revision : ""}`});
     }
   }
-  if (!opts.length) return `<div class="muted" style="font-size:11.5px;margin-top:4px">キャッシュにモデルがありません${isGguf ? " (gguf検出なし)" : ""}</div>${dirNote}`;
+  if (!opts.length) return `<div class="muted" style="font-size:11.5px;margin-top:4px">キャッシュ / データフォルダにモデルがありません${isGguf ? " (gguf検出なし)" : ""}</div>${dirNote}`;
   return `
     <select style="margin-top:5px" onchange="hfPick('${f.key}', this.value)">
-      <option value="">💾 HFキャッシュから選択 (${opts.length})</option>
+      <option value="">💾 キャッシュ / 📦 データフォルダから選択 (${opts.length})</option>
       ${opts.map(o => `<option value="${esc(o.v)}">${esc(o.label)}</option>`).join("")}
     </select>${dirNote}`;
 }
@@ -3312,6 +3313,7 @@ async function dlStart() {
   if (!repo) { toast("repo id を入力してください"); return; }
   if (S.ins.active) { toast("別のセットアップジョブが実行中です"); return; }
   const body = {repo_id: repo, revision: (inputVal("#dl-rev") || "").trim(),
+                backend: inputVal("#dl-dest") || "",
                 allow_patterns: (inputVal("#dl-patterns") || "").split(",").map(s => s.trim()).filter(Boolean)};
   try {
     await api("/api/installs/download", {method: "POST", body});
@@ -3389,10 +3391,23 @@ function renderSetup() {
   }
   const sp = insSpec(sel.value);
   $("#ins-hfdir").textContent = S.ins.cacheDir || "(HF キャッシュ)";
+  // 保存先: HF キャッシュ既定 + model_data を持つバックエンド (fork なら Freetoken-data)
+  const dd = $("#dl-dest");
+  const dOpts = [{v: "", l: "HF キャッシュ"}].concat(
+    specs.filter(e => e.model_data).map(e => ({v: e.id, l: `${e.name} のデータフォルダ`})));
+  const dSig = dOpts.map(o => o.v).join("|");
+  if (dSig !== S.ins._dSig) {
+    S.ins._dSig = dSig;
+    const cur = dd.value;
+    dd.innerHTML = dOpts.map(o => `<option value="${esc(o.v)}">💾 ${esc(o.l)}</option>`).join("");
+    if ([...dd.options].some(o => o.value === cur)) dd.value = cur;
+  }
+  const dSp = insSpec(dd.value);
+  $("#dl-note").textContent = S.ins.active ? "実行中のジョブがあります"
+    : (dSp ? `保存先: ${dSp.model_data}/<org>--<name> (完了後このバックエンドの起動 JSON にも記入)` : "");
   $("#ins-start").disabled = S.ins.busy || !!S.ins.active || !specs.length;
   $("#dl-start").disabled = !!S.ins.active;
   $("#ins-note").textContent = S.ins.busy ? "開始中…" : (S.ins.active ? "セットアップ実行中です (同時に 1 件)" : "");
-  $("#dl-note").textContent = S.ins.active ? "実行中のジョブがあります" : "";
   $("#ins-preview").textContent = sp
     ? `git clone --depth 1 ${sp.ref ? "-b " + sp.ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → pip install -e ".[${sp.extras}]"` : "";
   const active = (S.ins.jobs || []).find(r => r.id === S.ins.active) || null;

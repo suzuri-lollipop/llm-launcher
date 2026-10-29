@@ -38,7 +38,7 @@ import venv as venv_mod
 from pathlib import Path
 from typing import Any, Callable
 
-from .backends import BACKENDS, fork_dir
+from .backends import BACKENDS, fork_dir, fork_model_root
 from .store import JsonStore, new_id, now
 
 # ログはデータベース (installs.json) に保持する。pip 実行では行が増えるので
@@ -112,6 +112,35 @@ def seed_launch_json(module_dir: Path) -> str | None:
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
     return ("起動 JSON テンプレート freetoken-launch.json を作成しました "
             "(--model-path を編集すれば ./setup.sh と profile の起動 JSON パスが同じ構成で起動します)")
+
+
+def record_launch_json_model(root: Path, spec: dict, model_dir: Path) -> str | None:
+    """model_data へ落ちたモデルを起動 JSON の --model-path / model_name だけに記入する
+    (setup.sh の --model と同じ後始末)。ユーザーが編集した他の鍵は壊さないし、
+    JSON が無いときにテンプレを勝手に増やさない (導入済みモジュールのみ)。"""
+    module_dir = root / str(spec.get("module_path", ""))
+    path = module_dir / "freetoken-launch.json"
+    if not path.is_file():
+        return None
+    try:
+        doc = json.loads(path.read_text("utf-8-sig"))
+    except (OSError, json.JSONDecodeError) as e:
+        return f"起動 JSON を更新できませんでした (モデル記入スキップ): {e}"
+    argv = [str(a) for a in (doc.get("argv") or [])]
+    idx = next((i for i, a in enumerate(argv) if a in ("--model-path", "--model")), None)
+    if idx is not None and idx + 1 < len(argv):
+        argv[idx + 1] = str(model_dir)
+    elif idx is not None:
+        argv.append(str(model_dir))
+    else:
+        argv += ["--model-path", str(model_dir)]
+    doc["argv"] = argv
+    doc["model_name"] = model_dir.name.split("--")[-1]
+    try:
+        path.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
+    except OSError as e:
+        return f"起動 JSON を書けませんでした (モデル記入スキップ): {e}"
+    return f"起動 JSON の --model-path にモデルを記録しました: {model_dir}"
 
 
 class InstallManager:
@@ -356,9 +385,11 @@ class InstallManager:
 
     async def start_download(self, repo_id: str, *, revision: str = "",
                              allow_patterns: list[str] | None = None,
-                             local_dir: str = "",
+                             local_dir: str = "", backend: str = "",
                              actor: dict[str, Any] | None = None) -> dict[str, Any]:
-        """HF Hub から既定キャッシュへモデルをダウンロードする (app が成功後にスキャン失効)。"""
+        """HF Hub からモデルをダウンロードする。既定は HF キャッシュ (app が成功後に
+        スキャン失効)。backend に model_data 系 (freetoken-fork) を指定すると
+        setup.sh と同じ <data>/models/<org>--<name> へ置き、完了後に起動 JSON へ記入する。"""
         self._check_free()
         repo = (repo_id or "").strip()
         if not repo or not _REPO_RE.match(repo) or ".." in repo:
@@ -370,6 +401,7 @@ class InstallManager:
         for p in pats:
             if len(p) > 100 or ".." in p or p.startswith("-"):
                 raise InstallError(f"allow_patterns が不正です: {p}")
+        spec = BACKENDS.get(backend) or {}
         dest = (local_dir or "").strip()
         if dest:
             p = Path(dest).expanduser()
@@ -382,6 +414,11 @@ class InstallManager:
             if resolved == root_r or root_r not in resolved.parents:
                 raise InstallError("local_dir は launcher の root 内の下位ディレクトリのみ指定できます")
             dest = str(resolved)
+        elif spec.get("model_data"):
+            # サーバー側解決のパスなので root 制約の外 (FREETOKEN_DATA_DIR 可) でも許す。
+            # フォルダ名は setup.sh の sed 's|/|--|g' と同じ規約
+            model_root = fork_model_root(self.root, spec)
+            dest = str(model_root / repo.replace("/", "--")) if model_root else ""
         # tqdm フックが進捗と cooperative cancel の唯一の経路なので、API の提供を確認する
         try:
             from huggingface_hub import snapshot_download
@@ -391,7 +428,8 @@ class InstallManager:
         if not ok_hook:
             raise InstallError("この huggingface_hub では UI からのダウンロードは使えません")
 
-        job = self._new_job("download", actor, backend="", backend_name="Hugging Face",
+        job = self._new_job("download", actor, backend=backend if spec.get("model_data") else "",
+                            backend_name=str(spec.get("name") or "Hugging Face"),
                             repo_id=repo, revision=rev, allow_patterns=pats, local_dir=dest,
                             progress={"done": 0, "file_total": 0, "file": "",
                                       "files_done": 0, "speed_bps": 0})
@@ -464,6 +502,11 @@ class InstallManager:
             pr = job["progress"]
             self._append_log(job, f"完了: {path} ({pr['done'] / 2**30:.2f} GiB,"
                              f" {pr['files_done']} ファイル)")
+            if job.get("backend") and job.get("local_dir"):
+                note = record_launch_json_model(self.root, BACKENDS[job["backend"]],
+                                                Path(job["local_dir"]))
+                if note:
+                    self._append_log(job, note)
             job["status"] = "done"
             job["result"] = {"path": path, "bytes": pr["done"]}
         except _Cancelled:

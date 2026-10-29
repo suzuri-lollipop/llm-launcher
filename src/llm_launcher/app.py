@@ -25,8 +25,8 @@ from pydantic import BaseModel, Field, model_validator
 from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv,
-                       backend_for, fork_dir, launch_json_path, port_from_argv,
-                       python_candidates, resolve_port, sections_order)
+                       backend_for, fork_dir, fork_model_root, launch_json_path,
+                       port_from_argv, python_candidates, resolve_port, sections_order)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
@@ -192,12 +192,15 @@ class InstallBody(BaseModel):
 
 
 class ModelDownloadBody(BaseModel):
-    """Hugging Face Hub からのモデルダウンロード (既定の HF キャッシュへ)。"""
+    """Hugging Face Hub からのモデルダウンロード。backend に model_data 系を指定すると
+    そのバックエンドのデータフォルダ (freetoken-fork なら Freetoken-data) へ落ちる。"""
     repo_id: str = Field(min_length=1)
     revision: str = ""
     allow_patterns: list[str] = Field(default_factory=list)
     # 既定 (空) は HF キャッシュ。指定は launcher の root 内の下位ディレクトリのみ
     local_dir: str = ""
+    # 保存先の別形式: バックエンド ID。local_dir よりはたらき、モデル名サブフォルダが付く
+    backend: str = ""
 
 
 class PlaygroundChatBody(BaseModel):
@@ -340,6 +343,39 @@ def hf_hub_cache_dir() -> Path:
     home = os.environ.get("HF_HOME")
     base = Path(home).expanduser() if home else Path.home() / ".cache" / "huggingface"
     return base / "hub"
+
+
+def scan_data_models(models_root: Path, max_files: int = 400) -> list[dict[str, Any]]:
+    """setup.sh / UI が <data>/models/<org>--<name> へ置いたモデルを一覧化する。
+    scan_hf_cache と同じ形のレコード (snapshot はフォルダそのもの)。"""
+    out: list[dict[str, Any]] = []
+    if not models_root.is_dir():
+        return out
+    for d in models_root.iterdir():
+        if not d.is_dir():
+            continue
+        gguf: list[dict[str, Any]] = []
+        has_weights = False
+        try:
+            for f in sorted(d.iterdir()):
+                if not f.is_file():
+                    continue
+                size = f.stat().st_size
+                suf = f.suffix.lower()
+                if suf in (".safetensors", ".bin", ".pt", ".gguf") and size > 1 << 20:
+                    has_weights = True
+                if suf == ".gguf":
+                    gguf.append({"name": f.name, "size": size})
+                if len(gguf) >= max_files:
+                    break
+            mtime = d.stat().st_mtime
+        except OSError:
+            continue
+        out.append({"repo_id": d.name.replace("--", "/", 1), "snapshot": str(d),
+                    "revision": "", "has_weights": has_weights, "gguf": gguf,
+                    "source": "data", "mtime": mtime})
+    out.sort(key=lambda m: m["mtime"], reverse=True)
+    return out
 
 
 def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, Any]:
@@ -556,6 +592,8 @@ def create_app(root: Path) -> FastAPI:
             "sections": [{"id": s, "label": SECTIONS_JA.get(s, s)} for s in sections_order(b)],
             "default_port": b.get("default_port", ""),
             "launch_json": bool(b.get("launch_json")),
+            # ダウンロード保存先候補 (セットアップタブ)。無いバックエンドは空文字
+            "model_data": str(fork_model_root(root, b)) if b.get("model_data") else "",
             # UI インストール対応 (installer.INSTALL_SPECS): ボタン表示の判定に使う
             "installable": bid in INSTALL_SPECS,
             "detection": det,
@@ -1170,7 +1208,16 @@ def create_app(root: Path) -> FastAPI:
     @app.get("/api/hf-models")
     async def hf_models(refresh: int = 0) -> dict[str, Any]:
         if refresh or hf_cache_state["data"] is None or time.monotonic() - hf_cache_state["ts"] > 15:
-            hf_cache_state["data"] = await asyncio.to_thread(scan_hf_cache)
+            def _scan() -> dict[str, Any]:
+                data = scan_hf_cache()
+                data["models"] = [{**m, "source": "cache"} for m in data["models"]]
+                dirs = [fork_model_root(root, b) for b in BACKENDS.values() if b.get("model_data")]
+                for mr in dirs:
+                    if mr is not None:
+                        data["models"] += scan_data_models(mr)
+                data["model_dirs"] = [str(mr) for mr in dirs if mr is not None and mr.is_dir()]
+                return data
+            hf_cache_state["data"] = await asyncio.to_thread(_scan)
             hf_cache_state["ts"] = time.monotonic()
         return hf_cache_state["data"]
 
@@ -1536,7 +1583,9 @@ def create_app(root: Path) -> FastAPI:
     def _installable_public() -> list[dict[str, Any]]:
         # clone 前は /api/state に出ない fork でもセットアップタブで選べるよう、表示情報をここで返す
         return [{"id": bid, "name": BACKENDS[bid]["name"], "repo": spec["clone"],
-                 "ref": spec["ref"], "module_path": spec["module_path"], "extras": spec["extras"]}
+                 "ref": spec["ref"], "module_path": spec["module_path"], "extras": spec["extras"],
+                 "model_data": (str(fork_model_root(root, BACKENDS[bid]))
+                                if BACKENDS[bid].get("model_data") else "")}
                 for bid, spec in INSTALL_SPECS.items() if bid in BACKENDS]
 
     @app.get("/api/installs")
@@ -1577,6 +1626,7 @@ def create_app(root: Path) -> FastAPI:
             job = await installs.start_download(body.repo_id, revision=body.revision,
                                                 allow_patterns=body.allow_patterns,
                                                 local_dir=body.local_dir,
+                                                backend=body.backend,
                                                 actor=current_user(request))
         except ActiveJobError as e:
             raise HTTPException(409, str(e))
