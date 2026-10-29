@@ -294,6 +294,16 @@ def record_launch_json_model(root: Path, spec: dict, model_dir: Path) -> str | N
     return f"起動 JSON の --model-path にモデルを記録しました: {model_dir}"
 
 
+def _uv_version(uv_path: str) -> str:
+    """uv --version を1回だけ取ってくる (ジョブログのヘッダ用。取れなくても続行)。"""
+    try:
+        r = subprocess.run([uv_path, "--version"], capture_output=True, text=True,
+                           timeout=10, env=install_env())
+        return (r.stdout or "").strip() or (r.stderr or "").strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
 class InstallManager:
     """1 件ずつのインストール / ダウンロード実行 + 履歴。"""
 
@@ -557,7 +567,8 @@ class InstallManager:
         module_dir = (self.root / job["module_path"]).resolve()
         self._append_log(job, proxy_log_line())
         if job.get("uv_path"):
-            self._append_log(job, f"uv: {job['uv_path']}")
+            ver = await asyncio.to_thread(_uv_version, str(job["uv_path"]))
+            self._append_log(job, f"uv: {job['uv_path']} ({ver or '--version 取得できず'})")
         switched = False   # ブランチ切替が起きたら依存を入れ直す (precheck スキップを効かせない)
         try:
             if job.get("clean") and (module_dir / ".venv").exists():
@@ -591,11 +602,25 @@ class InstallManager:
                         job["result"] = {"already_installed": True}
                         return
                     continue
-                rc, _out = await self._run_step(job, step)
+                rc, out = await self._run_step(job, step)
                 if job["id"] in self._cancel:
                     raise _Cancelled()
                 if rc != 0:
-                    raise InstallError(f"{name} が失敗しました (exit {rc}) — ログ末尾を確認してください")
+                    # 失敗した step の出力末尾をここに複写する — UI はログ冒頭を
+                    # 見せるため、スクロールしないと原因 (uv の error: 行) が読めない
+                    tail = [ln.rstrip() for ln in (out or "").splitlines() if ln.strip()][-30:]
+                    if tail:
+                        self._append_log(job, f"----- {name} 失敗時の出力末尾 ({rc=}) -----")
+                        for ln in tail:
+                            self._append_log(job, ln)
+                    first = next((ln for ln in tail if "error" in ln.lower()),
+                                 tail[0] if tail else "")
+                    hint = (" — exit 2 は uv/pip が起動前に死ぬ類 (uv が古い / -e 先が Python プロジェクトで"
+                            "ない) で、ネットワーク遮断 (exit 1) とは別です" if rc == 2 else "")
+                    msg = f"{name} が失敗しました (exit {rc}){hint}"
+                    if first:
+                        msg += f" — {first[:200]}"
+                    raise InstallError(msg)
             if spec.get("check") == "freetoken":
                 note = seed_launch_json(module_dir)
                 if note:
