@@ -501,12 +501,14 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
       <div class="row"><b style="font-size:15px">インストール</b>
         <span class="muted" style="font-size:12px">repo clone → .venv 作成 → pip install を順に実行します (同時に 1 ジョブ)</span></div>
       <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <select id="ins-backend" class="grow" style="min-width:200px"></select>
+        <select id="ins-backend" class="grow" style="min-width:200px" onchange="insPickBackend()"></select>
+        <select id="ins-ref" style="min-width:190px" onchange="insPickRef()" title="clone / 切替先のブランチ"></select>
         <label class="switch"><input type="checkbox" id="ins-clean"><span class="track"></span><span class="lab" style="font-size:12.5px">クリーン再インストール (.venv を破棄)</span></label>
         <button class="primary" id="ins-start" onclick="insStart()">📦 インストール実行</button>
         <span class="muted" id="ins-note"></span>
       </div>
-      <div class="muted mono" id="ins-preview" style="font-size:11px;margin-top:8px"></div>
+      <div class="muted" id="ins-branch" style="font-size:12px;margin-top:6px"></div>
+      <div class="muted mono" id="ins-preview" style="font-size:11px;margin-top:6px"></div>
     </div>
     <div class="card">
       <div class="row"><b style="font-size:15px">モデルダウンロード</b>
@@ -3243,10 +3245,12 @@ function renderCalHistory(active) {
    install は clone / venv / pip、download は HF キャッシュへの転送で progress に進捗が載る。 */
 const INS_ST = {queued: ["info", "待機"], running: ["warn", "実行中"], done: ["ok", "完了"],
                 failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "中断 (launcher 再起動)"]};
-const INS_STEPS = {clone: "clone", venv: "venv 作成", precheck: "確認", install: "pip install", verify: "import 確認"};
+const INS_STEPS = {clone: "clone", branch: "ブランチ切替", venv: "venv 作成", precheck: "確認",
+                   install: "pip install", verify: "import 確認"};
 function insInit() {
   if (S.ins) return;                        // 何度呼ばれても状態を失わない (jobs / logs)
   S.ins = { jobs: [], active: null, installable: [], cacheDir: "", busy: false, _bSig: "",
+            _rSig: "", refPick: {},
             logs: {}, logCursor: {}, open: "", notified: {} };
 }
 async function insPoll(force) {
@@ -3295,11 +3299,16 @@ async function insStart() {
   const bid = $("#ins-backend").value;
   if (!bid) { toast("インストールするバックエンドを選んでください"); return; }
   if (S.ins.active) { toast("別のセットアップジョブが実行中です"); return; }
-  const nm = (backendById(bid) || {}).name || bid;
-  if (!confirm(`${nm} をインストールしますか?\nclone / .venv 作成 / pip install を実行します (初回は数 GB をダウンロード)`)) return;
+  const nm = insName(bid), sp = insSpec(bid), ref = insRef(bid);
+  const what = !ref ? "clone / .venv 作成 / pip install"
+    : (!sp || !sp.cloned ? `${ref} を clone → .venv 作成 → pip install`
+      : (sp.current_ref === ref ? `既存 clone (${ref}) のまま .venv 作成 / pip install`
+        : `ブランチを ${sp.current_ref || "?"} → ${ref} に切り替えて .venv 作成 / pip install`));
+  if (!confirm(`${nm} をインストールしますか?\n${what} を実行します (初回は数 GB をダウンロード)`)) return;
   S.ins.busy = true; renderSetup();
   try {
-    await api("/api/installs", {method: "POST", body: {backend: bid, clean: $("#ins-clean").checked === true}});
+    await api("/api/installs", {method: "POST", body: {backend: bid, clean: $("#ins-clean").checked === true,
+                                                       ref}});
     toast("インストールを開始しました");
   } catch (e) {
     toast("開始失敗: " + e.message);
@@ -3375,7 +3384,20 @@ function insProg(run) {                                 // download の進捗 (�
 const insSpec = bid => (S.ins.installable || []).find(e => e.id === bid) || null;
 /* fork は未 clone 時 /api/state に出ないので、表示名は installable 側から引く */
 const insName = bid => (insSpec(bid) || {}).name || (backendById(bid) || {}).name || bid;
-const insTitle = r => r.kind === "download" ? `⬇️ ${esc(r.repo_id)}` : `📦 ${esc(insName(r.backend))}`;
+/* 選択中のブランチ (refs を持つバックエンドだけ)。未選択なら spec の既定 */
+const insRef = bid => {
+  const sp = insSpec(bid); if (!sp) return "";
+  const refs = sp.refs || []; if (!refs.length) return "";
+  const pick = S.ins.refPick[bid];
+  if (refs.some(r => r.ref === pick)) return pick;
+  if (refs.some(r => r.ref === sp.current_ref)) return sp.current_ref;
+  return refs.some(r => r.ref === sp.ref) ? sp.ref : refs[0].ref;
+};
+function insPickBackend() { renderSetup(); }
+function insPickRef() { S.ins.refPick[$("#ins-backend").value] = $("#ins-ref").value; renderSetup(); }
+const insTitle = r => r.kind === "download" ? `⬇️ ${esc(r.repo_id)}`
+  : `📦 ${esc(insName(r.backend))}`
+    + (r.ref ? ` <span class="muted mono" style="font-size:12px">${esc(r.ref)}</span>` : "");
 function renderSetup() {
   insInit();
   const sel = $("#ins-backend");
@@ -3390,6 +3412,17 @@ function renderSetup() {
     if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
   }
   const sp = insSpec(sel.value);
+  // ブランチ選択: refs を持つバックエンドだけ出す (選択はバックエンドごとに記憶)
+  const rs = $("#ins-ref");
+  const refs = (sp && sp.refs) || [];
+  const rSig = sel.value + "|" + refs.map(r => r.ref).join(",") + "|" + ((sp && sp.current_ref) || "") + (sp && sp.cloned ? "C" : "");
+  if (rSig !== S.ins._rSig) {
+    S.ins._rSig = rSig;
+    rs.innerHTML = refs.map(r => `<option value="${esc(r.ref)}">${esc(r.label)} (${esc(r.ref)})</option>`).join("");
+    rs.value = insRef(sel.value);
+  }
+  rs.style.display = refs.length ? "" : "none";
+  const ref = insRef(sel.value);
   $("#ins-hfdir").textContent = S.ins.cacheDir || "(HF キャッシュ)";
   // 保存先: HF キャッシュ既定 + model_data を持つバックエンド (fork なら Freetoken-data)
   const dd = $("#dl-dest");
@@ -3408,8 +3441,16 @@ function renderSetup() {
   $("#ins-start").disabled = S.ins.busy || !!S.ins.active || !specs.length;
   $("#dl-start").disabled = !!S.ins.active;
   $("#ins-note").textContent = S.ins.busy ? "開始中…" : (S.ins.active ? "セットアップ実行中です (同時に 1 件)" : "");
-  $("#ins-preview").textContent = sp
-    ? `git clone --depth 1 ${sp.ref ? "-b " + sp.ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → pip install -e ".[${sp.extras}]"` : "";
+  $("#ins-branch").textContent = !sp ? "" : (!refs.length ? "" :
+    (!sp.cloned ? `未 clone — ${ref} を clone します`
+      : (sp.current_ref === ref ? `既存 clone は ${ref} 済み — ブランチは変えません`
+        : (sp.current_ref ? `既存 clone は ${sp.current_ref} — ${ref} へ切り替えます (未コミットの変更があれば失敗)`
+          : `既存 clone のブランチが判別できないため ${ref} への切替を試みます`))));
+  $("#ins-preview").textContent = !sp ? "" : (!sp.cloned
+    ? `git clone --depth 1 ${ref ? "-b " + ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → pip install -e ".[${sp.extras}]"`
+    : (sp.current_ref === ref
+        ? `既存 clone (${ref}) → .venv 作成 → pip install -e ".[${sp.extras}]"`
+        : `git fetch + checkout ${ref} → .venv 作成 → pip install -e ".[${sp.extras}]"`));
   const active = (S.ins.jobs || []).find(r => r.id === S.ins.active) || null;
   renderInsActive(active);
   renderInsHistory(active);

@@ -9,15 +9,24 @@ clone 後は自由にブランチ切替・コミット・push ができます。
 ## freetoken (suzuri-lollipop/FreeToken)
 
 **シェルを介さない方法**: llm-launcher を起動して WebUI の **セットアップタブ (📦)** で
-「FreeToken (fork)」を選び、📦 インストール実行を押すだけです。
-clone (`suzuri/develop` を `--depth 1`) → `.venv` 作成 → `pip install -e ".[accel]"` →
+「FreeToken (fork)」を選び、ブランチ (**安定版 `suzuri/product`** / **開発版 `suzuri/develop`**、
+既定は安定版) を選んで 📦 インストール実行を押すだけです。
+clone (`--depth 1 --branch <選んだブランチ>`) → `.venv` 作成 → `pip install -e ".[accel]"` →
 import 確認までランチャーが実行し、ログ・進捗・中断ボタンはこの画面に出ます
 (バックエンドカードの「📦 インストール」ボタンからも飛べます)。
+
+**すでに clone 済みのとき**は、選んだブランチが現在のブランチと違えば
+`git fetch origin <branch>` → `git checkout` を install より前に実行します (venv / pip は
+そのあと)。安全弁として、追跡ファイルに未コミットの変更があるときは切替を失敗にしてお知らせし、
+同じ名前のローカルブランチが既にあるときは `merge --ff-only` で進む分だけ進めます
+(ローカルの独自コミットは壊しません)。ブランチを変えずに入れ直すだけなら、
+現在のブランチ (画面に出る `current_ref`) を選べば clone は触られません。
 
 シェルでやる場合は llm-launcher のルートディレクトリで:
 
 ```bash
-git clone --branch suzuri/develop https://github.com/suzuri-lollipop/FreeToken module/fork/freetoken
+git clone --branch suzuri/product https://github.com/suzuri-lollipop/FreeToken module/fork/freetoken
+# (開発版を使うなら --branch suzuri/develop)
 cd module/fork/freetoken && ./setup.sh          # .venv 作成 + install + serve 起動 (Strata 同様)
 # ./setup.sh --no-start なら install のみ。uv があれば uv pip、無ければ venv の pip を使う
 ```
