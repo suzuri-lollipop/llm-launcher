@@ -50,7 +50,13 @@ LOG_TAIL = 400
 INSTALL_SPECS: dict[str, dict[str, Any]] = {
     "freetoken-fork": {
         "clone": "https://github.com/suzuri-lollipop/FreeToken",
-        "ref": "suzuri/develop",
+        # refs が UI のブランチ選択に出る一覧、ref が未指定時の既定 (安定版)。
+        # clone 済みの clone は選択ブランチへ fetch + checkout で寄せる (branch ステップ)。
+        "ref": "suzuri/product",
+        "refs": [
+            {"ref": "suzuri/develop", "label": "開発版"},
+            {"ref": "suzuri/product", "label": "安定版"},
+        ],
         "fork_name": "freetoken",        # module/fork/ 下の実ディレクトリ (大小文字無視)
         "module_path": "module/fork/freetoken",
         "check": "freetoken",
@@ -59,6 +65,7 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
     "freetoken": {
         "clone": "https://github.com/FlashML-org/FreeToken",
         "ref": "",                       # 上流の既定ブランチ
+        "refs": [],                      # 上流はブランチ選択を出さない
         "fork_name": "",
         "module_path": "module/freetoken",
         "check": "freetoken",
@@ -70,6 +77,8 @@ _EXTRAS_RE = re.compile(r"^[A-Za-z0-9._-]+(,[A-Za-z0-9._-]+)*$")
 _MODULE_RE = re.compile(r"^[a-z_][a-z0-9_.]*$")
 _REPO_RE = re.compile(r"^[^/\s][^\s]{0,199}$")
 _REVISION_RE = re.compile(r"^[A-Za-z0-9._\-/]{1,100}$")
+# ブランチ名の実在性は一覧 (refs) でしかねず、こちらは argv に渡して良い形かの防具
+_REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._\-/]{0,99}$")
 
 
 class InstallError(Exception):
@@ -89,6 +98,59 @@ def _module_rel(root: Path, spec: dict[str, Any]) -> str:
     if spec["fork_name"]:
         return fork_dir(root, spec["fork_name"]) or spec["module_path"]
     return spec["module_path"]
+
+
+def allowed_refs(spec: dict[str, Any]) -> list[str]:
+    """このバックエンドで選べるブランチ (UI の選択一覧 = サーバー側の許容一覧)。"""
+    refs = [str(r.get("ref") or "").strip() for r in (spec.get("refs") or [])]
+    refs = [r for r in refs if r]
+    if refs:
+        return refs
+    default = str(spec.get("ref") or "").strip()
+    return [default] if default else []
+
+
+def resolve_ref(spec: dict[str, Any], ref: str) -> str:
+    """UI が選んだブランチを既定値込みで決め、一覧に無い名前を弾く。
+
+    ブランチ名は git の argv へ入る (先頭 `-` や `..` は引数注入 / パストラバーサルの元) ので、
+    形式的な検査に加えて allowed_refs (spec 側のホワイトリスト) を通った名前だけを渡す。
+    """
+    want = (ref or "").strip() or str(spec.get("ref") or "").strip()
+    if not want:
+        return ""
+    if want not in allowed_refs(spec):
+        raise InstallError("このバックエンドでインストールできるブランチではありません: "
+                           f"{want} (一覧: {', '.join(allowed_refs(spec)) or 'なし'})")
+    if not _REF_RE.match(want) or ".." in want or "//" in want or want.endswith("/"):
+        raise InstallError(f"ブランチ名が不正です: {want}")
+    return want
+
+
+def clone_exists(root: Path, spec: dict[str, Any]) -> bool:
+    """module_path に clone があるか (UI の「clone します / 切替えます」表示と needs_clone の正)。"""
+    mod = root / _module_rel(root, spec)
+    return mod.is_dir() and any(mod.iterdir())
+
+
+def current_ref(root: Path, spec: dict[str, Any]) -> str:
+    """既存 clone が今どこで checkout されているか (UI の既定選択と切替表示用)。
+
+    git が無い / clone が無い / bare でない等均合しないときは "" (= 不明)。
+    セットアップタブの描画ごとに走るため、失敗を投げず短時間で返す。
+    """
+    if not allowed_refs(spec):
+        return ""
+    mod = root / _module_rel(root, spec)
+    if not (mod / ".git").exists():
+        return ""
+    try:
+        r = subprocess.run(["git", "-C", str(mod), "rev-parse", "--abbrev-ref", "HEAD"],
+                           capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    head = (r.stdout or "").strip()
+    return head if r.returncode == 0 and head and head != "HEAD" else ""
 
 
 def seed_launch_json(module_dir: Path) -> str | None:
@@ -246,9 +308,13 @@ class InstallManager:
     # ------------------------------------------------------------ インストール
 
     async def start_install(self, backend_id: str, *, extras: str | None = None,
-                            clean: bool = False,
+                            clean: bool = False, ref: str = "",
                             actor: dict[str, Any] | None = None) -> dict[str, Any]:
-        """clone -> .venv -> pip install -e を 1 ボタンで実行する (同時に 1 件だけ)。"""
+        """clone -> .venv -> pip install -e を 1 ボタンで実行する (同時に 1 件だけ)。
+
+        ref (ブランチ) は spec["refs"] の一覧内だけ通る。未 clone 時はそのブランチを clone し、
+        clone 済み時は選択ブランチへ fetch + checkout する step を挟む。
+        """
         self._check_free()
         spec = INSTALL_SPECS.get(backend_id)
         if not spec:
@@ -256,6 +322,7 @@ class InstallManager:
         extras_str = spec["extras"] if extras is None else (extras or "").strip()
         if extras_str and not _EXTRAS_RE.match(extras_str):
             raise InstallError("extras はカンマ区切りの英数字のみです (例: accel)")
+        branch = resolve_ref(spec, ref)
         check = spec["check"]
         if not _MODULE_RE.match(check):
             raise InstallError("内部設定エラー: check が不正です")
@@ -263,7 +330,8 @@ class InstallManager:
         # root が相対パスだと argv[0] が subprocess の新 cwd 基準で解決されて 127 になる
         module_dir = (self.root / module_rel).resolve()
         module_dir.parent.mkdir(parents=True, exist_ok=True)
-        needs_clone = not module_dir.is_dir() or not any(module_dir.iterdir())
+        needs_clone = not clone_exists(self.root, spec)
+
         if needs_clone and not spec["clone"]:
             raise InstallError(f"{module_rel} がありません")
         tool = "uv" if shutil.which("uv") else "pip"
@@ -274,10 +342,13 @@ class InstallManager:
         steps: list[dict[str, Any]] = []
         if needs_clone:
             argv = ["git", "clone", "--depth", "1"]
-            if spec["ref"]:
-                argv += ["--branch", spec["ref"]]
+            if branch:
+                argv += ["--branch", branch]
             argv += [spec["clone"], str(module_dir)]
             steps.append({"name": "clone", "argv": argv, "cwd": str(module_dir.parent)})
+        elif branch:
+            # clone 済みでも「選んだブランチ」に寄せる (venv / pip より前に置く)
+            steps.append({"name": "branch"})
         steps.append({"name": "venv"})
         steps.append({"name": "precheck", "argv": verify_argv, "cwd": str(module_dir)})
         spec_arg = f".[{extras_str}]" if extras_str else "."
@@ -292,7 +363,8 @@ class InstallManager:
         job = self._new_job("install", actor, backend=backend_id,
                             backend_name=BACKENDS.get(backend_id, {}).get("name", backend_id),
                             module_path=module_rel, tool=tool,
-                            extras=extras_str, clean=bool(clean), needs_clone=needs_clone)
+                            extras=extras_str, clean=bool(clean), needs_clone=needs_clone,
+                            ref=branch)
         job["steps"] = [s["name"] for s in steps]
         self._tasks[job["id"]] = asyncio.create_task(self._run_install(job, spec, steps))
         return self._public(job)
@@ -324,11 +396,69 @@ class InstallManager:
             return ".venv を作成しました (uv)"
         return ".venv は既存です"
 
+    async def _switch_branch(self, job: dict[str, Any], module_dir: Path, ref: str) -> bool:
+        """clone 済みの clone を選択ブランチへ fetch + checkout する (切替を起こしたら True)。
+
+        ユーザーの作業ツリーとローカルコミットを壊さないことが先:
+        追跡ファイルに未コミット変更があれば切替を失敗にしてお知らせし (未追跡の
+        freetoken-launch.json / .venv は邪魔しない)、同じ名前のローカルブランチが
+        既にあるときは --ff-only で進む分だけ進める (独自コミットはそのまま)。
+        """
+        git = ["git", "-C", str(module_dir)]
+        rc, cur = await self._exec(git + ["rev-parse", "--abbrev-ref", "HEAD"], module_dir)
+        if rc != 0:
+            raise InstallError(
+                f"{module_dir} が git リポジトリではない (または git が使えない) ため、"
+                f"{ref} に切り替えられません。ブランチを選んで入れ直すにはこのフォルダを"
+                "削除してからインストールし直してください")
+        cur = cur.strip()
+        if cur == ref:
+            self._append_log(job, f"ブランチは選択と同じです ({ref})")
+            return False
+        rc, dirty = await self._exec(git + ["status", "--porcelain", "--untracked-files=no"],
+                                     module_dir)
+        if rc != 0:
+            raise InstallError("git status が実行できません (clone を確認してください)")
+        if dirty.strip():
+            raise InstallError(
+                f"未コミットの変更があるため {cur} → {ref} に切り替えられません。"
+                "commit / stash するか、git clone し直し (フォルダ削除) でインストールし直してください")
+        # shallow clone (--depth 1) は浅いまま追うため、そのときだけ --depth を付ける
+        shallow = (module_dir / ".git" / "shallow").exists()
+        fetch = git + ["fetch"] + (["--depth", "1"] if shallow else []) + [
+            "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}"]
+        rc, _ = await self._run_step(job, {"name": "branch", "argv": fetch,
+                                           "cwd": str(module_dir)})
+        if job["id"] in self._cancel:
+            raise _Cancelled()
+        if rc != 0:
+            raise InstallError(f"git fetch origin {ref} が失敗しました — ログ末尾を確認してください")
+        rc, _ = await self._exec(git + ["show-ref", "--verify", "--quiet", f"refs/heads/{ref}"],
+                                 module_dir)
+        has_local = rc == 0
+        argv = (git + ["checkout", ref]) if has_local else \
+               (git + ["checkout", "-b", ref, "--track", f"refs/remotes/origin/{ref}"])
+        rc, _ = await self._run_step(job, {"name": "branch", "argv": argv, "cwd": str(module_dir)})
+        if job["id"] in self._cancel:
+            raise _Cancelled()
+        if rc != 0:
+            raise InstallError(f"{ref} に checkout できませんでした — ログ末尾を確認してください")
+        self._append_log(job, f"ブランチを {cur} → {ref} に切り替えました")
+        if has_local:
+            # ローカルに同じ名のブランチがあった: 速い fast-forward だけ origin まで進める
+            rc, _ = await self._run_step(job, {"name": "branch", "argv": git + [
+                "merge", "--ff-only", f"refs/remotes/origin/{ref}"], "cwd": str(module_dir)})
+            if rc != 0:
+                self._append_log(job, f"{ref} はローカルに独自コミットがあるため origin の位置へは"
+                                      "進めませんでした (現在のコミットで続けます)")
+        return True
+
     async def _run_install(self, job: dict[str, Any], spec: dict[str, Any],
                            steps: list[dict[str, Any]]) -> None:
         job["status"] = "running"
         self._save()
         module_dir = (self.root / job["module_path"]).resolve()
+        switched = False   # ブランチ切替が起きたら依存を入れ直す (precheck スキップを効かせない)
         try:
             if job.get("clean") and (module_dir / ".venv").exists():
                 self._append_log(job, "クリーン再インストール: .venv を削除します")
@@ -342,10 +472,15 @@ class InstallManager:
                     note = await asyncio.to_thread(self._venv_ensure, job, module_dir)
                     self._append_log(job, note)
                     continue
+                if name == "branch":
+                    job["step"] = name
+                    switched = await self._switch_branch(job, module_dir, str(job.get("ref") or ""))
+                    continue
                 if name == "precheck":
-                    # すでに導入済みなら install をスキップ (押し直しで 2 GB を引き直さない)
+                    # すでに導入済みなら install をスキップ (押し直しで 2 GB を引き直さない)。
+                    # ブランチを切った直後は依存セットが変わり得るのでスキップしない
                     rc, _ = await self._exec(step["argv"], Path(step["cwd"]))
-                    if rc == 0 and not job.get("clean"):
+                    if rc == 0 and not job.get("clean") and not switched:
                         self._append_log(job, "インストール済みです (変更なし)")
                         if spec.get("check") == "freetoken":
                             # 導入済みでも起動 JSON だけ無い環境 (setup.sh 以前から有る clone) は補う
