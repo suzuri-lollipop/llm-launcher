@@ -13,3 +13,6 @@
 [submodule "module/maya"]
 	path = module/maya
 	url = https://github.com/mw00/project-maya.git
+[submodule "module/vllm"]
+	path = module/vllm
+	url = https://github.com/vllm-project/vllm.git
