@@ -49,6 +49,9 @@ from .store import JsonStore, new_id, now
 # ログはデータベース (installs.json) に保持する。インストール実行では行が増えるので
 # 直近 LOG_TAIL 行だけ残す (calibrate / bench と同じ)。
 LOG_TAIL = 400
+# \r で同じ行を上書きする進捗出力 (uv / hf のダウンロードバー) を取り込む間隔。
+# 大きいと UI の進捗が鈍くなり、小さいとログが膨らむ。
+PROGRESS_MIN_INTERVAL = 1.0
 
 # UI からインストールできるバックエンド。strata / maya は setup.sh / maya.sh 側が
 # 対話プロンプトを含むため UI 化していない (導線を壊さない範囲で今後追加する)。
@@ -355,13 +358,17 @@ class InstallManager:
         return self._public(job) if job else None
 
     def live_log(self, jid: str, cursor: int = 0) -> dict[str, Any]:
-        """ジョブのログを cursor 以降で返す (cursor = 前回の start + len(lines))。"""
+        """ジョブのログを cursor 以降で返す。cursor / start / total はすべて
+        「切り詰め込みの絶対行番号」 — 前方が切り詰められた分は job["log_base"] に
+        入っているので、窓が動いてもクライアントのカーソルは壊れない。
+        クライアントは start + len(lines) を次の cursor に送ればよい。"""
         job = self.jobs.get(jid)
         if not job:
             raise KeyError(jid)
         logs = job.get("logs") or []
-        cursor = max(0, min(int(cursor or 0), len(logs)))
-        return {"lines": logs[cursor:], "start": cursor, "total": len(logs)}
+        base = int(job.get("log_base") or 0)
+        local = min(max(int(cursor or 0) - base, 0), len(logs))
+        return {"lines": logs[local:], "start": base + local, "total": base + len(logs)}
 
     def supports(self, backend_id: str) -> bool:
         return backend_id in INSTALL_SPECS
@@ -379,7 +386,11 @@ class InstallManager:
         logs = job.setdefault("logs", [])
         logs.append(strip)
         if len(logs) > LOG_TAIL:
-            del logs[:len(logs) - LOG_TAIL]
+            cut = len(logs) - LOG_TAIL
+            del logs[:cut]
+            # 切り詰めた行数は絶対オフセットとして覚ます (live_log のカーソルは絶対番号)。
+            # これが無いとクライアントのカーソルが窓の位置とずれてログが凍る。
+            job["log_base"] = int(job.get("log_base") or 0) + cut
         self._save()
 
     def _new_job(self, kind: str, actor: dict[str, Any] | None, **fields: Any) -> dict[str, Any]:
@@ -895,17 +906,39 @@ class InstallManager:
         self._procs[job["id"]] = proc
         out: list[str] = []
         kept = 0
+        carry = b""
+        prog_next = 0.0
         try:
             assert proc.stdout is not None
             while True:
-                line = await proc.stdout.readline()
-                if not line:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
                     break
-                text = line.decode("utf-8", "replace")
-                self._append_log(job, text)
-                if kept < 96 * 1024:
-                    out.append(text)
-                    kept += len(text)
+                carry += chunk
+                # uv / hf は進捗を \r で同じ行の上書きで出す。readline() だと \n が
+                # 来るまで (= ダウンロード完了まで) 固まって見えるので \r でも区切る。
+                # \r 区切りの進捗行は PROGRESS_MIN_INTERVAL 秒に 1 行へ間引く。
+                while True:
+                    i = min((j for j in (carry.find(b"\n"), carry.find(b"\r")) if j >= 0),
+                            default=-1)
+                    if i < 0:
+                        break
+                    seg, sep = carry[:i], carry[i:i + 1]
+                    carry = carry[i + 1:]
+                    text = seg.decode("utf-8", "replace")
+                    if sep == b"\n" or time.monotonic() >= prog_next:
+                        if sep == b"\r":
+                            prog_next = time.monotonic() + PROGRESS_MIN_INTERVAL
+                        if text.strip():
+                            self._append_log(job, text)
+                        if kept < 96 * 1024:
+                            out.append(text + "\n")
+                            kept += len(text)
+            if carry:
+                text = carry.decode("utf-8", "replace")
+                if text.strip():
+                    self._append_log(job, text)
+                out.append(text + "\n")
             rc = proc.returncode if proc.returncode is not None else await proc.wait()
         finally:
             self._procs.pop(job["id"], None)

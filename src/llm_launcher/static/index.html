@@ -3101,8 +3101,8 @@ async function calPollLog(jid) {
   try {
     const r = await api(`/api/calibrations/${jid}/log?cursor=${cur}`);
     const lines = r.lines || [];
-    S.cal.logs[jid] = ((S.cal.logs[jid] || "") + lines.map(l => l + "\n")).slice(-20000);
-    S.cal.logCursor[jid] = cur + lines.length;
+    S.cal.logs[jid] = ((S.cal.logs[jid] || "") + lines.map(l => l + "\n").join("")).slice(-20000);
+    S.cal.logCursor[jid] = (r.start || 0) + lines.length;   // start は絶対行番号 (切り詰め窓の外は無視)
   } catch { /* ignore */ }
 }
 /* 履歴 (終了済み / 中断済み) のログを取得する。実行中の live tail は calPollLog が積むだけなので、
@@ -3117,14 +3117,31 @@ async function calOpenLog(jid) {
   try {
     const r = await api(`/api/calibrations/${jid}/log?cursor=0`);
     S.cal.logs[jid] = (r.lines || []).join("\n");
-    S.cal.logCursor[jid] = (r.lines || []).length;
+    S.cal.logCursor[jid] = (r.start || 0) + (r.lines || []).length;
   } catch (e) { S.cal.logError = e.message; }
   renderCalibrate();
 }
 function calLogBox(jid, maxH = 260) {
   const logs = S.cal.logs[jid] || "";
   const tail = logs.split("\n").filter(Boolean).slice(-120).join("\n");
-  return `<div class="logwrap"><pre class="logbox" style="max-height:${maxH}px">${esc(tail || "(ログ無し / 取得できませんでした)")}</pre></div>`;
+  return `<div class="logwrap"><pre class="logbox" data-logkey="k:${esc(jid)}" style="max-height:${maxH}px">${esc(tail || "(ログ無し / 取得できませんでした)")}</pre></div>`;
+}
+/* 周期再描画 (innerHTML 差し替え) でログ欄のスクロール位置を保つ。これがないと
+   ポーリングのたびに scrollTop=0 に戻り「ログの一番上に飛ぶ」。末尾にいた場合は
+   追従 (新ログで下へ)、読み上げ中の位置で止まっていた場合はその位置を復元する。 */
+function logScrollSnap(el) {
+  const m = {};
+  el.querySelectorAll("[data-logkey]").forEach(p => {
+    m[p.dataset.logkey] = {top: p.scrollTop,
+                           stick: p.scrollHeight - p.scrollTop - p.clientHeight < 60};
+  });
+  return m;
+}
+function logScrollBack(el, m) {
+  el.querySelectorAll("[data-logkey]").forEach(p => {
+    const s = m[p.dataset.logkey];
+    if (s) p.scrollTop = s.stick ? p.scrollHeight : s.top;
+  });
 }
 function calBadge() {
   const nb = $("#nb-cal"); if (!nb) return;
@@ -3221,6 +3238,7 @@ function renderCalibrate() {
 function renderCalActive(run) {
   const el = $("#cal-active");
   if (!run) { el.innerHTML = ""; return; }
+  const _ls = logScrollSnap(el);
   const skew = run.status === "running" || run.status === "queued" ? (Date.now() / 1000) - (S.cal._recv || 0) : 0;
   const secs = (run.finished_at ? run.finished_at : Date.now() / 1000) - (run.started_at || 0);
   const logs = S.cal.logs[run.id] || "";
@@ -3243,14 +3261,17 @@ function renderCalActive(run) {
       ${run.restart_after && run.status === "done" ? `· <span style="color:var(--ok)">再起動済み</span>` : ""}
     </div>
     ${run.report ? calSettingsTable(run.report) : ""}
-    <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
+    <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
   </div>`;
+  logScrollBack(el, _ls);
 }
 function renderCalHistory(active) {
   const el = $("#cal-history");
+  const _ls = logScrollSnap(el);
   const runs = (S.cal.jobs || []).filter(r => r.id !== active?.id);
   if (!runs.length) {
     el.innerHTML = `<div class="empty" style="margin-top:12px">キャリブレーション履歴はまだありません。上でプロファイルを選んで 🎯 キャリブレーション実行。</div>`;
+    logScrollBack(el, _ls);
     return;
   }
   el.innerHTML = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
@@ -3280,6 +3301,7 @@ function renderCalHistory(active) {
         : calLogBox(r.id, 320)}</div>` : ""}
     </div>`;
   }).join("");
+  logScrollBack(el, _ls);
 }
 
 /* ============================================================= セットアップ (① インストール / ② モデルDL / ③ キャリブレーション) */
@@ -3333,10 +3355,12 @@ async function insPollLog(jid) {
   const cur = S.ins.logCursor[jid] || 0;
   try {
     let r = await api(`/api/installs/${jid}/log?cursor=${cur}`);
-    if ((r.total || 0) < cur) r = await api(`/api/installs/${jid}/log?cursor=0`);  // サーバー側が切り詰めたら全取り直し
+    if ((r.total || 0) < cur) r = await api(`/api/installs/${jid}/log?cursor=0`);  // cursor/total は絶対行番号。total が減る = リセットのみ
     const lines = r.lines || [];
     if (r.start === cur && lines.length)
       S.ins.logs[jid] = ((S.ins.logs[jid] || "") + (S.ins.logs[jid] ? "\n" : "") + lines.join("\n")).slice(-40000);
+    else if (r.start > cur)   // 古い行がログ窓 (LOG_TAIL) から切り詰められた
+      S.ins.logs[jid] = ((S.ins.logs[jid] ? S.ins.logs[jid] + "\n" : "") + `(${r.start - cur} 行はログ窓から切り詰め済み)\n` + lines.join("\n")).slice(-40000);
     else if (r.start === 0) S.ins.logs[jid] = lines.join("\n");
     S.ins.logCursor[jid] = r.start + lines.length;
   } catch { /* ignore */ }
@@ -3623,7 +3647,9 @@ function renderInsActive(run) {
   if (!el) return;
   const c = S.cal || {};
   const cal = calUiOn() ? (c.jobs || []).find(r => r.id === c.active) : null;
+  const _ls = logScrollSnap(el);
   el.innerHTML = (run ? insActiveCard(run) : "") + (cal ? calActiveCardSetup(cal) : "");
+  logScrollBack(el, _ls);
 }
 function insActiveCard(run) {
   const secs = (run.finished_at ? run.finished_at : Date.now() / 1000) - (run.started_at || Date.now() / 1000);
@@ -3642,7 +3668,7 @@ function insActiveCard(run) {
       <span class="muted mono">${fmtUp(secs)}</span>
       ${run.error ? `<span style="color:var(--err);font-size:12px">${esc(String(run.error).slice(0, 200))}</span>` : ""}
     </div>
-    <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
+    <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
   </div>`;
 }
 function calActiveCardSetup(run) {
@@ -3661,7 +3687,7 @@ function calActiveCardSetup(run) {
       <span class="muted mono">${fmtUp(secs)}</span>
       ${run.error ? `<span style="color:var(--err);font-size:12px">${esc(String(run.error).slice(0, 200))}</span>` : ""}
     </div>
-    <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
+    <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
   </div>`;
 }
 /* 履歴は 3 種 (インストール / モデルDL / キャリブレーション) を開始時刻順で1本に束ねる。
@@ -3675,11 +3701,12 @@ function insMerged() {
 }
 function renderInsHistory(active) {
   const el = $("#ins-history");
+  const _ls = logScrollSnap(el);
   const busy = {};
   if (active) busy[active.id] = 1;
   if (calUiOn() && S.cal && S.cal.active) busy[S.cal.active] = 1;
   const runs = insMerged().filter(r => !busy[r.id]);
-  if (!runs.length) { el.innerHTML = `<div class="empty" style="margin-top:12px">セットアップ履歴はまだありません。</div>`; return; }
+  if (!runs.length) { el.innerHTML = `<div class="empty" style="margin-top:12px">セットアップ履歴はまだありません。</div>`; logScrollBack(el, _ls); return; }
   el.innerHTML = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
     const open = S.ins.open === r.id;
     const tail = (S.ins.logs[r.id] || "").split("\n").filter(Boolean).slice(-120).join("\n");
@@ -3704,9 +3731,10 @@ function renderInsHistory(active) {
         <span class="grow"></span>
         <button class="ghost danger" onclick="insDelete('${r.id}')">削除</button>
       </div>
-      ${open ? `<div class="logwrap" style="padding:0"><pre class="logbox" style="max-height:320px;margin-top:6px">${esc(tail || "(ログ無し)")}</pre></div>` : ""}
+      ${open ? `<div class="logwrap" style="padding:0"><pre class="logbox" data-logkey="k:${esc(r.id)}" style="max-height:320px;margin-top:6px">${esc(tail || "(ログ無し)")}</pre></div>` : ""}
     </div>`;
   }).join("");
+  logScrollBack(el, _ls);
 }
 
 /* ============================================================= boot */
