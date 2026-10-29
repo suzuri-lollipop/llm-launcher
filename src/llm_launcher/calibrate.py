@@ -1,4 +1,4 @@
-"""ワンクリック・キャリブレーション: Maya / Strata の「この PC 向け調整」を launcher から実行する。
+"""ワンクリック・キャリブレーション: Maya / Strata / FreeToken の「この PC 向け調整」を launcher から実行する。
 
 背景:
   Maya (module/maya) と Strata (module/strata) はどちらも「この PC でモデルを最速にする設定」を
@@ -11,6 +11,19 @@
          → `--review-result <report.json>` → `--apply-result <report.json> --exclusive` の順に実行する。
          measure / apply はどちらもエンジン起動を伴い、GPU を独占していなければならない
          (保存済み profile が必須。launcher のプロファイルから同名の Strata profile を作って使う)。
+
+  FreeToken (module/fork/freetoken) には MTP ゲートの CLI キャリブレータが無く、launcher 自身が
+  「候補パラメータごとにエンジン起動 → greedy プローブ → 停止」を繰り返す。対象は env で
+  切り替えられるエンジン内部パラメータ (MTP ゲート 8 種 + mtp プロファイルでは chain 2 種)
+  だけで、ユーザビリティに関わるもの (tp / コンテキスト長 / メモリ比率など) は対象外。
+  勝者は profile の env、または起動 JSON 主体モード (Strata 方式: values.config の JSON が
+  argv/env の正 = fork の calibrate_lookup spec と同一形式) ではその JSON の env に
+  書き戻すので次回起動から効く (Strata の --apply-result 相当)。座標降下 1 パス・
+  約 15-18 セルで 40-60 分。レイテンシ内訳は fork 側の [latency] プローク
+  (FREETOKEN_LATENCY) が情報源で、計測中だけ有効にしてレポートに抄録を残す
+  (profile には書かない)。--speculative lookup のプロファイルは fork 同梱の
+  python -m freetoken.calibrate_lookup を CLI 実行し (起動 JSON モードではその JSON を
+  --config にそのまま渡す)、勝者 4 キーを同じ要領で書き戻す。
 
   launcher 側はこれを「1 ボタン」で実行できるようにする:
     - バックエンドごとのコマンド列をここで組み立てる (UI/API は backend とプロファイルだけ指定する)
@@ -34,26 +47,165 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import re
 import shlex
 import signal
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
-from .backends import BACKENDS, backend_for
-from .oom import apply_score, meminfo
+from . import bench
+from .backends import (BACKENDS, backend_for, launch_json_path, load_launch_json,
+                       replace_arg)
+from .oom import MemoryGuardError, apply_score, meminfo
 from .process import pid_alive
 from .store import JsonStore, new_id, now
 
-# キャリブレーションを提供するバックエンド (fork も基底と同じ CLI を使う)
-CAL_BACKENDS = {"maya": "maya", "strata": "strata", "strata-fork": "strata"}
+# キャリブレーションを提供するバックエンド (fork も基底と同じ手段を使う。
+# FreeToken だけ CLI が無く、launcher が in-process で計測する)
+CAL_BACKENDS = {"maya": "maya", "strata": "strata", "strata-fork": "strata",
+                "freetoken": "freetoken", "freetoken-fork": "freetoken"}
 
 # ログはデータベース (calibrations.json) に保持するが、長い実行では件数が増えるので
 # 直近 LOG_TAIL 行だけ残す (cursor は「残っている行の添字」= UI は len から取り直す)。
 LOG_TAIL = 400
+
+# ---------------------------------------------------------------- FreeToken 計測グリッド
+# 座標降下で sweep するのは MTP ゲート (エンジン内部パラメータ) だけ。デフォルト値は
+# fork 側のコードが正 (python/freetoken/scheduler/scheduler.py / engine/config.py)。
+# 候補は env で切り替えられるものに限る — tp / コンテキスト / メモリ等の
+# ユーザビリティ項目は対象外 (ユーザーが決める範囲)。
+FREETOKEN_MTP_DEFAULTS: dict[str, str] = {
+    "FREETOKEN_MTP_MIN_P": "0",
+    "FREETOKEN_MTP_MIN_ACCEPTANCE": "0.35",
+    "FREETOKEN_MTP_REJECT_STREAK": "3",
+    "FREETOKEN_MTP_SKIP_STEPS": "8",
+    "FREETOKEN_MTP_RESYNC_LAG": "8",
+    "FREETOKEN_MTP_COLD_START": "0",
+    "FREETOKEN_MTP_ACCEPT_WINDOW": "64",
+    # 未設定時の実効値は ACCEPT_WINDOW 追従 (scheduler.py)。 winner 正規化で実効値を明示する
+    "FREETOKEN_MTP_RESUME_AFTER": "64",
+    "FREETOKEN_MTP_LOOKUP_CHAIN": "0",
+    "FREETOKEN_MTP_CHAIN_K": "2",
+}
+FREETOKEN_MTP_GRID: list[tuple[str, list[str]]] = [
+    ("FREETOKEN_MTP_MIN_P", ["0.3", "0.5"]),            # K=1 の推定妥当性しきい値 p*≈0.3-0.5
+    ("FREETOKEN_MTP_MIN_ACCEPTANCE", ["0.5", "0.6"]),   # 発動判定をもっと厳しく (EV の勝ち窓)
+    ("FREETOKEN_MTP_REJECT_STREAK", ["2", "5"]),        # 連続失敗で休む閾値 (既定 3) を両方向
+    ("FREETOKEN_MTP_SKIP_STEPS", ["4", "16"]),          # 休止後の再試行間隔 (既定 8) を両方向
+    ("FREETOKEN_MTP_RESYNC_LAG", ["16"]),
+    ("FREETOKEN_MTP_COLD_START", ["1"]),                # ゲート発動を最初から許可
+    ("FREETOKEN_MTP_ACCEPT_WINDOW", ["24", "128"]),     # 発動判定窓 (既定 64) を両方向
+    ("FREETOKEN_MTP_RESUME_AFTER", ["32", "128"]),      # 窓失敗後の停止ステップ数 (既定=窓長)
+]
+# chain (--speculative mtp 専用): MTP ドラフトに lookup の続きを連鎖させる v1 移植のゲート。
+# 効果はコピ型テキストで出るため、chain を測る run は copy プローブを 1 本追加する
+FREETOKEN_MTP_CHAIN_GRID: list[tuple[str, list[str]]] = [
+    ("FREETOKEN_MTP_LOOKUP_CHAIN", ["1"]),              # 連鎖を有効化 (既定 0 = off)
+    ("FREETOKEN_MTP_CHAIN_K", ["1", "3"]),              # 連鎖長 (既定 2) を両方向
+]
+FT_IMPROVE = 0.02             # 現ベストより 2% 超速いときだけ採用 (実行間ノイズ未満は無視)
+FT_AUTO_PAR_LOSS = 0.02        # auto: 単流最優でも並行上限でこの率を超えて負けたら並行最優に差し替え
+# auto フェーズ D: 勝者構成に対するマイクロ調整 (品質中立の A/B ノブのみ —
+# 品質トレードオフ系 (FP8_DECODE_LINEAR / moe_skip_minw 等) と安全マージン系
+# (VRAM_START_MARGIN 等) は意図的に対象外)。**この機材で no-op のノブも含める**:
+# 様々な PC で 1 回だけ校正する運用なので、hybrid / CPU 実行系など他の構成で効く
+# ものも全部測る (no-op セルは差が出ず不採用になるだけ)。
+FT_MICRO_GRID: list[tuple[str, list[str]]] = [
+    # 転送 / all-reduce 系 (既定: SHM_AR 160, DUAL_STREAM 0, FETCH_OVERLAP_MIN_ROWS 2,
+    # DUAL/OVERLAP_GATHER_BPB 2, H2D_BLOCKS auto=8, TP_BANK_STAGGER 1)
+    ("FREETOKEN_SHM_AR_MAX_KIB", ["320"]),
+    ("FREETOKEN_DUAL_STREAM_DECODE", ["1"]),
+    ("FREETOKEN_FETCH_OVERLAP_MIN_ROWS", ["1"]),
+    ("FREETOKEN_DUAL_GATHER_BPB", ["1", "4"]),
+    ("FREETOKEN_OVERLAP_GATHER_BPB", ["4"]),
+    ("FREETOKEN_H2D_BLOCKS_PER_BANK", ["4", "16"]),
+    ("FREETOKEN_TP_BANK_STAGGER", ["0"]),
+    # prefill ペーシング / ステージング系 (既定: DEBT_S 2.0, CHUNK_TARGET 0=off,
+    # STAGING_ROWS 64, AUTO_PROMOTE 0)。並行プローブは時間差到着なので混在負荷で測れる
+    ("FREETOKEN_PREFILL_DEBT_S", ["1.0", "4.0"]),
+    ("FREETOKEN_ADAPTIVE_CHUNK_TARGET_S", ["0.05"]),
+    ("FREETOKEN_PREFILL_STAGING_ROWS", ["32", "128"]),
+    ("FREETOKEN_PREFILL_AUTO_PROMOTE", ["1"]),
+    # CPU 実行系 (locked/disk 層が発動する低 RAM 機で有効。既定: SPIN=50ms park,
+    # LOCKED_FETCH_THREADS=max(2,min(4,cpus/4)))
+    ("FREETOKEN_CPU_MOE_SPIN", ["0"]),
+    ("FREETOKEN_LOCKED_FETCH_THREADS", ["1", "8"]),
+    # hybrid バックエンド系 (auto 選択される機材で有効。既定: MIN_BS 2 (tp>1),
+    # OVERLAP 1, FETCH recency, PREFILL_FETCH_FRACTION は policy 解決)
+    ("FREETOKEN_HYBRID_MIN_BS", ["1"]),
+    ("FREETOKEN_HYBRID_OVERLAP", ["0"]),
+    ("FREETOKEN_HYBRID_FETCH", ["lowest_id"]),
+    ("FREETOKEN_PREFILL_FETCH_FRACTION", ["0.5"]),
+    # モデル固有のドラフトヘッド配線 (qwen4_exp 以外は no-op。drafter 側の変更なので
+    # greedy 出力は verify が保証し、変わるのは acceptance だけ)
+    ("FREETOKEN_MTP_WIRING", ["norm_mix_fc"]),
+]
+# 勝者モードで論理的に絶対に効かないノブだけスキップする (セル 1 本 = 起動 1 回の無駄防止)。
+# 「この機材では不要」を理由にしたスキップはしない (他 PC での 1 回校正が前提のため)
+FT_MICRO_MODES: dict[str, set[str]] = {
+    "FREETOKEN_MTP_WIRING": {"mtp"},
+}
+FT_MICRO_IMPROVE = 0.02       # 単流 +2% 超だけ採用 (sweep と同じノイズ帯)
+FT_MICRO_PAR_REGRESS = 0.02   # 採用で並行スコアを 2% 超悪化させない (差し替え規則のミラー)
+FT_PAR_STAGGER_S = 0.75       # 並行プローブのレーン時間差 (prefill/decode 混在を作る)
+FT_PROBE_WORDS = (64, 512)    # 短文 (デコード主軸) + 長文 (prefill 混在)。合算 tok/s をスコアに
+FT_PROBE_COPY_WORDS = 256     # chain/lookup 発動用の逐語コピプローブ (mtp run だけ追加)
+FT_PROBE_MAX_TOKENS = 128     # 全セル同一の greedy 出力長 (MTP ゲートは greedy 専用 = temp 0 必須)
+FT_PROBE_SEED = 0x50EC7       # プロンプトは全セル同一シードで同条件比較にする
+FT_PROBE_TIMEOUT = 300.0
+FT_READY_TIMEOUT = 900.0      # エンジン起動 (モデルロード) 上限。FT_CAL_READY_TIMEOUT_S で変更可
+FT_WARM_RETRY_S = 180.0       # warmup 中の一時 503 (loading/rebuild) を待つ猶予
+# 計測中だけ fork 側の [latency] プロークを有効化 (レイテンシ内訳の抄録用。profile には書かない)
+FT_LATENCY_ENV = {"FREETOKEN_LATENCY": "1", "FREETOKEN_LATENCY_EVERY_S": "5"}
+# 起動ログの disk tier / locked 層 発動行 (banks はランク実体のサイズ)
+FT_FIT_PAT = re.compile(r"banks ([0-9.]+) GiB (?:exceed the|> pin budget) ([0-9.]+) GiB")
+
+
+def ft_short(param: str) -> str:
+    return param.removeprefix("FREETOKEN_MTP_").lower()
+
+
+def ft_candidates(param: str, env: dict[str, str]) -> list[str]:
+    """現在の有効値 (設定値 > コード既定) に対して試す候補値。同じ値はスキップ。"""
+    cur = str(env.get(param) or "").strip() or FREETOKEN_MTP_DEFAULTS.get(param, "")
+    if (param == "FREETOKEN_MTP_CHAIN_K"
+            and str(env.get("FREETOKEN_MTP_LOOKUP_CHAIN") or "0").strip() != "1"):
+        return []   # chain が無効なうちは連鎖長を測っても全セル同一結果になる
+    all_grid = dict(FREETOKEN_MTP_GRID + FREETOKEN_MTP_CHAIN_GRID)
+    return [v for v in all_grid.get(param, []) if v != cur]
+
+
+def ft_grid(speculative: str) -> list[tuple[str, list[str]]]:
+    """プロファイルの speculative モードに対する実測グリッド。
+
+    chain の 2 キーは --speculative mtp のリクエストでしか発動しない
+    (FREETOKEN_MTP_LOOKUP_CHAIN は MTP verify 専用) ので、mtp 以外では測らない。"""
+    if speculative == "mtp":
+        return FREETOKEN_MTP_GRID + FREETOKEN_MTP_CHAIN_GRID
+    return list(FREETOKEN_MTP_GRID)
+
+
+def ft_health_status(url: str, auth: dict[str, str] | None = None) -> tuple[bool, dict | None]:
+    """/health を GET して (http_ok, JSON or None)。
+
+    freetoken は uvicorn が先に縛るため loading 中も HTTP 200 を返す設計。準備完了の
+    真実は body の status ("loading" / "ok" / "error") なので status_check は
+    bench._health_ok (200 だけ見る) では足りない。"""
+    try:
+        req = urllib.request.Request(url, headers=auth or {})
+        with urllib.request.urlopen(req, timeout=4.0) as r:
+            try:
+                doc = json.loads(r.read(65536))
+            except ValueError:
+                doc = None
+            return 200 <= r.status < 400, doc if isinstance(doc, dict) else None
+    except OSError:
+        return False, None
 
 
 class CalibrateError(Exception):
@@ -322,8 +474,12 @@ class CalibrationManager:
 
     async def start(self, profile: dict[str, Any], backend_id: str,
                     *, restart_after: bool = False,
-                    actor: dict[str, Any] | None = None) -> dict[str, Any]:
-        """キャリブレーションを 1 件開始する (キューせず、同時に 1 件だけ)。"""
+                    actor: dict[str, Any] | None = None,
+                    cal_mode: str = "current") -> dict[str, Any]:
+        """キャリブレーションを 1 件開始する (キューせず、同時に 1 件だけ)。
+
+        cal_mode="auto" (FreeToken のみ): 投機モード自体 (none/mtp+chain/lookup) を
+        共通プローブで決勝トーナメントして勝者を起動構成に書き戻す。"""
         if self.active_id:
             raise CalibrateError("別のキャリブレーションが実行中です。完了を待つか中断してください")
         kind = CAL_BACKENDS.get(backend_id)
@@ -339,6 +495,7 @@ class CalibrationManager:
         report_dir = self.root / "data" / "calibrations"
         report_dir.mkdir(parents=True, exist_ok=True)
         job_id = new_id("cal")
+        job_mode = ""
 
         if kind == "maya":
             cfg = maya_config_path(self.root, profile)
@@ -349,6 +506,29 @@ class CalibrationManager:
                 # verify: Maya は失敗しても exit 0 なので、調整が実際に config へ書かれたかを後で確認する
                 {"name": "calibrate", "argv": build_maya_command(self.root, profile, python),
                  "cwd": str(module_dir), "verify": cfg}]
+        elif kind == "freetoken":
+            cfg = ""
+            try:
+                spec_mode = self._ft_speculative(profile)
+            except ValueError as e:
+                raise CalibrateError(str(e))
+            if cal_mode == "auto":
+                # 投機モード自体の自動選定 (mtp sweep → lookup CLI → 共通プローブ決勝)。
+                # 現モードが lookup でも mtp でも、まず auto が最上位の分岐
+                job_mode = "auto"
+                steps = [{"name": "auto"}]
+            elif spec_mode == "lookup":
+                # --speculative lookup: fork 同梱の Strata 式 calibrator をそのまま使う
+                # (env 家族 FREETOKEN_LOOKUP_*、コピ型プロンプト + 対照、並行上限判定は
+                # ツール側の実装)。起動 JSON モードではその JSON 自体 (calibrate_lookup
+                # spec と同一形式) を --config に渡す = 校正対象と起動構成が同一ファイル。
+                job_mode = "cli"
+                steps = [self._ft_lookup_step(job_id, profile, module_dir, report_dir, python)]
+            else:
+                # CLI の無い MTP 系: launcher が in-process でエンジン起動→greedy 計測→停止
+                # (_run_freetoken)。config ファイルは使わないのでメモリガードは汎用の 8 GB。
+                job_mode = "sweep"
+                steps = [{"name": "sweep"}]
         else:
             cfg = strata_config_path(self.root, profile)
             if not cfg:
@@ -400,6 +580,7 @@ class CalibrationManager:
             "backend": backend_id,
             "backend_name": backend["name"],
             "kind": kind,
+            "mode": job_mode,
             "status": "queued",
             "step": "",
             "steps": [s["name"] for s in steps],
@@ -416,6 +597,736 @@ class CalibrationManager:
         self._save()
         self._tasks[job_id] = asyncio.create_task(self._run(job, steps, profile))
         return self._public(job)
+
+    # ---------------------------------------------------------- FreeToken (in-process)
+
+    async def _run_freetoken(self, job: dict[str, Any], profile: dict[str, Any], *,
+                             apply: bool = True,
+                             spec_override: str | None = None) -> dict[str, Any]:
+        """MTP ゲート 8 パラメータを座標降下 1 パスで sweep する (約 15 セル・40-55 分)。
+
+        各セル = env を差し替えてエンジンを起動 → greedy プローブ (短文+長文) →
+        合算 tok/s をスコアに、+2% 超の改善だけ採用 → Winner (8 キー全部を明示値) を
+        プロファイルの env へ書き戻す。Strata の --apply-result と同じく「次起動から効く」。
+        GPU 独占は start() がこのプロファイルのサーバーを止めてくれている。
+
+        apply=False は書き戻しを止める (auto モードのフェーズ A: 勝者はトーナメントで
+        決着してから 1 回だけ適用する)。spec_override はセルの --speculative を強制する
+        (auto が lookup プロファイルからも mtp 最良構成を作るため)。"""
+        launch = None
+        with contextlib.suppress(ValueError):
+            launch = load_launch_json(self.root, profile)   # 適用先ログの分岐にだけ使う
+        base_env = self._ft_base_env(profile)
+        spec_mode = spec_override or self._ft_speculative(profile)
+        grid = ft_grid(spec_mode)
+        copy_probe = spec_mode == "mtp"   # chain はコピ型テキストでしか発動しない
+        winner = {param: (str(base_env.get(param) or "").strip() or FREETOKEN_MTP_DEFAULTS[param])
+                  for param, _vals in grid}
+        if not str(base_env.get("FREETOKEN_MTP_RESUME_AFTER") or "").strip():
+            # 未設定時の実効値は ACCEPT_WINDOW 追従なので、実効値で正規化する
+            winner["FREETOKEN_MTP_RESUME_AFTER"] = winner["FREETOKEN_MTP_ACCEPT_WINDOW"]
+        cells: list[dict[str, Any]] = []
+
+        async def cell(label: str, overrides: dict[str, str]) -> dict[str, Any]:
+            if job["id"] in self._cancel:
+                raise _Cancelled()
+            job["step"] = label
+            out = await self._ft_run_cell(job, profile, base_env, label, overrides,
+                                          copy=copy_probe, spec=spec_override)
+            out["label"] = label
+            cells.append(out)
+            return out
+
+        base = await cell("baseline", {})
+        if not base.get("ok"):
+            raise CalibrateError(f"基準 (現在の設定) のエンジンが起動 / 計測できませんでしたが: "
+                                 f"{base.get('error', '')}")
+        best_score = float(base["score"])
+        best_latency = base.get("latency", "")
+        self._append_log(job, f"[cell] baseline: {best_score:.2f} tok/s")
+        self._ft_machine_fit(job, profile, self._ft_read_log(base.get("log", "")))
+
+        for param, _vals in grid:
+            for val in ft_candidates(param, winner):
+                trial = {**winner, param: val}
+                r = await cell(f"{ft_short(param)}={val}", trial)
+                if not r.get("ok"):
+                    self._append_log(job, f"[cell] {r['label']}: 失敗 ({r.get('error', '')}) — 継続")
+                    continue
+                score = float(r["score"])
+                delta = (score / best_score - 1) * 100
+                if score > best_score * (1 + FT_IMPROVE):
+                    winner, best_score = trial, score
+                    best_latency = r.get("latency", best_latency)
+                    self._append_log(job, f"[cell] {r['label']}: {score:.2f} tok/s "
+                                          f"({delta:+.1f}%) ← 採用")
+                else:
+                    self._append_log(job, f"[cell] {r['label']}: {score:.2f} tok/s ({delta:+.1f}%)")
+
+        if apply:
+            self._ft_write_env(profile, winner)
+            self._append_log(job, f"{'起動 JSON' if launch is not None else 'profile env'} に適用: "
+                             + ", ".join(f"{ft_short(k)}={v}" for k, v in winner.items()))
+
+        report: dict[str, Any] = {
+            "schema_version": 1, "backend": "freetoken",
+            "baseline_score": base["score"], "best_score": round(best_score, 2),
+            "improvement_pct": round((best_score / float(base["score"]) - 1) * 100, 1),
+            "winner": winner, "cells": cells, "latency": best_latency,
+        }
+        with contextlib.suppress(OSError):
+            (self.root / "data" / "calibrations"
+             / f"calibration-{job['id']}.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
+        return report
+
+    def _ft_speculative(self, profile: dict[str, Any]) -> str:
+        """プロファイルの現在の --speculative モード (起動 JSON が argv の正)。"""
+        launch = load_launch_json(self.root, profile)
+        if launch is not None:
+            argv = [str(a) for a in launch.get("argv") or []]
+            for i, tok in enumerate(argv):
+                if tok == "--speculative" and i + 1 < len(argv):
+                    return argv[i + 1].strip().lower()
+            return ""
+        return str((profile.get("values") or {}).get("speculative") or "").strip().lower()
+
+    def _ft_launch_update(self, profile: dict[str, Any], fn) -> bool:
+        """起動 JSON を read-modify-write (原子的差し替え)。config 主体モードでなければ False。"""
+        path = launch_json_path(self.root, profile)
+        if path is None or not path.is_file():
+            return False
+        try:
+            doc = json.loads(path.read_text("utf-8"))
+        except ValueError as e:
+            raise CalibrateError(f"起動 JSON を解析できません ({path.name}): {e}")
+        fn(doc)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
+        tmp.replace(path)
+        return True
+
+    def _ft_write_env(self, profile: dict[str, Any], updates: dict[str, str]) -> None:
+        """勝者の env を書き戻す。起動 JSON 主体モードでは JSON の env へ (校正の正)、
+        レガシーではプロファイル store へ (env と _resolved_env 両方: process 側は
+        _resolved_env を優先するため)。"""
+        done = self._ft_launch_update(
+            profile,
+            lambda doc: doc.setdefault("env", {}).update(
+                {str(k): str(v) for k, v in updates.items()}))
+        if done:
+            return
+
+        def patch(data: list[Any]) -> bool:
+            for p in data:
+                if isinstance(p, dict) and p.get("id") == profile["id"]:
+                    p.setdefault("env", {}).update(updates)
+                    if isinstance(p.get("_resolved_env"), dict):
+                        p["_resolved_env"].update(updates)
+                    return True
+            return False
+
+        if not self.profiles.mutate(patch):
+            raise CalibrateError("計測中にプロファイルが消えたため、結果を保存できませんでした")
+
+    def _ft_read_log(self, rel: str, limit: int = 400_000) -> str:
+        """root 相対ログ路径の末尾を読む (machine-fit は起動行だけ必要)。"""
+        if not rel:
+            return ""
+        with contextlib.suppress(OSError):
+            with (self.root / rel).open("rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - limit))
+                return fh.read().decode("utf-8", "replace")
+        return ""
+
+    def _ft_machine_fit(self, job: dict[str, Any], profile: dict[str, Any], log_text: str) -> None:
+        """機械適合: 実測 sweep の対象外 (単調でピークが無い) の計算設定。
+
+        起動ログに disk tier / locked 層の発動行があった時だけ --moe-ram-budget を
+        MemTotal-40 GiB (負荷時の working set 分 40) で固定し、RAM 多寡で起動挙動が
+        変わるブレを無くす。余白が足りなければ書かない (auto のまま安全)。"""
+        m = FT_FIT_PAT.search(log_text or "")
+        if not m:
+            self._append_log(job, "machine-fit: disk 層は発動していません (pin に余白あり) — やらない")
+            return
+        banks = float(m.group(1))
+        total_gib = meminfo().get("MemTotal", 0) / 2**30
+        budget = int(total_gib) - 40
+        # ログの banks は発信ランクの shard 実体。明示 cap はランク数で割られるので、
+        # 全ランクが自分の shard + 作業代を pin できるかを rank 数で検査する
+        launch = None
+        try:
+            launch = load_launch_json(self.root, profile)
+        except ValueError as e:
+            self._append_log(job, f"machine-fit: 起動 JSON を読めません ({e}) — profile 側に記録します")
+        if launch is not None:
+            argv = [str(a) for a in launch.get("argv") or []]
+            tp_v = next((argv[i + 1] for i, t in enumerate(argv)
+                         if t == "--tp-size" and i + 1 < len(argv)), "")
+        else:
+            tp_v = str((profile.get("values") or {}).get("tp_size") or "")
+        try:
+            size = max(1, int(tp_v or 1))
+        except ValueError:
+            size = 1
+        if budget < size * banks + 8:
+            self._append_log(job, f"machine-fit: banks {banks:.1f}GiB/rank × tp{size} に対し"
+                                  f"機械 {total_gib:.0f}GiB — 固定する余白がないため auto のまま")
+            return
+        if launch is not None:
+            self._ft_launch_update(
+                profile,
+                lambda doc: doc.__setitem__(
+                    "argv", replace_arg([str(a) for a in doc.get("argv") or []],
+                                        "--moe-ram-budget", str(budget))))
+        else:
+            def patch(data: list[Any]) -> bool:
+                for p in data:
+                    if isinstance(p, dict) and p.get("id") == profile["id"]:
+                        p.setdefault("values", {})["moe_ram_budget"] = str(budget)
+                        return True
+                return False
+
+            if not self.profiles.mutate(patch):
+                raise CalibrateError("計測中にプロファイルが消えたため、machine-fit を保存できませんでした")
+            profile.setdefault("values", {})["moe_ram_budget"] = str(budget)
+        self._append_log(job, f"machine-fit: disk 層発動を検出 (banks {banks:.1f}GiB, tp{size}) → "
+                              f"{'起動 JSON' if launch is not None else 'profile'} の "
+                              f"--moe-ram-budget {budget} GiB (次回起動から)")
+
+    def _ft_lookup_step(self, job_id: str, profile: dict[str, Any], module_dir: Path,
+                        report_dir: Path, python: str) -> dict[str, Any]:
+        """calibrate_lookup の CLI ステップを組み立てる (cli モードと auto フェーズ B 共用)。
+
+        起動 JSON 主体モードではその JSON 自体を --config に渡す (同一形式)。"""
+        port_v = str((profile.get("values") or {}).get("port") or "").strip()
+        launch_path = launch_json_path(self.root, profile)
+        if launch_path is not None and launch_path.is_file():
+            config_arg = str(launch_path)
+        else:
+            full = self.manager.build_argv(profile)
+            spec_env = {**{k: str(v) for k, v in (profile.get("env") or {}).items()},
+                        **{k: str(v) for k, v in (profile.get("_resolved_env") or {}).items()}}
+            spec = {"python": full[0], "argv": full[1:], "cwd": str(module_dir),
+                    "env": {k: v for k, v in spec_env.items()
+                            if not k.startswith("FREETOKEN_LOOKUP_")},
+                    "port": int(port_v or "1919"), "model_name": profile.get("name", "")}
+            spec_path = report_dir / f"calibration-{job_id}.spec.json"
+            spec_path.write_text(json.dumps(spec, ensure_ascii=False, indent=1), "utf-8")
+            config_arg = str(spec_path)
+        return {"name": "calibrate-lookup", "cwd": str(module_dir),
+                "argv": [python, "-m", "freetoken.calibrate_lookup",
+                         "--config", config_arg, "--out-dir", str(report_dir),
+                         "--tag", f"cal-{job_id}",
+                         *(["--port", port_v] if port_v else [])]}
+
+    def _ft_lookup_doc(self, job: dict[str, Any]) -> dict[str, Any]:
+        """fork CLI が書いた lookup レポート (--tag の sanitize 規則で job id の _ は -)。"""
+        tag = f"cal-{job['id']}".replace("_", "-")
+        path = self.root / "data" / "calibrations" / f"freetoken-lookup-{tag}.json"
+        try:
+            return json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError) as e:
+            raise CalibrateError(f"lookup のキャリブレーションレポートが読めません "
+                                 f"({path.name}): {e}")
+
+    def _ft_base_env(self, profile: dict[str, Any]) -> dict[str, str]:
+        """セルの基準 env: 起動 JSON の env が正、profile.env がユーザー上書き。"""
+        try:
+            launch = load_launch_json(self.root, profile)
+        except ValueError as e:
+            raise CalibrateError(str(e))
+        base_env = {str(k): str(v) for k, v in
+                    ((profile.get("_resolved_env") or profile.get("env")) or {}).items()}
+        if launch is not None:
+            base_env = {**{str(k): str(v) for k, v in (launch.get("env") or {}).items()},
+                        **base_env}
+        return base_env
+
+    def _ft_par_n(self, profile: dict[str, Any]) -> int:
+        """並行プローブの本数 = プロファイルの --max-running-requests (ユーザー固定値)。"""
+        raw = ""
+        with contextlib.suppress(ValueError, CalibrateError):
+            launch = load_launch_json(self.root, profile)
+            if launch is not None:
+                argv = [str(a) for a in launch.get("argv") or []]
+                raw = next((argv[i + 1] for i, t in enumerate(argv)
+                            if t == "--max-running-requests" and i + 1 < len(argv)), "")
+        if not raw:
+            raw = str((profile.get("values") or {}).get("max_running_requests") or "")
+        try:
+            return max(1, min(16, int(raw or 4)))
+        except ValueError:
+            return 4
+
+    def _apply_freetoken_lookup(self, job: dict[str, Any],
+                                profile: dict[str, Any]) -> dict[str, Any]:
+        """fork 同梱 calibrate_lookup の出力 JSON を適用する。
+
+        採用判定 (基準比 MIN_GAIN・並行上限で lookup が素の batch に勝つか) はツール
+        側の契約。launcher は規則を足さず、負けたときは applied:False + note で正直に
+        残す (env は書かない)。"""
+        doc = self._ft_lookup_doc(job)
+        chosen = doc.get("chosen") or {}
+        winner = {str(k): str(v) for k, v in (chosen.get("env") or {}).items()
+                  if str(k).startswith("FREETOKEN_LOOKUP_")}
+        applied = bool(doc.get("lookup_enabled") and winner)
+        if applied:
+            self._ft_write_env(profile, winner)
+            self._append_log(job, "profile env に適用: "
+                             + ", ".join(f"{k[17:].lower()}={v}" for k, v in winner.items()))
+        else:
+            self._append_log(job, "lookup は並行上限で素の batch 推論に負けたため env は"
+                             "書き戻しません (単一ストリーム利得はレポートに残っています)")
+        # ツールが起動した各腕のエンジンログ (data/calibrations/logs/) から disk 層発動を探す
+        fit_text = ""
+        logs_dir = self.root / "data" / "calibrations" / "logs"
+        t0 = float(job.get("started_at") or 0.0) - 1.0
+        with contextlib.suppress(OSError):
+            cand = sorted(logs_dir.glob("*.log"), key=lambda x: x.stat().st_mtime, reverse=True)[:12]
+            for p in cand:
+                if p.stat().st_mtime < t0:
+                    continue
+                fit_text = self._ft_read_log(str(p.relative_to(self.root)), 160_000)
+                if FT_FIT_PAT.search(fit_text):
+                    break
+        self._ft_machine_fit(job, profile, fit_text)
+        gain = chosen.get("gain_at_parallel")
+        if gain is None:
+            gain = chosen.get("gain") or 0.0
+        return {
+            "tuned": True, "backend": "freetoken-lookup", "applied": applied,
+            "settings": winner if applied else {},
+            "improvement_pct": round(float(gain) * 100, 1),
+            "latency": (f"parallel={chosen.get('parallel')} "
+                        f"tok_s={chosen.get('tok_s_at_parallel')} "
+                        f"acceptance={chosen.get('acceptance')}"),
+        }
+
+    async def _ft_probe_parallel(self, job: dict[str, Any], sess: dict[str, Any],
+                                 n: int, words: int = 512) -> dict[str, Any]:
+        """n 並行のスループット計測。レーンは別シード (各自 prefill を払う) かつ
+        FT_PAR_STAGGER_S 刻みの時間差到着 — prefill/decode 混在を作るので、
+        prefill ペーシング系ノブの実効差もこのスコアに載る。"""
+        base = f"http://127.0.0.1:{sess.get('port')}"
+        auth = bench.auth_headers(sess)
+        model = await asyncio.to_thread(bench._first_model, base, auth) or "default"
+
+        def one(i: int) -> dict[str, Any]:
+            if i:
+                time.sleep(i * FT_PAR_STAGGER_S)
+            payload = {"model": model,
+                       "messages": [{"role": "user",
+                                     "content": bench.make_prompt(words, FT_PROBE_SEED + 100 + i)}],
+                       "temperature": 0.0, "max_tokens": FT_PROBE_MAX_TOKENS, "stream": False}
+            return bench._one_request(base, "/v1/chat/completions", payload, False,
+                                      FT_PROBE_TIMEOUT, auth)
+
+        t0 = time.monotonic()
+        rs = await asyncio.gather(*(asyncio.to_thread(one, i) for i in range(max(1, n))))
+        wall = time.monotonic() - t0
+        if any(not r.get("ok") for r in rs):
+            bad = next(r for r in rs if not r.get("ok"))
+            return {"ok": False, "error": f"並行プローブ失敗: {bad.get('error', '')}"[:400]}
+        tokens = sum(int(r.get("out_tokens") or 0) for r in rs)
+        if tokens <= 0 or wall <= 0:
+            return {"ok": False, "error": "並行プローブが 0 トークンでした"}
+        return {"ok": True, "score": round(tokens / wall, 2), "tokens": tokens,
+                "wall": round(wall, 2), "n": len(rs)}
+
+    async def _ft_final_cell(self, job: dict[str, Any], profile: dict[str, Any],
+                             base_env: dict[str, str], label: str,
+                             overrides: dict[str, str], spec: str,
+                             par_n: int) -> dict[str, Any]:
+        """決勝トーナメント 1 セル: 1 回の起動で単流 (copy 込み) と並行の両方を測る。"""
+        clone, tmp_cfg = self._ft_cell_clone(job, profile, base_env, label, overrides, spec)
+        try:
+            sess = await self._ft_start(job, clone)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)[:200]}
+        sid = sess["id"]
+        try:
+            await self._ft_wait_ready(job, sess)
+            out = await self._ft_probe(job, sess, copy=True)
+            if not out.get("ok"):
+                return {"ok": False, "error": str(out.get("error", ""))[:400]}
+            par = await self._ft_probe_parallel(job, sess, par_n)
+            return {"ok": True, "single": out["score"],
+                    "par": par.get("score") if par.get("ok") else None,
+                    "par_error": par.get("error", ""),
+                    "latency": self._ft_latency_excerpt(sess)}
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)[:400]}
+        finally:
+            with contextlib.suppress(Exception):
+                await self.manager.stop(sid)
+            if tmp_cfg is not None:
+                with contextlib.suppress(OSError):
+                    tmp_cfg.unlink()
+
+    async def _run_freetoken_auto(self, job: dict[str, Any],
+                                  profile: dict[str, Any]) -> dict[str, Any]:
+        """投機モード自動選定: mtp sweep → lookup CLI → 共通プローブの決勝トーナメント。
+
+        「mtp(+chain) / lookup / none のどれがこの箱で最速か」は誰も実測していなかった
+        (プロファイルの現在値が校正経路を分岐させるだけだった) ので、1 ジョブで決め、
+        勝者の --speculative と env ファミリーをまとめて適用する。判定: 単流スコア最優、
+        ただし並行上限で並行最優に FT_AUTO_PAR_LOSS を超えて負ける構成は差し替え
+        (fork ツールの MAX_PARALLEL_LOSS と同じ哲学)。勝者には品質中立の転送/グラフ系
+        env 微調整 (フェーズ D) も行う。所要 ≈ 2-3 時間。"""
+        # ---- フェーズ A: mtp(+chain) sweep。適用はまだ (決着はトーナメント)。
+        # MTP ヘッドの無いモデルでは基準セルが起動失敗する → mtp を外して続行する
+        job["step"] = "phase-mtp"
+        self._append_log(job, "[auto] フェーズ A: MTP (chain 込み) を実測します…")
+        mtp_env: dict[str, str] | None = None
+        mtp_imp: float | None = None
+        try:
+            mtp = await self._run_freetoken(job, profile, apply=False, spec_override="mtp")
+            mtp_env = {k: str(v) for k, v in (mtp.get("winner") or {}).items()}
+            mtp_imp = mtp.get("improvement_pct")
+        except CalibrateError as e:
+            self._append_log(job, f"[auto] フェーズ A: MTP sweep 失敗 ({str(e)[:140]})"
+                                  " — mtp はトーナメントから除外")
+        if job["id"] in self._cancel:
+            raise _Cancelled()
+
+        # ---- フェーズ B: lookup CLI。失敗してもジョブは落とさずトーナメントから外す
+        job["step"] = "phase-lookup"
+        lookup_env: dict[str, str] | None = None
+        backend_id = job.get("backend") or profile.get("backend") or "freetoken-fork"
+        module_dir = self.root / backend_for(self.root, backend_id)["module_path"]
+        report_dir = self.root / "data" / "calibrations"
+        python = self.manager.resolve_python(backend_id)
+        self._append_log(job, "[auto] フェーズ B: lookup (fork CLI) を実測します…")
+        try:
+            step = self._ft_lookup_step(job["id"], profile, module_dir, report_dir, python)
+            rc, _raw = await self._run_step(job, step)
+            if job["id"] in self._cancel:
+                raise _Cancelled()
+            if rc != 0:
+                lookup_note = f"lookup CLI が失敗 (exit {rc}) — トーナメントから除外"
+            else:
+                doc = self._ft_lookup_doc(job)
+                chosen = doc.get("chosen") or {}
+                env4 = {str(k): str(v) for k, v in (chosen.get("env") or {}).items()
+                        if str(k).startswith("FREETOKEN_LOOKUP_")}
+                if env4:
+                    lookup_env = env4
+                    lookup_note = ("ツール判定: 並行上限で lookup は worth-keep 未満"
+                                   if not doc.get("lookup_enabled")
+                                   else "ツール判定: lookup 有効")
+                else:
+                    lookup_note = "lookup レポートに勝者 env が無い — トーナメントから除外"
+        except _Cancelled:
+            raise
+        except (CalibrateError, OSError, ValueError) as e:
+            lookup_note = f"lookup 結果を読めません ({e}) — トーナメントから除外"
+        self._append_log(job, f"[auto] フェーズ B: {lookup_note}")
+        if job["id"] in self._cancel:
+            raise _Cancelled()
+
+        # ---- フェーズ C: 決勝トーナメント (共通プローブ: 単流 copy 込み + 並行)
+        base_env = self._ft_base_env(profile)
+        par_n = self._ft_par_n(profile)
+        configs: list[tuple[str, dict[str, str], str]] = [("none", {}, "none")]
+        if mtp_env is not None:
+            configs.append(("mtp", mtp_env, "mtp"))
+        if lookup_env is not None:
+            configs.append(("lookup", lookup_env, "lookup"))
+            if par_n > 2:
+                # LOOKUP_MAX_BATCH 既定 2: 並行 n 本でも 2 本しか draft できない。
+                # ツールが sweep しないこの上限を並行プローブで A/B する
+                configs.append(("lookup-mb",
+                                {**lookup_env, "FREETOKEN_LOOKUP_MAX_BATCH": str(par_n)},
+                                "lookup"))
+        tour: list[dict[str, Any]] = []
+        for name, env_over, spec in configs:
+            if job["id"] in self._cancel:
+                raise _Cancelled()
+            job["step"] = f"final-{name}"
+            r = await self._ft_final_cell(job, profile, base_env, f"final-{name}",
+                                          env_over, spec, par_n)
+            r["mode"] = name
+            tour.append(r)
+            if r.get("ok"):
+                self._append_log(job, f"[auto] {name}: 単流 {r['single']} tok/s / "
+                                      f"{par_n}並行 {r['par']} tok/s")
+            else:
+                self._append_log(job, f"[auto] {name}: 失敗 ({r.get('error', '')}) — 除外")
+        ok = [t for t in tour if t.get("ok") and t.get("single")]
+        if not ok:
+            raise CalibrateError("決勝トーナメントの全セルが計測できませんでした")
+        best_single = max(ok, key=lambda t: float(t["single"]))
+        with_par = [t for t in ok if t.get("par")]
+        best_par = max(with_par, key=lambda t: float(t["par"])) if with_par else best_single
+        winner, rule = best_single, "単流スコア最優"
+        if (best_par is not best_single and winner.get("par") is not None
+                and float(winner["par"]) < float(best_par["par"]) * (1 - FT_AUTO_PAR_LOSS)):
+            winner = best_par
+            rule = (f"単流最優 ({best_single['mode']}) は {par_n}並行で {best_par['mode']} に "
+                    f"{FT_AUTO_PAR_LOSS * 100:.0f}% 超負けるため並行最優に差し替え")
+        mode = winner["mode"]
+        spec_mode_now = mode.split("-")[0]        # lookup-mb → lookup
+        # 勝者セルの env は configs 定義が正 (セル記録には持たせていない)
+        winner_env = dict(next((e for n, e, _s in configs if n == mode), {}))
+
+        # ---- フェーズ D: 勝者構成に対する転送/グラフ系 env の微調整 (座標降下)。
+        # 基準スコアは勝者セル自身 (同一プローブ) なので追加の基準起動は要らない
+        job["step"] = "phase-micro"
+        micros: list[dict[str, Any]] = []
+        cur_single = float(winner["single"])
+        cur_par = float(winner["par"]) if winner.get("par") is not None else None
+        for knob, vals in FT_MICRO_GRID:
+            allowed = FT_MICRO_MODES.get(knob)
+            if allowed is not None and spec_mode_now not in allowed:
+                continue        # 勝者モードで論理的に効かないノブだけ飛ばす
+            cur_v = str(base_env.get(knob) or winner_env.get(knob) or "").strip()
+            for val in [v for v in vals if v != cur_v]:
+                if job["id"] in self._cancel:
+                    raise _Cancelled()
+                label = f"{knob.removeprefix('FREETOKEN_').lower()}={val}"
+                job["step"] = f"micro-{label}"
+                r = await self._ft_final_cell(job, profile, base_env, f"micro-{label}",
+                                              {**winner_env, knob: val}, spec_mode_now, par_n)
+                if not r.get("ok"):
+                    micros.append({"label": label, "ok": False, "error": r.get("error", "")})
+                    self._append_log(job, f"[micro] {label}: 失敗 ({r.get('error', '')}) — スキップ")
+                    continue
+                s = float(r["single"])
+                p = float(r["par"]) if r.get("par") is not None else None
+                gain = (s / cur_single - 1) if cur_single else 0.0
+                par_ok = (p is None or cur_par is None
+                          or p >= cur_par * (1 - FT_MICRO_PAR_REGRESS))
+                adopted = gain > FT_MICRO_IMPROVE and par_ok
+                if adopted:
+                    winner_env[knob] = val
+                    cur_single, cur_par = s, (p if p is not None else cur_par)
+                    self._append_log(job, f"[micro] {label}: 単流 {s} tok/s "
+                                          f"({gain * 100:+.1f}%) ← 採用")
+                else:
+                    why = (f"並行 {p} が {FT_MICRO_PAR_REGRESS * 100:.0f}% 超の悪化"
+                           if not par_ok else f"{gain * 100:+.1f}% が +2% 未満")
+                    self._append_log(job, f"[micro] {label}: 単流 {s} tok/s ({why}) — 不採用")
+                micros.append({"label": label, "ok": True, "single": s, "par": p,
+                                "adopted": adopted})
+
+        none_single = next((float(t["single"]) for t in ok if t["mode"] == "none"), None)
+        improvement = (round((cur_single / none_single - 1) * 100, 1)
+                       if none_single else None)
+
+        # ---- 適用: --speculative (起動 JSON argv / values) + 勝者 env ファミリー
+        launch_path = launch_json_path(self.root, profile)
+        spec_mode_now = mode.split("-")[0]        # lookup-mb → lookup
+        if launch_path is not None and launch_path.is_file():
+            self._ft_launch_update(
+                profile,
+                lambda doc: doc.__setitem__(
+                    "argv", replace_arg([str(a) for a in doc.get("argv") or []],
+                                        "--speculative", spec_mode_now)))
+        else:
+            def patch(data: list[Any]) -> bool:
+                for p in data:
+                    if isinstance(p, dict) and p.get("id") == profile["id"]:
+                        p.setdefault("values", {})["speculative"] = spec_mode_now
+                        return True
+                return False
+
+            if not self.profiles.mutate(patch):
+                raise CalibrateError("計測中にプロファイルが消えたため、モードを保存できませんでした")
+            profile.setdefault("values", {})["speculative"] = spec_mode_now
+        if winner_env:
+            self._ft_write_env(profile, winner_env)
+        self._append_log(job, f"[auto] 勝者: --speculative {spec_mode_now}"
+                              + (f" + env {len(winner_env)} キー" if winner_env else "")
+                              + f" ({rule})")
+
+        report: dict[str, Any] = {
+            "schema_version": 1, "backend": "freetoken-auto", "rule": rule, "par_n": par_n,
+            "tournament": tour, "micro": micros,
+            "mtp_sweep_improvement_pct": mtp_imp,
+            "lookup_phase": lookup_note,
+            "winner": {"mode": spec_mode_now, "env": winner_env},
+            "improvement_pct": improvement, "latency": winner.get("latency", ""),
+        }
+        with contextlib.suppress(OSError):
+            (report_dir / f"calibration-{job['id']}.json").write_text(
+                json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
+        return {"tuned": True, "backend": "freetoken-auto", "applied": True,
+                "settings": {"--speculative": spec_mode_now, **winner_env},
+                "improvement_pct": improvement, "latency": winner.get("latency", ""),
+                "rule": rule}
+
+    async def _ft_start(self, job: dict[str, Any], clone: dict[str, Any]) -> dict[str, Any]:
+        """セル用サーバーを起動。直前のエンジン解放直後 (lingering) はガードに弾かれるため、
+        その原因なら少し待って再試行する (force=True は過コミット保護を無視するので使わない)。"""
+        for attempt in range(4):
+            try:
+                return await self.manager.start(clone, force=False)
+            except MemoryGuardError as e:
+                self._append_log(job, f"起動ガード: {str(e)[:120]} — 15 秒後に再試行")
+                await asyncio.sleep(15)
+        raise CalibrateError("エンジン起動がメモリガードで繰り返し拒否されました")
+
+    async def _ft_wait_ready(self, job: dict[str, Any], sess: dict[str, Any]) -> None:
+        """/health の body が status "ok" (モデルロード完了) になるまで待つ。
+
+        freetoken は loading 中も HTTP 200 を返す設計 (uvicorn が先に縛る) なので、
+        200 だけ見る bench._health_ok で抜けると warmup が 503 にぶつかる。
+        status "error" (ワーカー死) は即失敗。"""
+        sid = sess["id"]
+        base = f"http://127.0.0.1:{sess.get('port')}"
+        url = base + (sess.get("health_path") or "/health")
+        auth = bench.auth_headers(sess)
+        timeout = float(os.environ.get("FT_CAL_READY_TIMEOUT_S", "") or FT_READY_TIMEOUT)
+        t0 = time.monotonic()
+        last_log = 0.0
+        while time.monotonic() - t0 < timeout:
+            if job["id"] in self._cancel:
+                raise _Cancelled()
+            status = (self.manager.sessions.get(sid) or {}).get("status")
+            if status in ("failed", "exited"):
+                raise RuntimeError("エンジンが起動中に終了しました:\n" + self._ft_log_tail(sess, 15))
+            http_ok, doc = await asyncio.to_thread(ft_health_status, url, auth)
+            if http_ok:
+                hst = (doc or {}).get("status")
+                if hst == "error":
+                    raise RuntimeError("/health が error を返しました: "
+                                       f"{str((doc or {}).get('message'))[:200]}\n"
+                                       + self._ft_log_tail(sess, 15))
+                if hst in (None, "ok"):
+                    return                          # 非 JSON (旧版) は 200 = 準備完了扱い
+                tnow = time.monotonic()
+                if tnow - last_log >= 30.0:         # loading: 進捗を ~30 秒ごとに残す
+                    lp = (doc or {}).get("progress") or {}
+                    done = int(lp.get("done_bytes") or 0) // 2 ** 30
+                    tot = int(lp.get("total_bytes") or 0) // 2 ** 30
+                    self._append_log(job, f"モデルをロード中です: phase={(doc or {}).get('phase', '?')} "
+                                          f"{done}GB/{tot}GB ({tnow - t0:.0f}秒経過)")
+                    last_log = tnow
+            await asyncio.sleep(2)
+        raise RuntimeError(f"エンジンが {timeout:.0f} 秒以内に起動しませんでした")
+
+    async def _ft_probe(self, job: dict[str, Any], sess: dict[str, Any],
+                        copy: bool = False) -> dict[str, Any]:
+        """greedy プローブ (warmup 1 本を捨てて短文/長文 1 本ずつ)。スコアは合算 tok/s。
+
+        temp 0 固定 — MTP ゲートは greedy 専用で、ランダムサンプリングでは何も測れない。
+        プロンプトはシード固定で全セル同一 (セル間の比較可能性が命)。
+        copy=True (mtp run) は逐語コピの 1 本を追加する — chain/lookup 系のドラフトは
+        履歴の繰り返しでしか発動しないため、コピ型が無いと chain セルが常に無差分になる。"""
+        base = f"http://127.0.0.1:{sess.get('port')}"
+        auth = bench.auth_headers(sess)
+        model = await asyncio.to_thread(bench._first_model, base, auth) or "default"
+        path = "/v1/chat/completions"
+
+        def call(words: int, seed: int, cp: bool = False) -> dict[str, Any]:
+            maker = bench.make_copy_prompt if cp else bench.make_prompt
+            payload = {"model": model,
+                       "messages": [{"role": "user", "content": maker(words, seed)}],
+                       "temperature": 0.0, "max_tokens": FT_PROBE_MAX_TOKENS, "stream": False}
+            return bench._one_request(base, path, payload, False, FT_PROBE_TIMEOUT, auth)
+
+        warm = await asyncio.to_thread(call, 32, FT_PROBE_SEED)
+        tw = time.monotonic()
+        while (not warm.get("ok") and "503" in str(warm.get("error", ""))
+               and time.monotonic() - tw < FT_WARM_RETRY_S):
+            await asyncio.sleep(5)              # 直後の一時 503 (rebuild 等の maintenance) を待つ
+            if job["id"] in self._cancel:
+                raise _Cancelled()
+            warm = await asyncio.to_thread(call, 32, FT_PROBE_SEED)
+        if not warm.get("ok"):
+            return {"ok": False, "error": f"warmup 失敗: {warm.get('error', '')}"}
+        tokens, secs, probes = 0, 0.0, []
+        seq = [(w, False) for w in FT_PROBE_WORDS]
+        if copy:
+            seq.append((FT_PROBE_COPY_WORDS, True))
+        for i, (words, cp) in enumerate(seq):
+            r = await asyncio.to_thread(call, words, FT_PROBE_SEED + i, cp)
+            if not r.get("ok"):
+                return {"ok": False,
+                        "error": f"プローブ ({words} words{'/copy' if cp else ''}) 失敗: "
+                                 f"{r.get('error', '')}"}
+            probes.append({"words": words, "copy": cp,
+                           "out_tokens": r["out_tokens"], "secs": round(r["secs"], 2)})
+            tokens += int(r["out_tokens"] or 0)
+            secs += float(r["secs"])
+        if tokens <= 0 or secs <= 0:
+            return {"ok": False, "error": "プローブが 0 トークンでした"}
+        return {"ok": True, "score": round(tokens / secs, 2), "tokens": tokens,
+                "secs": round(secs, 2), "probes": probes}
+
+    def _ft_log_tail(self, sess: dict[str, Any], lines: int) -> str:
+        """セルのサーバーログ末尾 (起動失敗の理由をジョブログへ残すため)。"""
+        try:
+            data = (self.root / sess["log"]).read_bytes()[-16384:]
+        except (OSError, KeyError):
+            return "(ログが読めません)"
+        return "\n".join(data.decode("utf-8", "replace").splitlines()[-lines:])
+
+    def _ft_latency_excerpt(self, sess: dict[str, Any]) -> str:
+        """サーバーログ末尾から最後の [latency] 行を 1 行拾う (レイテンシ内訳の抄録)。"""
+        for line in reversed(self._ft_log_tail(sess, 400).splitlines()):
+            if "[latency]" in line:
+                return line.strip()[:300]
+        return ""
+
+    def _ft_cell_clone(self, job: dict[str, Any], profile: dict[str, Any],
+                       base_env: dict[str, str], label: str,
+                       overrides: dict[str, Any],
+                       spec: str | None) -> tuple[dict[str, Any], "Path | None"]:
+        """セル用 clone (env 差し替え + 任意で --speculative 強制) を作る。
+
+        起動 JSON 主体モードでは argv の差し替えに実ファイルが要るので、一時 JSON を
+        data/calibrations/ に書く (呼び出し側が finally で削除する)。"""
+        env = {**base_env, **{k: str(v) for k, v in overrides.items()}, **FT_LATENCY_ENV}
+        clone = {**profile, "env": env}
+        if profile.get("_resolved_env"):
+            clone["_resolved_env"] = env   # 解決済み env が env より優先される (process.py)
+        tmp_cfg: Path | None = None
+        if spec is not None:
+            launch = None
+            with contextlib.suppress(ValueError):
+                launch = load_launch_json(self.root, profile)
+            if launch is not None:
+                doc = dict(launch)
+                doc["argv"] = replace_arg([str(a) for a in launch.get("argv") or []],
+                                          "--speculative", spec)
+                tmp_cfg = (self.root / "data" / "calibrations"
+                           / f"cell-{job['id']}-{label}.json")
+                tmp_cfg.write_text(json.dumps(doc, ensure_ascii=False), "utf-8")
+                clone["values"] = {**(profile.get("values") or {}), "config": str(tmp_cfg)}
+            else:
+                clone["values"] = {**(profile.get("values") or {}), "speculative": spec}
+        return clone, tmp_cfg
+
+    async def _ft_run_cell(self, job: dict[str, Any], profile: dict[str, Any],
+                           base_env: dict[str, str], label: str,
+                           overrides: dict[str, Any], copy: bool = False,
+                           spec: str | None = None) -> dict[str, Any]:
+        """1 セル = 起動 → ready 待ち → greedy 計測 → 停止。失敗は ok:False で返す
+        (基準セルだけが致命的で、候補セルの失敗は「その値は除外」で足りるため)。"""
+        clone, tmp_cfg = self._ft_cell_clone(job, profile, base_env, label, overrides, spec)
+        try:
+            sess = await self._ft_start(job, clone)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "error": str(e)[:200]}
+        sid = sess["id"]
+        try:
+            await self._ft_wait_ready(job, sess)
+            out = await self._ft_probe(job, sess, copy=copy)
+            if out.get("ok"):
+                out["latency"] = self._ft_latency_excerpt(sess)
+                out["log"] = sess.get("log", "")   # machine-fit が起動行を読む
+            return out
+        except RuntimeError as e:
+            return {"ok": False, "error": str(e)[:400]}
+        finally:
+            with contextlib.suppress(Exception):
+                await self.manager.stop(sid)
+            if tmp_cfg is not None:
+                with contextlib.suppress(OSError):
+                    tmp_cfg.unlink()
 
     async def _strata_profiles(self, python: str, module_dir: Path) -> list[dict[str, Any]]:
         """保存済み Strata profile の一覧 (JSON)。"""
@@ -564,34 +1475,44 @@ class CalibrationManager:
         self._save()
         result: dict[str, Any] = {}
         try:
-            for step in steps:
-                if job["id"] in self._cancel:
-                    raise _Cancelled()
-                rc, raw = await self._run_step(job, step)
-                if job["id"] in self._cancel:
-                    raise _Cancelled()
-                payload = self._parse_json(raw)
-                if rc != 0:
-                    err = (payload or {}).get("error") if isinstance(payload, dict) else None
-                    msg = err.get("message") if isinstance(err, dict) else ""
-                    if step["name"] == "plan":
-                        msg = _plan_failure(payload) or msg
-                    raise CalibrateError(msg or f"{step['name']} が失敗しました (exit {rc})")
-                if step["name"] == "calibrate" and step.get("verify"):
-                    # Maya は「エンジンが起動できなかった」場合でも exit 0 で終わる
-                    # (警告を出して False を返し、config を書き換えない)。終了コードだけだと
-                    # 失敗を「成功」と偽ることになるので、config が実際に調整されたかを確認する。
-                    why = _verify_maya_tuned(job, step["verify"])
-                    if why:
-                        raise CalibrateError(why)
-                if step["name"] == "review" and isinstance(payload, dict):
-                    # Strata の JSON: {"schema_version":1, "ok": <applicable>, "review": {...}}
-                    review = payload.get("review") if isinstance(payload.get("review"), dict) else payload
-                    applicable = review.get("applicable") if "applicable" in review else payload.get("ok")
-                    if applicable is not True:
-                        reasons = ", ".join(review.get("reasons") or []) or "review が適用不可と判定しました"
-                        raise CalibrateError(f"review: 適用できません ({reasons})")
-                result[step["name"]] = payload or {}
+            if job["kind"] == "freetoken" and job.get("mode") == "auto":
+                # FreeToken auto: 投機モード自体の選定 (mtp sweep → lookup CLI → 決勝)
+                result["freetoken"] = await self._run_freetoken_auto(job, profile)
+            elif job["kind"] == "freetoken" and job.get("mode") != "cli":
+                # FreeToken: CLI 実行ではなく launcher 内でエンジン再起動 + greedy 計測
+                result["freetoken"] = await self._run_freetoken(job, profile)
+            else:
+                for step in steps:
+                    if job["id"] in self._cancel:
+                        raise _Cancelled()
+                    rc, raw = await self._run_step(job, step)
+                    if job["id"] in self._cancel:
+                        raise _Cancelled()
+                    payload = self._parse_json(raw)
+                    if rc != 0:
+                        err = (payload or {}).get("error") if isinstance(payload, dict) else None
+                        msg = err.get("message") if isinstance(err, dict) else ""
+                        if step["name"] == "plan":
+                            msg = _plan_failure(payload) or msg
+                        raise CalibrateError(msg or f"{step['name']} が失敗しました (exit {rc})")
+                    if step["name"] == "calibrate" and step.get("verify"):
+                        # Maya は「エンジンが起動できなかった」場合でも exit 0 で終わる
+                        # (警告を出して False を返し、config を書き換えない)。終了コードだけだと
+                        # 失敗を「成功」と偽ることになるので、config が実際に調整されたかを確認する。
+                        why = _verify_maya_tuned(job, step["verify"])
+                        if why:
+                            raise CalibrateError(why)
+                    if step["name"] == "review" and isinstance(payload, dict):
+                        # Strata の JSON: {"schema_version":1, "ok": <applicable>, "review": {...}}
+                        review = payload.get("review") if isinstance(payload.get("review"), dict) else payload
+                        applicable = review.get("applicable") if "applicable" in review else payload.get("ok")
+                        if applicable is not True:
+                            reasons = ", ".join(review.get("reasons") or []) or "review が適用不可と判定しました"
+                            raise CalibrateError(f"review: 適用できません ({reasons})")
+                    result[step["name"]] = payload or {}
+                if job["kind"] == "freetoken":
+                    # lookup: fork CLI の出力 JSON をそのまま適用 (勝ったときだけ env 書戻し)
+                    result["freetoken"] = self._apply_freetoken_lookup(job, profile)
             job["status"] = "done"
             job["report"] = _summary(job["kind"], result)
         except _Cancelled:
@@ -678,6 +1599,14 @@ def _summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
     """ジョブ内の CLI 結果を UI 用の短い要約にする。"""
     if kind == "maya":
         return {"tuned": True, "backend": "maya"}
+    if kind == "freetoken":
+        rep = result.get("freetoken") or {}
+        if rep.get("backend") in ("freetoken-lookup", "freetoken-auto"):
+            return rep          # lookup (fork CLI) / auto (トーナメント) は UI 形のまま返す
+        return {"tuned": True, "backend": "freetoken", "applied": True,
+                "settings": rep.get("winner") or {},
+                "improvement_pct": rep.get("improvement_pct"),
+                "latency": rep.get("latency", "")}
     # Strata の JSON は {"schema_version":1, "ok":true, "review": {...}} / {"... ","application": {...}}
     review = (result.get("review") or {}).get("review") or result.get("review") or {}
     apply = result.get("apply") or {}
