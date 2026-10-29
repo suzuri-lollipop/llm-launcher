@@ -495,15 +495,16 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
     <div id="cal-history"></div>
   </section>
   <section id="view-setup" class="view hidden">
-    <h2 class="view-title">セットアップ <span class="muted">インストールとモデルダウンロードをこの画面だけで完了させます (ターミナル不要)</span></h2>
+    <h2 class="view-title">セットアップ <span class="muted">① インストール → ② モデルダウンロード → ③ キャリブレーション までこの画面だけで完了させます (ターミナル不要)</span></h2>
     <div id="ins-active"></div>
     <div class="card">
-      <div class="row"><b style="font-size:15px">インストール</b>
-        <span class="muted" style="font-size:12px">repo clone → .venv 作成 → pip install を順に実行します (同時に 1 ジョブ)</span></div>
+      <div class="row"><b style="font-size:15px">① インストール</b>
+        <span class="muted" style="font-size:12px">repo clone → .venv 作成 → <span id="ins-tool" class="mono">uv pip install</span> を順に実行します (同時に 1 ジョブ)</span></div>
       <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
         <select id="ins-backend" class="grow" style="min-width:200px" onchange="insPickBackend()"></select>
         <select id="ins-ref" style="min-width:190px" onchange="insPickRef()" title="clone / 切替先のブランチ"></select>
         <label class="switch"><input type="checkbox" id="ins-clean"><span class="track"></span><span class="lab" style="font-size:12.5px">クリーン再インストール (.venv を破棄)</span></label>
+        <label class="switch need-cal" id="ins-calloc" title="インストールが成功したときだけ、このバックエンドのプロファイルを自動で計走します"><input type="checkbox" id="ins-cal"><span class="track"></span><span class="lab" style="font-size:12.5px">完了後にキャリブレーション</span></label>
         <button class="primary" id="ins-start" onclick="insStart()">📦 インストール実行</button>
         <span class="muted" id="ins-note"></span>
       </div>
@@ -511,7 +512,7 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
       <div class="muted mono" id="ins-preview" style="font-size:11px;margin-top:6px"></div>
     </div>
     <div class="card">
-      <div class="row"><b style="font-size:15px">モデルダウンロード</b>
+      <div class="row"><b style="font-size:15px">② モデルダウンロード</b>
         <span class="muted" style="font-size:12px">Hugging Face Hub から保存先へ (既定のキャッシュ <span id="ins-hfdir" class="mono"></span>)。完了後に対応モデル一覧へ反映します</span></div>
       <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
         <input type="text" id="dl-repo" class="mono grow" placeholder="repo id (例: Qwen/Qwen3-30B-A3B-Instruct)" style="min-width:220px">
@@ -523,6 +524,20 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
         <button class="primary" id="dl-start" onclick="dlStart()">⬇️ ダウンロード</button>
         <span class="muted" id="dl-note"></span>
       </div>
+    </div>
+    <div class="card need-cal" id="sc-card">
+      <div class="row"><b style="font-size:15px">③ キャリブレーション</b>
+        <span class="muted" style="font-size:12px">この PC 向けの調整 (Maya / Strata / FreeToken 系)。実行中は対象プロファイルのサーバーを止めて GPU を独占します (10 分〜4 時間)</span>
+        <span class="grow"></span>
+        <button class="ghost" style="min-height:30px;font-size:12px" onclick="switchTab('calibrate')">🎯 詳細・全履歴</button></div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <select id="sc-profile" class="grow" style="min-width:200px" onchange="scPick()" title="調整するプロファイル"></select>
+        <label class="switch"><input type="checkbox" id="sc-restart"><span class="track"></span><span class="lab" style="font-size:12.5px">調整後にサーバーを起動し直す</span></label>
+        <button class="primary need-cal" id="sc-start" onclick="scStart()">🎯 キャリブレーション実行</button>
+        <span class="muted" id="sc-note"></span>
+      </div>
+      <div class="muted" id="sc-state" style="font-size:12px;margin-top:6px"></div>
+      <div class="muted mono" id="sc-preview" style="font-size:11px;margin-top:6px"></div>
     </div>
     <div id="ins-history"></div>
   </section>
@@ -2299,7 +2314,7 @@ function renderBackends() {
       <div class="row" style="margin-top:8px">${mod} ${inst}
         ${b.installable ? (det.installed
           ? `<button class="ghost need-install" style="min-height:28px;padding:3px 10px;font-size:12px" title="セットアップ画面で依存を入れ直します" onclick="setupTab('${b.id}')">📦 再インストール</button>`
-          : `<button class="primary need-install" style="min-height:28px;padding:3px 10px;font-size:12px" title="clone / .venv / pip install をこの画面から実行します" onclick="setupTab('${b.id}')">📦 インストール</button>`) : ""}
+          : `<button class="primary need-install" style="min-height:28px;padding:3px 10px;font-size:12px" title="clone / .venv / ${esc(insToolLabel((S.ins || {}).tool))} をこの画面から実行します" onclick="setupTab('${b.id}')">📦 インストール</button>`) : ""}
         <a class="muted" href="${esc(b.repo)}" target="_blank" rel="noopener" style="font-size:12px">${esc(b.repo.replace("https://github.com/",""))}</a>
       </div>
       <div class="kvs" style="margin-top:10px">
@@ -2984,18 +2999,29 @@ function calInit() {
   let d = {};
   try { d = JSON.parse(localStorage.getItem(CAL_KEY) || "{}") || {}; } catch { d = {}; }
   S.cal = { jobs: [], active: null, busy: false, supported: [], _pSig: "", _recv: 0,
-            logCursor: {}, logs: {}, openLog: "", logError: "" };
-  if (d.profile) $("#cal-profile").value = d.profile;
-  if (d.restart === true) $("#cal-restart").checked = true;
+            logCursor: {}, logs: {}, openLog: "", logError: "", scSig: "" };
+  if (d.profile) { $("#cal-profile").value = d.profile;
+                   if ($("#sc-profile")) $("#sc-profile").value = d.profile; }
+  if (d.restart === true) { $("#cal-restart").checked = true;
+                            if ($("#sc-restart")) $("#sc-restart").checked = true; }
   $("#cal-profile").addEventListener("change", calPersist);
   $("#cal-restart").addEventListener("change", calPersist);
 }
+const calSaved = () => { try { return JSON.parse(localStorage.getItem(CAL_KEY) || "{}") || {}; } catch { return {}; } };
+/* 選択 (プロファイル / 再起動) は 🎯 タブと セットアップ③ で同一の値を指す。
+   保存と同時に両セレクトへ写すので、どちらで選んでもう一方がズレない。 */
+function calWrite(patch) {
+  const cur = Object.assign(calSaved(), patch || {});
+  try { localStorage.setItem(CAL_KEY, JSON.stringify(cur)); } catch { /* 容量超過等は無視 */ }
+  if (cur.profile) ["#cal-profile", "#sc-profile"].forEach(id => {
+    const el = $(id);
+    if (el && [...el.options].some(o => o.value === cur.profile)) el.value = cur.profile;
+  });
+  ["#cal-restart", "#sc-restart"].forEach(id => { const el = $(id); if (el) el.checked = cur.restart === true; });
+}
 function calPersist() {
   if (!S.cal) return;
-  try {
-    localStorage.setItem(CAL_KEY, JSON.stringify({
-      profile: $("#cal-profile").value, restart: $("#cal-restart").checked }));
-  } catch { /* 容量超過等は無視 */ }
+  calWrite({profile: $("#cal-profile").value, restart: $("#cal-restart").checked});
 }
 function openCalibration(pid) {
   if (!S.cal) calInit();
@@ -3005,8 +3031,9 @@ function openCalibration(pid) {
 }
 /* このバックエンドがキャリブレーションを持つか。
    supported は /api/calibrations の応答 (サーバー側 CAL_BACKENDS と同じ)。初回描画の前に
-   ボタンを出すため、応答前は同じ集合をローカル既定値で持つ。 */
-const CAL_FALLBACK = ["maya", "strata", "strata-fork"];
+   ボタンを出すため、応答前は同じ集合をローカル既定値で持つ — ここがサーバーより狭いと
+   セットアップ③ と「完了後にキャリブレーション」が最初の 1 描画だけ消える。 */
+const CAL_FALLBACK = ["freetoken", "freetoken-fork", "maya", "strata", "strata-fork"];
 function calSupports(bid) {
   const list = (S.cal && (S.cal.supported || []).length) ? S.cal.supported : CAL_FALLBACK;
   return list.includes(bid);
@@ -3018,14 +3045,15 @@ function calProfileQuick(pid) {
   $("#cal-profile").value = pid; calPersist(); switchTab("calibrate");
   calStart();
 }
-async function calStart() {
+/* 実行のコア (確認 → POST → ライブ追跡)。🎯 タブのボタンと セットアップ③ から共用する。
+   opts.auto = インストール前に同意済みの自動計走だけ確認窓を省略する (離席中に窓待ちで止まらないため)。 */
+async function calRun(pid, restart, opts) {
+  if (!S.cal) calInit();
   const d = S.cal;
-  if (!d || d.busy || d.active) return;
-  const pid = $("#cal-profile").value;
-  if (!pid) return toast("プロファイルを選択してください");
+  if (d.busy || d.active) { toast("キャリブレーションがすでに実行中です"); return false; }
   const p = profileById(pid);
   const b = p && backendById(p.backend);
-  if (!p || !calSupports(p.backend)) return toast("Maya / Strata / FreeToken のプロファイルで実行できます");
+  if (!p || !calSupports(p.backend)) { toast("Maya / Strata / FreeToken のプロファイルで実行できます"); return false; }
   const live = liveOf(pid);
   const isFt = p.backend === "freetoken" || p.backend === "freetoken-fork";
   const t = { maya: "~10-15分 (DS4 は 25-40分)", "strata": "~15-30分 (measure) + apply",
@@ -3035,19 +3063,26 @@ async function calStart() {
                (p.backend === "strata" ? "設定は backup + smoke test 付きで適用されます。\n" : "") +
                (isFt ? "none / mtp(+chain) / lookup の自動選定 + 内部ノブの A/B まで全部実測し、勝者の --speculative と env を起動構成へ自動記載します。\n" : "") +
                "続行しますか?";
-  if (!confirm(warn)) return;
-  d.busy = true; renderCalibrate();
+  if (!(opts && opts.auto) && !confirm(warn)) return false;
+  d.busy = true; renderCalibrate(); renderSetup();
   try {
     const job = await api("/api/calibrations", {method: "POST",
-      body: {profile_id: pid, restart_after: $("#cal-restart").checked}});
+      body: {profile_id: pid, restart_after: restart === true}});
     toast(`キャリブレーション開始: ${job.profile_name} [${job.backend_name}]`);
     d.active = job.id;
     calPoll(true);
+    return true;
   } catch (e) {
     // メモリガードの拒否は理由が長い (必要な空き / 止めるべきもの) ので、消える前に読めるよう長めに出す
     toast("開始失敗: " + e.message, /空きメモリ/.test(e.message) ? 12000 : 3500);
+    return false;
   }
-  finally { d.busy = false; calPoll(true); }
+  finally { d.busy = false; calPoll(true); renderSetup(); }
+}
+async function calStart() {
+  const pid = $("#cal-profile").value;
+  if (!pid) return toast("プロファイルを選択してください");
+  calRun(pid, $("#cal-restart").checked);
 }
 async function calPoll(force) {
   calInit();
@@ -3058,6 +3093,7 @@ async function calPoll(force) {
     if (S.cal.active) await calPollLog(S.cal.active);
     calBadge();
     if (S.tab === "calibrate" || force) renderCalibrate();
+    if (S.tab === "setup") renderSetup();     // セットアップ画面は ③ と履歴に計走状態を出す
   } catch { /* ignore */ }
 }
 async function calPollLog(jid) {
@@ -3114,17 +3150,18 @@ function calStatusBadge(r) {
   const [cls, label] = map[r.status] || ["", r.status];
   return `<span class="badge ${cls}"><span class="dot"></span>${label}</span>`;
 }
+const CAL_STEP_LABEL = {create: "profile 作成", measure: "measure", review: "review", apply: "apply",
+                        calibrate: "実測調整", sweep: "MTP sweep", "calibrate-lookup": "lookup sweep",
+                        auto: "自動選定", "phase-mtp": "MTP 実測", "phase-lookup": "lookup 実測",
+                        tournament: "決勝"};
+const calStepLabel = name => CAL_STEP_LABEL[name] || name;
 function calStepChips(job) {
   const steps = job.steps || [];
   const chips = steps.map((name, i) => {
     const cur = job.step === name && job.status === "running";
     const idx = steps.indexOf(job.step);
     const cls = cur ? "warn" : (idx > i || job.status === "done" ? "ok" : "");
-    const label = {create: "profile 作成", measure: "measure", review: "review", apply: "apply",
-                   calibrate: "実測調整", sweep: "MTP sweep", "calibrate-lookup": "lookup sweep",
-                   auto: "自動選定", "phase-mtp": "MTP 実測", "phase-lookup": "lookup 実測",
-                   tournament: "決勝"}[name] || name;
-    return `<span class="badge ${cls}"><span class="dot"></span>${esc(label)}</span>`;
+    return `<span class="badge ${cls}"><span class="dot"></span>${esc(calStepLabel(name))}</span>`;
   });
   // sweep 中は job.step が現セル名 ("min_p=0.3" 等) になるので別バッジで進行を出す
   if (job.status === "running" && job.step && steps.indexOf(job.step) < 0)
@@ -3141,6 +3178,15 @@ function calSettingsTable(rep) {
       ? `<tr><td>基準比 (greedy プローブ)</td><td><b>${rep.improvement_pct >= 0 ? "+" : ""}${rep.improvement_pct}%</b></td></tr>` : "") +
     (rep.latency ? `<tr><td>レイテンシ内訳</td><td class="mono" style="font-size:11px">${esc(rep.latency)}</td></tr>` : "") +
     `</table></div>`;
+}
+/* 実行される計走の要約 (🎯 タブと セットアップ③ で同じ文を出す) */
+function calPreview(p) {
+  if (!p) return "";
+  if (p.backend === "maya")
+    return "maya.sh --calibrate --no-start --config <maya-<model>.json>  (起動せず実測 → config へ書き戻し)";
+  if (p.backend === "strata" || p.backend === "strata-fork")
+    return "strata.py engine calibrate --profile <保存profile> --measure --exclusive --out <report.json> → --review-result → --apply-result";
+  return "launcher 内で MTP / lookup を実測 (auto 選定) → 勝者の --speculative と env を起動構成 (profile / 起動 JSON) へ書き戻し";
 }
 function renderCalibrate() {
   calInit();
@@ -3167,11 +3213,7 @@ function renderCalibrate() {
   $("#cal-start").disabled = S.cal.busy || !!S.cal.active || !p;
   $("#cal-note").textContent = S.cal.busy ? "開始中…"
     : (S.cal.active ? "キャリブレーション実行中です (同時に 1 件)" : "");
-  $("#cal-preview").textContent = p
-    ? (p.backend === "maya"
-        ? "maya.sh --calibrate --no-start --config <maya-<model>.json>  (起動せず実測 → config へ書き戻し)"
-        : "strata.py engine calibrate --profile <保存profile> --measure --exclusive --out <report.json> → --review-result → --apply-result")
-    : "";
+  $("#cal-preview").textContent = calPreview(p);
   const active = (S.cal.jobs || []).find(r => r.id === S.cal.active) || null;
   renderCalActive(active);
   renderCalHistory(active);
@@ -3240,17 +3282,27 @@ function renderCalHistory(active) {
   }).join("");
 }
 
-/* ============================================================= セットアップ (インストール / モデルDL) */
+/* ============================================================= セットアップ (① インストール / ② モデルDL / ③ キャリブレーション) */
 /* シェルを介さない導線: /api/installs を叩くだけ。calibrate と同じ fire-and-forget + poll。
-   install は clone / venv / pip、download は HF キャッシュへの転送で progress に進捗が載る。 */
+   install は clone / venv / uv pip、download は HF キャッシュへの転送で progress に進捗が載る。
+   ③ の計走は /api/calibrations のまま (calTimer が全体で見張っているのでここでは描画だけ)。 */
 const INS_ST = {queued: ["info", "待機"], running: ["warn", "実行中"], done: ["ok", "完了"],
                 failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "中断 (launcher 再起動)"]};
 const INS_STEPS = {clone: "clone", branch: "ブランチ切替", venv: "venv 作成", precheck: "確認",
-                   install: "pip install", verify: "import 確認"};
+                   install: "uv pip install", verify: "import 確認"};
+/* install ステップの実体は uv があれば uv pip、無い環境だけ venv の pip。
+   手順名はサーバーが返す tool (実行する argv と同じ判定) で出す。 */
+const insToolLabel = tool => tool === "pip" ? "pip install" : "uv pip install";
+const insStepName = (name, job) =>
+  name === "install" ? insToolLabel((job || {}).tool) : (INS_STEPS[name] || name);
+/* セットアップ画面で走るジョブ = インストール / DL とキャリブレーションの両方 */
+const calUiOn = () => can("calibrate");
+const calBusy = () => calUiOn() && !!(S.cal && (S.cal.active || S.cal.busy));
+const insBusy = () => !!(S.ins && (S.ins.active || S.ins.busy));
 function insInit() {
   if (S.ins) return;                        // 何度呼ばれても状態を失わない (jobs / logs)
   S.ins = { jobs: [], active: null, installable: [], cacheDir: "", busy: false, _bSig: "",
-            _rSig: "", refPick: {},
+            _rSig: "", refPick: {}, tool: "uv", calAfter: null, scPick: "",
             logs: {}, logCursor: {}, open: "", notified: {} };
 }
 async function insPoll(force) {
@@ -3259,6 +3311,7 @@ async function insPoll(force) {
     const j = await api("/api/installs");
     S.ins.jobs = j.jobs || []; S.ins.active = j.active;
     S.ins.installable = j.installable || []; S.ins.cacheDir = j.cache_dir || "";
+    S.ins.tool = j.tool || "uv";
     const act = S.ins.jobs.find(r => r.id === S.ins.active);
     if (act) {
       await insPollLog(act.id);
@@ -3267,7 +3320,8 @@ async function insPoll(force) {
         if (act.kind === "download" && act.status === "done") {
           S.ins.notified[act.id] = 1; loadHf(true); toast("モデルのダウンロードが完了しました");
         } else if (act.kind === "install" && act.status === "done") {
-          S.ins.notified[act.id] = 1; refresh(false);
+          S.ins.notified[act.id] = 1; await refresh(false);
+          await insAfterInstall(act);       // 「インストール後に計走」の約束をここで果たす
         }
       }
     }
@@ -3289,7 +3343,7 @@ async function insPollLog(jid) {
 }
 function insBadge() {
   const nb = $("#nb-ins"); if (!nb) return;
-  const on = !!S.ins.active;
+  const on = !!S.ins.active || calBusy();   // ③ の計走もこの画面のジョブ (メニューのバッジ)
   nb.classList.toggle("hidden", !on);
   nb.classList.toggle("run", on);
   nb.textContent = on ? "▶" : "";
@@ -3299,17 +3353,23 @@ async function insStart() {
   const bid = $("#ins-backend").value;
   if (!bid) { toast("インストールするバックエンドを選んでください"); return; }
   if (S.ins.active) { toast("別のセットアップジョブが実行中です"); return; }
+  if (calBusy()) return toast("キャリブレーション実行中は開始できません (GPU 独占 / 同時に 1 件)");
   const nm = insName(bid), sp = insSpec(bid), ref = insRef(bid);
-  const what = !ref ? "clone / .venv 作成 / pip install"
-    : (!sp || !sp.cloned ? `${ref} を clone → .venv 作成 → pip install`
-      : (sp.current_ref === ref ? `既存 clone (${ref}) のまま .venv 作成 / pip install`
-        : `ブランチを ${sp.current_ref || "?"} → ${ref} に切り替えて .venv 作成 / pip install`));
-  if (!confirm(`${nm} をインストールしますか?\n${what} を実行します (初回は数 GB をダウンロード)`)) return;
+  const tl = insToolLabel(S.ins.tool);
+  const what = !ref ? `clone / .venv 作成 / ${tl}`
+    : (!sp || !sp.cloned ? `${ref} を clone → .venv 作成 → ${tl}`
+      : (sp.current_ref === ref ? `既存 clone (${ref}) のまま .venv 作成 / ${tl}`
+        : `ブランチを ${sp.current_ref || "?"} → ${ref} に切り替えて .venv 作成 / ${tl}`));
+  const calloc = calUiOn() && $("#ins-cal").checked === true && !!sp && calSupports(sp.id);
+  if (!confirm(`${nm} をインストールしますか?\n${what} を実行します (初回は数 GB をダウンロード)`
+    + (calloc ? "\n\n完了後、このバックエンドのプロファイルがあれば キャリブレーション を自動で続けます"
+                 + " (GPU を独占、Maya ~10-15分 / Strata ~15-30分 / FreeToken ~3-4時間)" : ""))) return;
   S.ins.busy = true; renderSetup();
   try {
-    await api("/api/installs", {method: "POST", body: {backend: bid, clean: $("#ins-clean").checked === true,
+    const job = await api("/api/installs", {method: "POST", body: {backend: bid, clean: $("#ins-clean").checked === true,
                                                        ref}});
-    toast("インストールを開始しました");
+    S.ins.calAfter = calloc ? {id: job && job.id, backend: bid} : null;
+    toast(calloc ? "インストールを開始しました (完了後に変調を自動実行)" : "インストールを開始しました");
   } catch (e) {
     toast("開始失敗: " + e.message);
   } finally {
@@ -3321,6 +3381,7 @@ async function dlStart() {
   const repo = (inputVal("#dl-repo") || "").trim();
   if (!repo) { toast("repo id を入力してください"); return; }
   if (S.ins.active) { toast("別のセットアップジョブが実行中です"); return; }
+  if (calBusy()) return toast("キャリブレーション実行中は開始できません (同時に 1 件)");
   const body = {repo_id: repo, revision: (inputVal("#dl-rev") || "").trim(),
                 backend: inputVal("#dl-dest") || "",
                 allow_patterns: (inputVal("#dl-patterns") || "").split(",").map(s => s.trim()).filter(Boolean)};
@@ -3331,20 +3392,27 @@ async function dlStart() {
   insPoll(true);
 }
 async function insCancel(id) {
-  if (!confirm("セットアップジョブを中断しますか?\nインストール中の pip / ダウンロードが中止されます")) return;
-  try { await api(`/api/installs/${id}/cancel`, {method: "POST"}); toast("中断要求を送信しました"); insPoll(true); }
+  if (!confirm(`セットアップジョブを中断しますか?\nインストール中の ${insToolLabel((S.ins || {}).tool)} / ダウンロードが中止されます`)) return;
+  try { await api(`/${insEp(id)}/${id}/cancel`, {method: "POST"}); toast("中断要求を送信しました"); insPoll(true); }
   catch (e) { toast("失敗: " + e.message); }
 }
 async function insDelete(id) {
-  if (!confirm("このセットアップ履歴を削除しますか?")) return;
-  try { await api(`/api/installs/${id}`, {method: "DELETE"}); toast("削除しました"); insPoll(true); }
+  const ep = insEp(id);
+  if (!confirm(ep === "calibrations"
+    ? "このキャリブレーション履歴を削除しますか?\nレポート (report) も一緒に消えます"
+    : "このセットアップ履歴を削除しますか?")) return;
+  try {
+    await api(`/${ep}/${id}`, {method: "DELETE"}); toast("削除しました");
+    if (ep === "calibrations") { delete S.ins.logs[id]; await calPoll(true); }
+    insPoll(true);
+  }
   catch (e) { toast("失敗: " + e.message); }
 }
 async function insToggle(id) {
   S.ins.open = S.ins.open === id ? "" : id;
   if (S.ins.open === id && !S.ins.logs[id]) {          // 履歴のログは開いた時に 1 回だけ取得
     try {
-      const r = await api(`/api/installs/${id}/log?cursor=0`);
+      const r = await api(`/${insEp(id)}/${id}/log?cursor=0`);
       S.ins.logs[id] = (r.lines || []).join("\n");
     } catch { S.ins.logs[id] = "(ログ取得失敗)"; }
   }
@@ -3368,7 +3436,7 @@ function insStepChips(job) {
   return steps.map((name, i) => {
     const cur = job.step === name && job.status === "running";
     const cls = cur ? "warn" : (idx > i || job.status === "done" ? "ok" : "");
-    return `<span class="badge ${cls}"><span class="dot"></span>${esc(INS_STEPS[name] || name)}</span>`;
+    return `<span class="badge ${cls}"><span class="dot"></span>${esc(insStepName(name, job))}</span>`;
   }).join(" ");
 }
 function insProg(run) {                                 // download の進捗 (累計 bytes / 現ファイル %)
@@ -3395,9 +3463,91 @@ const insRef = bid => {
 };
 function insPickBackend() { renderSetup(); }
 function insPickRef() { S.ins.refPick[$("#ins-backend").value] = $("#ins-ref").value; renderSetup(); }
-const insTitle = r => r.kind === "download" ? `⬇️ ${esc(r.repo_id)}`
+const insKind = r => r.kind === "download" ? "download"
+  : (r.kind === "install" ? "install" : "calibrate");
+const insTitle = r => insKind(r) === "calibrate"
+  ? `🎯 ${esc(r.profile_name || r.profile_id)} <span class="muted mono" style="font-size:12px">${esc(r.backend_name || r.backend)}</span>`
+  : insKind(r) === "download" ? `⬇️ ${esc(r.repo_id)}`
   : `📦 ${esc(insName(r.backend))}`
     + (r.ref ? ` <span class="muted mono" style="font-size:12px">${esc(r.ref)}</span>` : "");
+/* ---- セットアップ③: 🎯 タブと同じ選択・同じ実行コア (calRun) を使う薄い UI ---- */
+const scProfiles = () => calUiOn() ? (((S.state || {}).profiles || []).filter(p => calSupports(p.backend))) : [];
+function scPick() {
+  if (!S.cal) calInit();
+  S.ins.scPick = $("#sc-profile").value;
+  calWrite({profile: S.ins.scPick, restart: $("#sc-restart").checked});
+  renderSetup();
+}
+function scStart() {
+  insInit();
+  if (insBusy()) return toast("インストール / ダウンロード実行中は開始できません (同時に 1 件)");
+  const pid = $("#sc-profile").value;
+  if (!pid) return toast("キャリブレーションするプロファイルを選択してください");
+  S.ins.scPick = pid;
+  calRun(pid, $("#sc-restart").checked);
+}
+/* インストール成功後の自動計走。① のスイッチで同意した分だけ走る。
+   対象が 0 件 / 複数なら走らせず、その理由をその場で伝える
+   (プロファイルやモデルパスを勝手に作らない = ③ で選ばせる)。 */
+async function insAfterInstall(job) {
+  const pend = S.ins.calAfter;
+  if (!pend || pend.id !== job.id) return;
+  S.ins.calAfter = null;
+  const bid = pend.backend;
+  if (!calUiOn() || !calSupports(bid)) return;
+  if (calBusy()) return toast("キャリブレーションがすでに走っているため、自動実行はスキップしました", 8000);
+  const cands = scProfiles().filter(p => p.backend === bid);
+  if (!cands.length)
+    return toast(`${insName(bid)} のプロファイルが無いのでキャリブレーションはスキップしました`
+                 + " — プロファイルを作成してから ③ で実行してください", 11000);
+  if (cands.length > 1) {
+    S.ins.scPick = cands[0].id; renderSetup();
+    return toast(`対象プロファイルが ${cands.length} 件あります — セットアップ③ で選んで実行してください`, 11000);
+  }
+  const p = cands[0];
+  S.ins.scPick = p.id;
+  if (await calRun(p.id, calSaved().restart === true, {auto: true}))
+    toast(`インストール完了 → ${p.name} のキャリブレーションを自動開始しました`, 9000);
+  renderSetup();
+}
+function renderSetupCal(busy) {
+  const card = $("#sc-card");
+  if (!card) return;
+  if (!calUiOn()) { card.classList.add("hidden"); return; }   // 計走権限が無いユーザーには ③ を出さない
+  card.classList.remove("hidden");
+  if (!S.cal) calInit();
+  const sel = $("#sc-profile"), ps = scProfiles();
+  const sig = ps.map(p => p.id + ":" + p.name).join("|");
+  if (sig !== S.cal.scSig || ![...sel.options].some(o => o.value === sel.value)) {
+    S.cal.scSig = sig;
+    const keep = S.ins.scPick || sel.value || calSaved().profile || "";
+    sel.innerHTML = ps.length
+      ? ps.map(p => `<option value="${p.id}">${esc(p.name)} · ${esc(backendById(p.backend)?.name || p.backend)}</option>`).join("")
+      : `<option value="">対象プロファイルがありません (Maya / Strata / FreeToken 系)</option>`;
+    const want = ps.some(p => p.id === keep) ? keep
+      : (ps.find(p => p.backend === $("#ins-backend").value) || ps[0] || {}).id || "";
+    sel.value = want;
+    if (want) S.ins.scPick = want;
+  }
+  const p = ps.find(x => x.id === sel.value) || null;
+  const calOn = !!S.cal.active;
+  $("#sc-start").disabled = busy || S.cal.busy || calOn || !p;
+  $("#sc-restart").disabled = busy || calOn;
+  $("#sc-note").textContent = S.cal.busy ? "開始中…"
+    : (calOn ? "キャリブレーション実行中です (同時に 1 件)"
+      : (busy ? "インストール / ダウンロード実行中…" : ""));
+  const sess = p ? liveOf(p.id) : null;
+  $("#sc-state").innerHTML = !ps.length
+    ? `キャリブレーション対応のプロファイルがまだありません。`
+      + `① インストール → <b>プロファイル作成</b> → ② モデルダウンロード の順に揃うと ③ が使えるようになります`
+      + ` <button class="ghost" style="min-height:26px;padding:2px 9px;font-size:12px" onclick="switchTab('profiles')">📋 プロファイルへ</button>`
+    : (!p ? "対象プロファイルがありません"
+      : (sess ? `このプロファイルのサーバーは稼働中 (:${sess.port || "-"}) — 実行中に停止して GPU を独占します`
+        : ($("#sc-restart").checked ? "未起動 → 調整後に自動起動します"
+                                    : "未起動 → 調整のみ実行します (完了後は起動タブから開始)"))
+        + (busy ? " / 他のジョブが終わり次第実行できます" : ""));
+  $("#sc-preview").textContent = calPreview(p);
+}
 function renderSetup() {
   insInit();
   const sel = $("#ins-backend");
@@ -3436,33 +3586,50 @@ function renderSetup() {
     if ([...dd.options].some(o => o.value === cur)) dd.value = cur;
   }
   const dSp = insSpec(dd.value);
-  $("#dl-note").textContent = S.ins.active ? "実行中のジョブがあります"
-    : (dSp ? `保存先: ${dSp.model_data}/<org>--<name> (完了後このバックエンドの起動 JSON にも記入)` : "");
-  $("#ins-start").disabled = S.ins.busy || !!S.ins.active || !specs.length;
-  $("#dl-start").disabled = !!S.ins.active;
-  $("#ins-note").textContent = S.ins.busy ? "開始中…" : (S.ins.active ? "セットアップ実行中です (同時に 1 件)" : "");
+  const calLock = calBusy(), insLock = !!S.ins.active;
+  $("#ins-tool").textContent = insToolLabel(S.ins.tool);
+  $("#dl-note").textContent = calLock ? "キャリブレーション実行中のため開始できません"
+    : (insLock ? "実行中のジョブがあります"
+      : (dSp ? `保存先: ${dSp.model_data}/<org>--<name> (完了後このバックエンドの起動 JSON にも記入)` : ""));
+  $("#ins-start").disabled = S.ins.busy || insLock || calLock || !specs.length;
+  $("#dl-start").disabled = insLock || calLock;
+  $("#ins-note").textContent = S.ins.busy ? "開始中…"
+    : (insLock ? "セットアップ実行中です (同時に 1 件)" : (calLock ? "キャリブレーション実行中です (同時に 1 件)" : ""));
+  // ① の「インストール後にキャリブレーション」は、選んだバックエンドが計走対象のときだけ出す
+  const canCal = calUiOn() && !!sp && calSupports(sp.id);
+  $("#ins-calloc").style.display = canCal ? "" : "none";
+  if (!canCal) $("#ins-cal").checked = false;
   $("#ins-branch").textContent = !sp ? "" : (!refs.length ? "" :
     (!sp.cloned ? `未 clone — ${ref} を clone します`
       : (sp.current_ref === ref ? `既存 clone は ${ref} 済み — ブランチは変えません`
         : (sp.current_ref ? `既存 clone は ${sp.current_ref} — ${ref} へ切り替えます (未コミットの変更があれば失敗)`
           : `既存 clone のブランチが判別できないため ${ref} への切替を試みます`))));
+  const tl = insToolLabel(S.ins.tool);
   $("#ins-preview").textContent = !sp ? "" : (!sp.cloned
-    ? `git clone --depth 1 ${ref ? "-b " + ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → pip install -e ".[${sp.extras}]"`
+    ? `git clone --depth 1 ${ref ? "-b " + ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → ${tl} -e ".[${sp.extras}]"`
     : (sp.current_ref === ref
-        ? `既存 clone (${ref}) → .venv 作成 → pip install -e ".[${sp.extras}]"`
-        : `git fetch + checkout ${ref} → .venv 作成 → pip install -e ".[${sp.extras}]"`));
+        ? `既存 clone (${ref}) → .venv 作成 → ${tl} -e ".[${sp.extras}]"`
+        : `git fetch + checkout ${ref} → .venv 作成 → ${tl} -e ".[${sp.extras}]"`));
+  const busy = insLock || S.ins.busy;
+  renderSetupCal(busy);
   const active = (S.ins.jobs || []).find(r => r.id === S.ins.active) || null;
   renderInsActive(active);
   renderInsHistory(active);
 }
+/* 上の実行中カード: インストール / DL と キャリブレーション を1つの枠に並べる
+   (同時に走る組み合わせは作れないが、どちらが走っていてもここに出るので画面が迷子にならない) */
 function renderInsActive(run) {
   const el = $("#ins-active");
   if (!el) return;
-  if (!run) { el.innerHTML = ""; return; }
+  const c = S.cal || {};
+  const cal = calUiOn() ? (c.jobs || []).find(r => r.id === c.active) : null;
+  el.innerHTML = (run ? insActiveCard(run) : "") + (cal ? calActiveCardSetup(cal) : "");
+}
+function insActiveCard(run) {
   const secs = (run.finished_at ? run.finished_at : Date.now() / 1000) - (run.started_at || Date.now() / 1000);
   const tail = (S.ins.logs[run.id] || "").split("\n").filter(Boolean).slice(-30).join("\n");
   const live = run.status === "running" || run.status === "queued";
-  el.innerHTML = `<div class="card" style="border-color:#254059">
+  return `<div class="card" style="border-color:#254059">
     <div class="row">
       ${insStatusBadge(run)}
       <b class="grow ellip" style="font-size:15px">${insTitle(run)}${run.kind === "install" && run.clean ? ` <span class="muted" style="font-size:12px">(クリーン)</span>` : ""}</b>
@@ -3478,27 +3645,62 @@ function renderInsActive(run) {
     <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
   </div>`;
 }
+function calActiveCardSetup(run) {
+  const secs = (run.finished_at ? run.finished_at : Date.now() / 1000) - (run.started_at || Date.now() / 1000);
+  const tail = ((S.cal || {}).logs[run.id] || "").split("\n").filter(Boolean).slice(-30).join("\n");
+  const live = run.status === "running" || run.status === "queued";
+  return `<div class="card" style="border-color:#254059">
+    <div class="row">
+      ${insStatusBadge(run)}
+      <b class="grow ellip" style="font-size:15px">${insTitle(run)} <span class="muted" style="font-size:12px">③ キャリブレーション</span></b>
+      ${live ? `<button class="danger" style="min-height:34px;font-size:12.5px" onclick="calCancel('${run.id}')">⏹ 中断</button>`
+             : `<button class="ghost" style="min-height:34px;font-size:12.5px" onclick="calPoll(true)">↻ 最新化</button>`}
+    </div>
+    <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">${calStepChips(run)}</div>
+    <div class="row" style="gap:8px;margin-top:8px">
+      <span class="muted mono">${fmtUp(secs)}</span>
+      ${run.error ? `<span style="color:var(--err);font-size:12px">${esc(String(run.error).slice(0, 200))}</span>` : ""}
+    </div>
+    <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
+  </div>`;
+}
+/* 履歴は 3 種 (インストール / モデルDL / キャリブレーション) を開始時刻順で1本に束ねる。
+   id が ins… / cal… で分かれるので、ログ取得と削除は接頭辞で API を選ぶ。 */
+const insEp = id => String(id || "").indexOf("cal") === 0 ? "calibrations" : "installs";
+const INS_KIND_LABEL = {install: "インストール", download: "モデルDL", calibrate: "キャリブレーション"};
+function insMerged() {
+  const rows = (S.ins.jobs || []).map(r => Object.assign({_k: insKind(r)}, r));
+  if (calUiOn()) ((S.cal || {}).jobs || []).forEach(r => rows.push(Object.assign({_k: "calibrate"}, r)));
+  return rows.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+}
 function renderInsHistory(active) {
   const el = $("#ins-history");
-  const runs = (S.ins.jobs || []).filter(r => r.id !== (active && active.id));
+  const busy = {};
+  if (active) busy[active.id] = 1;
+  if (calUiOn() && S.cal && S.cal.active) busy[S.cal.active] = 1;
+  const runs = insMerged().filter(r => !busy[r.id]);
   if (!runs.length) { el.innerHTML = `<div class="empty" style="margin-top:12px">セットアップ履歴はまだありません。</div>`; return; }
   el.innerHTML = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
     const open = S.ins.open === r.id;
     const tail = (S.ins.logs[r.id] || "").split("\n").filter(Boolean).slice(-120).join("\n");
+    const detail = r._k === "download"
+      ? esc(r.repo_id) + (r.revision ? " @ " + esc(r.revision) : "") + (r.progress ? " · 計 " + insBytes(r.progress.done) : "")
+      : r._k === "calibrate"
+        ? esc((r.steps || []).map(calStepLabel).join(" → ")) + (r.mode ? ` · ${esc(r.mode)}` : "")
+        : esc((r.steps || []).map(s => insStepName(s, r)).join(" → "));
     return `<div class="card">
       <div class="row">
         ${insStatusBadge(r)}
         <b class="grow ellip" style="font-size:14.5px;cursor:pointer" onclick="insToggle('${r.id}')">${insTitle(r)}</b>
-        <span class="muted" style="font-size:12px">${r.kind === "download" ? "モデルDL" : "インストール"}</span>
+        <span class="muted" style="font-size:12px">${INS_KIND_LABEL[r._k]}</span>
       </div>
       <div class="muted" style="margin-top:5px;font-size:12px">
-        ${r.kind === "download"
-          ? esc(r.repo_id) + (r.revision ? " @ " + esc(r.revision) : "") + (r.progress ? " · 計 " + insBytes(r.progress.done) : "")
-          : esc((r.steps || []).map(s => INS_STEPS[s] || s).join(" → "))}
+        ${detail}
         ${r.error ? ` · <span style="color:var(--err)">${esc(String(r.error).slice(0, 120))}</span>` : ""}
         · ${r.finished_at ? fmtAgo(r.finished_at) : "-"}</div>
       <div class="row" style="margin-top:8px">
         <button onclick="insToggle('${r.id}')">${open ? "▲ 閉じる" : "🧾 ログ"}</button>
+        ${r._k === "calibrate" ? `<button class="ghost" onclick="openCalibration('${esc(r.profile_id)}')">🎯 レポート</button>` : ""}
         <span class="grow"></span>
         <button class="ghost danger" onclick="insDelete('${r.id}')">削除</button>
       </div>

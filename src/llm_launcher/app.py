@@ -32,7 +32,7 @@ from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
-                        clone_exists, current_ref)
+                        clone_exists, current_ref, install_tool)
 from . import oom
 from . import rbac
 from . import sysinfo
@@ -1598,9 +1598,14 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/api/installs")
     async def list_installs() -> dict[str, Any]:
-        """履歴 + 実行中ジョブ + UI インストール可能なバックエンド。"""
+        """履歴 + 実行中ジョブ + UI インストール可能なバックエンド。
+
+        tool = 実際に走るインストールコマンド (uv があれば uv pip、無ければ venv の pip)。
+        UI の手順名はこの値で書き、表示と実行のズレを防ぐ。
+        """
         return {"jobs": installs.list_jobs(), "active": installs.active_id,
-                "installable": _installable_public(), "cache_dir": str(hf_hub_cache_dir())}
+                "installable": _installable_public(), "cache_dir": str(hf_hub_cache_dir()),
+                "tool": install_tool()}
 
     @app.get("/api/installs/{jid}")
     async def get_install(jid: str) -> dict[str, Any]:
