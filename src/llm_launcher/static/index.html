@@ -238,7 +238,7 @@ table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
 .nbadge.run{background:var(--acc);color:#04101f}
 /* ---------------- ロール権限で隠す要素 (キーは rbac.CAPS / can() と対応) ---------------- */
 body.no-edit .need-edit,body.no-bench .need-bench,body.no-cal .need-cal,body.no-oom .need-oom,
-body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-dashboard{
+body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-dashboard,body.no-install .need-install{
   display:none!important}
 .perm-row{display:flex;align-items:center;gap:10px;padding:9px 2px;border-bottom:1px solid var(--line);min-width:0}
 .perm-row:last-child{border-bottom:0}
@@ -476,7 +476,7 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
   </section>
 
   <section id="view-calibrate" class="view hidden">
-    <h2 class="view-title">キャリブレーション <span class="muted">Maya / Strata の「この PC 向け調整」を 1 ボタンで実行</span></h2>
+    <h2 class="view-title">キャリブレーション <span class="muted">Maya / Strata / FreeToken の「この PC 向け調整」を 1 ボタンで実行</span></h2>
     <div id="cal-active"></div>
     <div class="card">
       <div class="row" style="gap:8px">
@@ -494,6 +494,35 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
     </div>
     <div id="cal-history"></div>
   </section>
+  <section id="view-setup" class="view hidden">
+    <h2 class="view-title">セットアップ <span class="muted">インストールとモデルダウンロードをこの画面だけで完了させます (ターミナル不要)</span></h2>
+    <div id="ins-active"></div>
+    <div class="card">
+      <div class="row"><b style="font-size:15px">インストール</b>
+        <span class="muted" style="font-size:12px">repo clone → .venv 作成 → pip install を順に実行します (同時に 1 ジョブ)</span></div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <select id="ins-backend" class="grow" style="min-width:200px"></select>
+        <label class="switch"><input type="checkbox" id="ins-clean"><span class="track"></span><span class="lab" style="font-size:12.5px">クリーン再インストール (.venv を破棄)</span></label>
+        <button class="primary" id="ins-start" onclick="insStart()">📦 インストール実行</button>
+        <span class="muted" id="ins-note"></span>
+      </div>
+      <div class="muted mono" id="ins-preview" style="font-size:11px;margin-top:8px"></div>
+    </div>
+    <div class="card">
+      <div class="row"><b style="font-size:15px">モデルダウンロード</b>
+        <span class="muted" style="font-size:12px">Hugging Face Hub からキャッシュ <span id="ins-hfdir" class="mono"></span> へ。完了後に対応モデル一覧へ反映します</span></div>
+      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <input type="text" id="dl-repo" class="mono grow" placeholder="repo id (例: Qwen/Qwen3-30B-A3B-Instruct)" style="min-width:220px">
+        <input type="text" id="dl-rev" class="mono" placeholder="revision (省略可)" style="max-width:160px">
+      </div>
+      <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap">
+        <input type="text" id="dl-patterns" class="mono grow" placeholder="ファイル名の絞り込み (カンマ区切り、省略可。例: *.safetensors,config.json)" style="min-width:220px">
+        <button class="primary" id="dl-start" onclick="dlStart()">⬇️ ダウンロード</button>
+        <span class="muted" id="dl-note"></span>
+      </div>
+    </div>
+    <div id="ins-history"></div>
+  </section>
 </main>
 
 <nav id="sidemen">
@@ -506,6 +535,7 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
     <button class="mitem" data-tab="playground" id="mi-playground"><span class="ico">🧪</span>プレイグラウンド</button>
     <button class="mitem" data-tab="bench" id="mi-bench"><span class="ico">📊</span>ベンチマーク<span class="nbadge hidden" id="nb-bench"></span></button>
     <button class="mitem" data-tab="calibrate" id="mi-calibrate"><span class="ico">🎯</span>キャリブレーション<span class="nbadge hidden" id="nb-cal"></span></button>
+    <button class="mitem hidden" data-tab="setup" id="mi-setup"><span class="ico">📦</span>セットアップ<span class="nbadge run hidden" id="nb-ins"></span></button>
     <button class="mitem" data-tab="profiles" id="mi-profiles"><span class="ico">📋</span>プロファイル</button>
     <button class="mitem" data-tab="backends" id="mi-backends"><span class="ico">⚙️</span>バックエンド</button>
     <button class="mitem hidden" data-tab="users" id="mi-users"><span class="ico">👥</span>ユーザー管理</button>
@@ -534,6 +564,7 @@ const S = {
   pg: null,              // プレイグラウンド状態 (pgInit() で遅延初期化)
   bench: null,           // ベンチマーク状態 (bmInit() で初期化)
   cal: null,             // キャリブレーション状態 (calInit() で初期化)
+  ins: null,             // セットアップ状態 (insInit() で初期化)
 };
 const $ = (q, el=document) => el.querySelector(q);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -593,7 +624,7 @@ function statusBadge(s) {
 }
 
 /* ============================================================= polling */
-let refreshTimer = null, logTimer = null, sysTimer = null, clockTimer = null, benchTimer = null, calTimer = null;
+let refreshTimer = null, logTimer = null, sysTimer = null, clockTimer = null, benchTimer = null, calTimer = null, insTimer = null;
 async function refresh(silent = true) {
   try {
     S.state = await api("/api/state");
@@ -615,14 +646,17 @@ async function refreshSystem() {
 }
 function startTimers() {
   clearInterval(refreshTimer); clearInterval(logTimer); clearInterval(sysTimer); clearInterval(benchTimer);
+  clearInterval(calTimer); clearInterval(insTimer);
   refreshTimer = setInterval(() => refresh(true), 3000);
   logTimer = setInterval(pumpLogs, 1500);
   sysTimer = setInterval(refreshSystem, 4000);
   benchTimer = setInterval(bmPoll, 2500);
   calTimer = setInterval(calPoll, 2500);
+  insTimer = setInterval(insPoll, 3000);
   refreshSystem();
   bmPoll();
   calPoll();
+  insPoll();
 }
 
 /* ============================================================= side menu (ハンバーガー) */
@@ -641,7 +675,7 @@ document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => {
 });
 /* ロールで開けるタブ。起動 / 稼働中は常に開ける (メンテナーの基本操作)。users は管理者のみ */
 const TAB_CAP = { home: "dashboard", history: "history", playground: "playground",
-                  bench: "bench", calibrate: "calibrate", profiles: "profiles.edit", backends: "backends.edit" };
+                  bench: "bench", calibrate: "calibrate", setup: "install", profiles: "profiles.edit", backends: "backends.edit" };
 function tabAllowed(tab) {
   if (tab === "users") return AUTH.isAdmin;
   const cap = TAB_CAP[tab];
@@ -670,6 +704,7 @@ function renderAll(force) {
   if (S.tab === "playground") renderPlayground();
   if (S.tab === "bench") renderBench();
   if (S.tab === "calibrate") renderCalibrate();
+  if (S.tab === "setup") renderSetup();
 }
 function renderTabBadges() {
   const n = liveSessions().length;
@@ -792,10 +827,11 @@ function applyAuthUi() {
   b.toggle("no-oom", !can("oom.edit"));
   b.toggle("no-backend", !can("backends.edit"));
   b.toggle("no-dashboard", !can("dashboard"));
+  b.toggle("no-install", !can("install"));
   // メニュー項目
   [["#mi-home", "dashboard"], ["#mi-history", "history"], ["#mi-playground", "playground"],
    ["#mi-bench", "bench"], ["#mi-calibrate", "calibrate"], ["#mi-profiles", "profiles.edit"],
-   ["#mi-backends", "backends.edit"]]
+   ["#mi-backends", "backends.edit"], ["#mi-setup", "install"]]
     .forEach(([id, cap]) => $(id).classList.toggle("hidden", !can(cap)));
   $("#mi-users").classList.toggle("hidden", !AUTH.isAdmin);
   if (!tabAllowed(S.tab)) switchTab("launch");
@@ -1105,7 +1141,7 @@ function renderLaunch() {
              ${s.ready?`<button class="need-bench" onclick="openBench('${p.id}')">📊 Bench</button>`:""}`
           : `<button class="primary" onclick="startProfile('${p.id}')" ${S.busy[p.id]?"disabled":""}>${S.busy[p.id]?'<span class="spin"></span>':'▶ 起動'}</button>
              <button class="need-bench" onclick="openBench('${p.id}')">📊 Bench</button>`}
-        ${calSupports(p.backend) ? `<button class="need-cal" title="この PC 向け調整をワンクリック実行 (Maya / Strata)" onclick="calProfileQuick('${p.id}')">🎯 キャリブ</button>` : ""}
+        ${calSupports(p.backend) ? `<button class="need-cal" title="この PC 向け調整をワンクリック実行 (Maya / Strata / FreeToken)" onclick="calProfileQuick('${p.id}')">🎯 キャリブ</button>` : ""}
         <span class="grow"></span>
         <button class="ghost need-edit" onclick="openEditor('${p.id}')">編集</button>
       </div>
@@ -1499,7 +1535,7 @@ function renderProfiles() {
             : `<button class="primary" onclick="startProfile('${p.id}')">▶ 起動</button>`}
         <button class="need-edit" onclick="openEditor('${p.id}')">編集</button>
         <button class="need-bench" onclick="openBench('${p.id}')">📊 Bench</button>
-        ${calSupports(p.backend) ? `<button class="need-cal" title="この PC 向け調整をワンクリック実行 (Maya / Strata)" onclick="calProfileQuick('${p.id}')">🎯 キャリブ</button>` : ""}
+        ${calSupports(p.backend) ? `<button class="need-cal" title="この PC 向け調整をワンクリック実行 (Maya / Strata / FreeToken)" onclick="calProfileQuick('${p.id}')">🎯 キャリブ</button>` : ""}
         <button class="ghost need-edit" onclick="dupProfile('${p.id}')">複製</button>
         <button class="ghost need-edit" onclick="exportProfiles(['${p.id}'])">エクスポート</button>
         <span class="grow"></span>
@@ -1789,6 +1825,31 @@ function renderEditor() {
     if (!fs.length) return "";
     return `<div class="sec-h">${esc(sec.label)} <span class="muted" style="font-weight:400">(${fs.length}項目)</span></div>` + fs.map(fieldHtml).join("");
   }).join("");
+  // 起動 JSON 主体モード (Strata 方式 / FreeToken 系): JSON がエンジン引数の正で、
+  // フォームはユーザー最小パラメータだけ。キャリブレーションの勝者も JSON へ自動記載される
+  const launchCap = !!b?.launch_json;
+  const cfgPath = String(d.values?.config || "").trim();
+  const minimalFields = ["port", "api_key"]
+    .map(k => (b?.fields || []).find(f => f.key === k)).filter(Boolean);
+  const launchBlock = !launchCap ? "" : (cfgPath ? `
+    <div class="sec-h">起動 JSON (Strata 方式) <span class="muted" style="font-weight:400">(エンジンパラメータは JSON 主体・キャリブ結果は自動記載)</span></div>
+    <div class="fitem"><label class="f" for="ed-config">起動 JSON パス</label>
+      <input type="text" id="ed-config" class="mono" data-fkey="config" value="${esc(cfgPath)}">
+      <div class="row" style="gap:8px;margin-top:6px">
+        <button type="button" class="ghost" onclick="launchJsonShow(this)">JSON 表示 / 編集</button>
+        <button type="button" class="ghost" onclick="launchJsonRelease()">解除 (全項目モードへ戻す)</button>
+      </div>
+      <textarea id="ed-launch-json" class="mono" hidden style="width:100%;min-height:240px;margin-top:6px"></textarea>
+      <button type="button" id="ed-launch-save" class="ghost" onclick="launchJsonSave()" hidden style="margin-top:6px">JSON を保存</button>
+    </div>
+    <div class="sec-h">ユーザーパラメータ (最小) <span class="muted" style="font-weight:400">(空 = JSON 側の値を使う)</span></div>
+    ${minimalFields.map(fieldHtml).join("")}
+  ` : `
+    <div class="row" style="gap:8px;margin:2px 2px 10px">
+      <button type="button" class="ghost" onclick="launchJsonExport()">📄 現在のパラメータから起動 JSON を作成 (Strata 方式へ切替)</button>
+    </div>
+  `);
+  const paramsHtml = (launchCap && cfgPath) ? launchBlock : launchBlock + fieldsHtml;
   const legacyExtra = String(d.extra_args || "").trim();
   sheet.innerHTML = `
     <h3>${d.id ? "プロファイル編集" : "新規プロファイル"}</h3>
@@ -1800,7 +1861,7 @@ function renderEditor() {
     </select>
     <div class="muted" style="margin-top:6px">${esc(b?.desc || "")}</div>
     <h2 class="view-title" style="margin:16px 2px 0">起動パラメータ <span class="muted">(${esc(b?.name||"")} 既定値入り・☑送信 の項目だけコマンドに付きます。☐の項目はモジュール側の自動判定に委ねられるため上書きされません)</span></h2>
-    <div class="fgrid" style="margin-top:4px">${fieldsHtml}</div>
+    <div class="fgrid" style="margin-top:4px">${paramsHtml}</div>
     ${legacyExtra ? `
     <details class="adv" open>
       <summary>追加引数 (レガシー項目 — 現在の値: ${esc(legacyExtra)})</summary>
@@ -1856,6 +1917,42 @@ function renderEditor() {
   $("#ed-simple").addEventListener("change", collectDraft);
   ["ed-name","ed-note"].forEach(id => $(`#${id}`).addEventListener("input", collectDraft));
   schedulePreview();
+}
+async function launchJsonExport() {
+  const d = S.editing;
+  if (!d || !d.id) return toast("先にプロファイルを保存してください (新規作成中は JSON を作れません)");
+  try {
+    collectDraft();
+    await api(`/api/profiles/${d.id}`, {method:"PUT", body: editorBody()});   // 現値を保存してから書き出し
+    const r = await api(`/api/profiles/${d.id}/launch-json`, {method:"POST"});
+    toast("起動 JSON を作成しました");
+    await refresh(false);
+    openEditor(d.id);           // config 主体モードで開き直す
+  } catch (e) { toast("作成失敗: " + e.message); }
+}
+async function launchJsonShow(btn) {
+  const d = S.editing;
+  const ta = $("#ed-launch-json"), sv = $("#ed-launch-save");
+  if (!ta.hidden) { ta.hidden = true; sv.hidden = true; return; }
+  try {
+    const r = await api(`/api/profiles/${d.id}/launch-json`);
+    ta.value = r.exists ? JSON.stringify(r.launch, null, 1) : "";
+    ta.hidden = false; sv.hidden = false;
+  } catch (e) { toast("読めません: " + e.message); }
+}
+async function launchJsonSave() {
+  const d = S.editing;
+  try {
+    await api(`/api/profiles/${d.id}/launch-json`,
+              {method:"PUT", body:{text: $("#ed-launch-json").value}});
+    toast("起動 JSON を保存しました");
+    schedulePreview();
+  } catch (e) { toast("保存失敗: " + e.message); }
+}
+function launchJsonRelease() {
+  S.editing.values.config = "";
+  renderEditor();               // 全項目モード表示へ (保存して確定)
+  toast("解除しました — 「保存」で確定します (JSON ファイル自体は残ります)");
 }
 async function saveEditor() {
   const body = editorBody();
@@ -2197,6 +2294,9 @@ function renderBackends() {
         <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="redetect('${b.id}')">再検出</button>
       </div>
       <div class="row" style="margin-top:8px">${mod} ${inst}
+        ${b.installable ? (det.installed
+          ? `<button class="ghost need-install" style="min-height:28px;padding:3px 10px;font-size:12px" title="セットアップ画面で依存を入れ直します" onclick="setupTab('${b.id}')">📦 再インストール</button>`
+          : `<button class="primary need-install" style="min-height:28px;padding:3px 10px;font-size:12px" title="clone / .venv / pip install をこの画面から実行します" onclick="setupTab('${b.id}')">📦 インストール</button>`) : ""}
         <a class="muted" href="${esc(b.repo)}" target="_blank" rel="noopener" style="font-size:12px">${esc(b.repo.replace("https://github.com/",""))}</a>
       </div>
       <div class="kvs" style="margin-top:10px">
@@ -2870,7 +2970,7 @@ function renderBenchHistory() {
 }
 
 /* ============================================================= calibration */
-/* Maya / Strata の「この PC 向け調整」を 1 ボタンで実行する。
+/* Maya / Strata / FreeToken の「この PC 向け調整」を 1 ボタンで実行する。
    実行はバックエンド (POST /api/calibrations) が裏で走らせ、ここでは 2.5 秒ポーリングで
    進行 (step / ログ末尾 / 結果) を描画する。エンジン起動と config 書き換えを伴うため、
    実行前に同じプロファイルのサーバーを launcher が停止して GPU を独占する。
@@ -2922,12 +3022,15 @@ async function calStart() {
   if (!pid) return toast("プロファイルを選択してください");
   const p = profileById(pid);
   const b = p && backendById(p.backend);
-  if (!p || !calSupports(p.backend)) return toast("Maya / Strata のプロファイルで実行できます");
+  if (!p || !calSupports(p.backend)) return toast("Maya / Strata / FreeToken のプロファイルで実行できます");
   const live = liveOf(pid);
-  const t = { maya: "~10-15分 (DS4 は 25-40分)", "strata": "~15-30分 (measure) + apply" }[p.backend] || "長時間";
+  const isFt = p.backend === "freetoken" || p.backend === "freetoken-fork";
+  const t = { maya: "~10-15分 (DS4 は 25-40分)", "strata": "~15-30分 (measure) + apply",
+              "freetoken": "~3-4時間 (全部測りの1発)", "freetoken-fork": "~3-4時間 (全部測りの1発)" }[p.backend] || "長時間";
   const warn = (live ? "稼働中のサーバーを停止して GPU を独占します。\n" : "") +
                `${b?.name || p.backend}: この PC 向け調整を実行します (${t}, PC はその間占有されます)。\n` +
                (p.backend === "strata" ? "設定は backup + smoke test 付きで適用されます。\n" : "") +
+               (isFt ? "none / mtp(+chain) / lookup の自動選定 + 内部ノブの A/B まで全部実測し、勝者の --speculative と env を起動構成へ自動記載します。\n" : "") +
                "続行しますか?";
   if (!confirm(warn)) return;
   d.busy = true; renderCalibrate();
@@ -3010,14 +3113,20 @@ function calStatusBadge(r) {
 }
 function calStepChips(job) {
   const steps = job.steps || [];
-  return steps.map((name, i) => {
+  const chips = steps.map((name, i) => {
     const cur = job.step === name && job.status === "running";
     const idx = steps.indexOf(job.step);
     const cls = cur ? "warn" : (idx > i || job.status === "done" ? "ok" : "");
     const label = {create: "profile 作成", measure: "measure", review: "review", apply: "apply",
-                   calibrate: "実測調整"}[name] || name;
+                   calibrate: "実測調整", sweep: "MTP sweep", "calibrate-lookup": "lookup sweep",
+                   auto: "自動選定", "phase-mtp": "MTP 実測", "phase-lookup": "lookup 実測",
+                   tournament: "決勝"}[name] || name;
     return `<span class="badge ${cls}"><span class="dot"></span>${esc(label)}</span>`;
-  }).join(" ");
+  });
+  // sweep 中は job.step が現セル名 ("min_p=0.3" 等) になるので別バッジで進行を出す
+  if (job.status === "running" && job.step && steps.indexOf(job.step) < 0)
+    chips.push(`<span class="badge warn"><span class="dot"></span>${esc(job.step)}</span>`);
+  return chips.join(" ");
 }
 function calSettingsTable(rep) {
   const st = rep.settings || {};
@@ -3025,6 +3134,9 @@ function calSettingsTable(rep) {
   if (!keys.length) return `<div class="muted" style="font-size:11px;margin-top:6px">調整値は返されませんでした (ログ参照)</div>`;
   return `<div class="bm-wrap"><table class="bm"><tr><th>設定</th><th>実測値</th></tr>` +
     keys.map(k => `<tr><td class="mono">${esc(k)}</td><td><b>${esc(st[k])}</b></td></tr>`).join("") +
+    (typeof rep.improvement_pct === "number"
+      ? `<tr><td>基準比 (greedy プローブ)</td><td><b>${rep.improvement_pct >= 0 ? "+" : ""}${rep.improvement_pct}%</b></td></tr>` : "") +
+    (rep.latency ? `<tr><td>レイテンシ内訳</td><td class="mono" style="font-size:11px">${esc(rep.latency)}</td></tr>` : "") +
     `</table></div>`;
 }
 function renderCalibrate() {
@@ -3037,7 +3149,7 @@ function renderCalibrate() {
     S.cal._pSig = sig;
     sel.innerHTML = ps.length
       ? ps.map(p => `<option value="${p.id}">${esc(p.name)} · ${esc(backendById(p.backend)?.name || p.backend)}</option>`).join("")
-      : `<option value="">対象プロファイルがありません (Maya / Strata)</option>`;
+      : `<option value="">対象プロファイルがありません (Maya / Strata / FreeToken)</option>`;
     if (cur) sel.value = cur;
   }
   const p = ps.find(x => x.id === sel.value) || null;
@@ -3045,7 +3157,7 @@ function renderCalibrate() {
   const st = $("#cal-prof-state");
   st.className = "badge " + (sess ? (sess.ready ? "ok" : "warn") : "");
   st.innerHTML = `<span class="dot"></span>` + (sess ? (sess.ready ? `稼働中 :${sess.port || "-"}` : "起動中…") : "未起動");
-  $("#cal-prof-note").textContent = !p ? "Maya / Strata のプロファイルを作成してください。"
+  $("#cal-prof-note").textContent = !p ? "Maya / Strata / FreeToken のプロファイルを作成してください。"
     : sess ? "実行前に launcher がこのサーバーを停止します (GPU 独占 / その後は再起動は手動)"
     : ($("#cal-restart").checked ? "未起動 → 調整完了後に自動起動します。"
                                  : "未起動 → 調整のみ実行します (完了後は起動タブから開始)");
@@ -3125,10 +3237,225 @@ function renderCalHistory(active) {
   }).join("");
 }
 
+/* ============================================================= セットアップ (インストール / モデルDL) */
+/* シェルを介さない導線: /api/installs を叩くだけ。calibrate と同じ fire-and-forget + poll。
+   install は clone / venv / pip、download は HF キャッシュへの転送で progress に進捗が載る。 */
+const INS_ST = {queued: ["info", "待機"], running: ["warn", "実行中"], done: ["ok", "完了"],
+                failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "中断 (launcher 再起動)"]};
+const INS_STEPS = {clone: "clone", venv: "venv 作成", precheck: "確認", install: "pip install", verify: "import 確認"};
+function insInit() {
+  if (S.ins) return;                        // 何度呼ばれても状態を失わない (jobs / logs)
+  S.ins = { jobs: [], active: null, installable: [], cacheDir: "", busy: false, _bSig: "",
+            logs: {}, logCursor: {}, open: "", notified: {} };
+}
+async function insPoll(force) {
+  insInit();
+  try {
+    const j = await api("/api/installs");
+    S.ins.jobs = j.jobs || []; S.ins.active = j.active;
+    S.ins.installable = j.installable || []; S.ins.cacheDir = j.cache_dir || "";
+    const act = S.ins.jobs.find(r => r.id === S.ins.active);
+    if (act) {
+      await insPollLog(act.id);
+      // 完了時の後処理は 1 回だけ: DL はモデル一覧を再スキャン、install は検出を再取得
+      if (!S.ins.notified[act.id]) {
+        if (act.kind === "download" && act.status === "done") {
+          S.ins.notified[act.id] = 1; loadHf(true); toast("モデルのダウンロードが完了しました");
+        } else if (act.kind === "install" && act.status === "done") {
+          S.ins.notified[act.id] = 1; refresh(false);
+        }
+      }
+    }
+    insBadge();
+    if (S.tab === "setup" || force) renderSetup();
+  } catch { /* ignore */ }
+}
+async function insPollLog(jid) {
+  const cur = S.ins.logCursor[jid] || 0;
+  try {
+    let r = await api(`/api/installs/${jid}/log?cursor=${cur}`);
+    if ((r.total || 0) < cur) r = await api(`/api/installs/${jid}/log?cursor=0`);  // サーバー側が切り詰めたら全取り直し
+    const lines = r.lines || [];
+    if (r.start === cur && lines.length)
+      S.ins.logs[jid] = ((S.ins.logs[jid] || "") + (S.ins.logs[jid] ? "\n" : "") + lines.join("\n")).slice(-40000);
+    else if (r.start === 0) S.ins.logs[jid] = lines.join("\n");
+    S.ins.logCursor[jid] = r.start + lines.length;
+  } catch { /* ignore */ }
+}
+function insBadge() {
+  const nb = $("#nb-ins"); if (!nb) return;
+  const on = !!S.ins.active;
+  nb.classList.toggle("hidden", !on);
+  nb.classList.toggle("run", on);
+  nb.textContent = on ? "▶" : "";
+}
+async function insStart() {
+  insInit();
+  const bid = $("#ins-backend").value;
+  if (!bid) { toast("インストールするバックエンドを選んでください"); return; }
+  if (S.ins.active) { toast("別のセットアップジョブが実行中です"); return; }
+  const nm = (backendById(bid) || {}).name || bid;
+  if (!confirm(`${nm} をインストールしますか?\nclone / .venv 作成 / pip install を実行します (初回は数 GB をダウンロード)`)) return;
+  S.ins.busy = true; renderSetup();
+  try {
+    await api("/api/installs", {method: "POST", body: {backend: bid, clean: $("#ins-clean").checked === true}});
+    toast("インストールを開始しました");
+  } catch (e) {
+    toast("開始失敗: " + e.message);
+  } finally {
+    S.ins.busy = false; insPoll(true);
+  }
+}
+async function dlStart() {
+  insInit();
+  const repo = (inputVal("#dl-repo") || "").trim();
+  if (!repo) { toast("repo id を入力してください"); return; }
+  if (S.ins.active) { toast("別のセットアップジョブが実行中です"); return; }
+  const body = {repo_id: repo, revision: (inputVal("#dl-rev") || "").trim(),
+                allow_patterns: (inputVal("#dl-patterns") || "").split(",").map(s => s.trim()).filter(Boolean)};
+  try {
+    await api("/api/installs/download", {method: "POST", body});
+    toast("ダウンロードを開始しました");
+  } catch (e) { toast("開始失敗: " + e.message); }
+  insPoll(true);
+}
+async function insCancel(id) {
+  if (!confirm("セットアップジョブを中断しますか?\nインストール中の pip / ダウンロードが中止されます")) return;
+  try { await api(`/api/installs/${id}/cancel`, {method: "POST"}); toast("中断要求を送信しました"); insPoll(true); }
+  catch (e) { toast("失敗: " + e.message); }
+}
+async function insDelete(id) {
+  if (!confirm("このセットアップ履歴を削除しますか?")) return;
+  try { await api(`/api/installs/${id}`, {method: "DELETE"}); toast("削除しました"); insPoll(true); }
+  catch (e) { toast("失敗: " + e.message); }
+}
+async function insToggle(id) {
+  S.ins.open = S.ins.open === id ? "" : id;
+  if (S.ins.open === id && !S.ins.logs[id]) {          // 履歴のログは開いた時に 1 回だけ取得
+    try {
+      const r = await api(`/api/installs/${id}/log?cursor=0`);
+      S.ins.logs[id] = (r.lines || []).join("\n");
+    } catch { S.ins.logs[id] = "(ログ取得失敗)"; }
+  }
+  renderSetup();
+}
+function setupTab(bid) {
+  switchTab("setup");
+  if (bid) { const o = [...$("#ins-backend").options].find(x => x.value === bid);
+             if (o) { $("#ins-backend").value = bid; renderSetup(); } }
+}
+const insBytes = n => { n = n || 0;
+  return n >= 2**30 ? (n / 2**30).toFixed(2) + " GiB"
+       : n >= 2**20 ? (n / 2**20).toFixed(1) + " MB" : Math.round(n / 2**10) + " KiB"; };
+function insStatusBadge(r) {
+  const [cls, label] = INS_ST[r.status] || ["", r.status];
+  return `<span class="badge ${cls}"><span class="dot"></span>${label}</span>`;
+}
+function insStepChips(job) {
+  const steps = job.steps || [];
+  const idx = steps.indexOf(job.step);
+  return steps.map((name, i) => {
+    const cur = job.step === name && job.status === "running";
+    const cls = cur ? "warn" : (idx > i || job.status === "done" ? "ok" : "");
+    return `<span class="badge ${cls}"><span class="dot"></span>${esc(INS_STEPS[name] || name)}</span>`;
+  }).join(" ");
+}
+function insProg(run) {                                 // download の進捗 (累計 bytes / 現ファイル %)
+  const pr = run.progress || {};
+  if (!pr.done && !pr.file) return "";
+  const pct = pr.file_total ? Math.min(100, 100 * pr.done / pr.file_total) : 0;
+  return `<div class="row" style="gap:8px;margin-top:6px;flex-wrap:wrap">
+    <span class="mono" style="font-size:12px">計 ${insBytes(pr.done)} · 現ファイル ${pr.file_total ? insBytes(pr.done) + " / " + insBytes(pr.file_total) : "-"}
+     · ${insBytes(pr.speed_bps)}/s · ${pr.files_done || 0} ファイル完了${pr.file ? " · " + esc(String(pr.file).slice(0, 48)) : ""}</span>
+    ${pct ? `<div style="flex:1;min-width:120px;height:8px;background:var(--line);border-radius:4px;overflow:hidden"><div style="height:100%;width:${pct.toFixed(1)}%;background:var(--acc)"></div></div>` : ""}
+  </div>`;
+}
+const insSpec = bid => (S.ins.installable || []).find(e => e.id === bid) || null;
+/* fork は未 clone 時 /api/state に出ないので、表示名は installable 側から引く */
+const insName = bid => (insSpec(bid) || {}).name || (backendById(bid) || {}).name || bid;
+const insTitle = r => r.kind === "download" ? `⬇️ ${esc(r.repo_id)}` : `📦 ${esc(insName(r.backend))}`;
+function renderSetup() {
+  insInit();
+  const sel = $("#ins-backend");
+  const specs = S.ins.installable || [];
+  const ids = specs.map(e => e.id);
+  if (ids.join("|") !== S.ins._bSig || ![...sel.options].some(o => o.value === sel.value)) {
+    S.ins._bSig = ids.join("|");
+    const cur = sel.value;
+    sel.innerHTML = specs.length
+      ? specs.map(e => `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.module_path)}</option>`).join("")
+      : `<option value="">UI インストール可能なバックエンドがありません</option>`;
+    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  }
+  const sp = insSpec(sel.value);
+  $("#ins-hfdir").textContent = S.ins.cacheDir || "(HF キャッシュ)";
+  $("#ins-start").disabled = S.ins.busy || !!S.ins.active || !specs.length;
+  $("#dl-start").disabled = !!S.ins.active;
+  $("#ins-note").textContent = S.ins.busy ? "開始中…" : (S.ins.active ? "セットアップ実行中です (同時に 1 件)" : "");
+  $("#dl-note").textContent = S.ins.active ? "実行中のジョブがあります" : "";
+  $("#ins-preview").textContent = sp
+    ? `git clone --depth 1 ${sp.ref ? "-b " + sp.ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → pip install -e ".[${sp.extras}]"` : "";
+  const active = (S.ins.jobs || []).find(r => r.id === S.ins.active) || null;
+  renderInsActive(active);
+  renderInsHistory(active);
+}
+function renderInsActive(run) {
+  const el = $("#ins-active");
+  if (!el) return;
+  if (!run) { el.innerHTML = ""; return; }
+  const secs = (run.finished_at ? run.finished_at : Date.now() / 1000) - (run.started_at || Date.now() / 1000);
+  const tail = (S.ins.logs[run.id] || "").split("\n").filter(Boolean).slice(-30).join("\n");
+  const live = run.status === "running" || run.status === "queued";
+  el.innerHTML = `<div class="card" style="border-color:#254059">
+    <div class="row">
+      ${insStatusBadge(run)}
+      <b class="grow ellip" style="font-size:15px">${insTitle(run)}${run.kind === "install" && run.clean ? ` <span class="muted" style="font-size:12px">(クリーン)</span>` : ""}</b>
+      ${live ? `<button class="danger" style="min-height:34px;font-size:12.5px" onclick="insCancel('${run.id}')">⏹ 中断</button>`
+             : `<button class="ghost" style="min-height:34px;font-size:12.5px" onclick="insPoll(true)">↻ 最新化</button>`}
+    </div>
+    ${run.kind === "install" ? `<div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">${insStepChips(run)}</div>`
+    : run.kind === "download" ? insProg(run) : ""}
+    <div class="row" style="gap:8px;margin-top:8px">
+      <span class="muted mono">${fmtUp(secs)}</span>
+      ${run.error ? `<span style="color:var(--err);font-size:12px">${esc(String(run.error).slice(0, 200))}</span>` : ""}
+    </div>
+    <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
+  </div>`;
+}
+function renderInsHistory(active) {
+  const el = $("#ins-history");
+  const runs = (S.ins.jobs || []).filter(r => r.id !== (active && active.id));
+  if (!runs.length) { el.innerHTML = `<div class="empty" style="margin-top:12px">セットアップ履歴はまだありません。</div>`; return; }
+  el.innerHTML = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
+    const open = S.ins.open === r.id;
+    const tail = (S.ins.logs[r.id] || "").split("\n").filter(Boolean).slice(-120).join("\n");
+    return `<div class="card">
+      <div class="row">
+        ${insStatusBadge(r)}
+        <b class="grow ellip" style="font-size:14.5px;cursor:pointer" onclick="insToggle('${r.id}')">${insTitle(r)}</b>
+        <span class="muted" style="font-size:12px">${r.kind === "download" ? "モデルDL" : "インストール"}</span>
+      </div>
+      <div class="muted" style="margin-top:5px;font-size:12px">
+        ${r.kind === "download"
+          ? esc(r.repo_id) + (r.revision ? " @ " + esc(r.revision) : "") + (r.progress ? " · 計 " + insBytes(r.progress.done) : "")
+          : esc((r.steps || []).map(s => INS_STEPS[s] || s).join(" → "))}
+        ${r.error ? ` · <span style="color:var(--err)">${esc(String(r.error).slice(0, 120))}</span>` : ""}
+        · ${r.finished_at ? fmtAgo(r.finished_at) : "-"}</div>
+      <div class="row" style="margin-top:8px">
+        <button onclick="insToggle('${r.id}')">${open ? "▲ 閉じる" : "🧾 ログ"}</button>
+        <span class="grow"></span>
+        <button class="ghost danger" onclick="insDelete('${r.id}')">削除</button>
+      </div>
+      ${open ? `<div class="logwrap" style="padding:0"><pre class="logbox" style="max-height:320px;margin-top:6px">${esc(tail || "(ログ無し)")}</pre></div>` : ""}
+    </div>`;
+  }).join("");
+}
+
 /* ============================================================= boot */
 pgInit();
 bmInit();
 calInit();
+insInit();
 $("#pg-input").addEventListener("keydown", e => {
   if (e.key !== "Enter" || e.shiftKey) return;
   if (e.isComposing || e.keyCode === 229) return;   // IME 変換中の Enter では送信しない

@@ -49,6 +49,8 @@ CAPS: tuple[dict[str, Any], ...] = (
      "desc": "組み込みベンチマークの実行と履歴"},
     {"key": "calibrate", "label": "キャリブレーション", "default": False,
      "desc": "Maya / Strata のワンクリック・キャリブレーション (エンジン起動とconfig書き換えを伴う)"},
+    {"key": "install", "label": "インストール / モデルDL", "default": False,
+     "desc": "FreeToken 系の UI インストール (clone / .venv / pip) と Hugging Face モデルダウンロード"},
     {"key": "profiles.edit", "label": "プロファイル編集", "default": False,
      "desc": "新規・編集・削除・インポート・コマンドプレビュー"},
     {"key": "backends.edit", "label": "バックエンド設定", "default": False,
@@ -137,6 +139,9 @@ def required_cap(method: str, path: str) -> str | None:
     if p.startswith("/api/calibrations"):
         # 実行はエンジン起動 + config 書き換え。閲覧も config パス・CLI ログを含むので同じ権限にする
         return "calibrate"
+    if p.startswith("/api/installs"):
+        # clone / pip install / HF ダウンロード。実行も履歴閲覧も同じ権限 (calibrate と同じ方針)
+        return "install"
     return None
 
 
