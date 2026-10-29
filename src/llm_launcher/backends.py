@@ -132,10 +132,6 @@ CHOICE_SUPPLEMENT: dict[str, dict[str, list[str]]] = {
         "--moe-cache-policy": ["", "lru"],
         "--cache-type": ["", "radix"],
     },
-    "freetoken-fork": {
-        # fork は PLE テーブル read-only mmap (OS page cache がホット行を保持) を追加
-        "--ple-backend": ["", "pinned", "disk", "swap"],
-    },
 }
 
 # 正表自体がSparseな vllm 数値/文字列系の補完 (arg_utils.py 準拠)
@@ -462,10 +458,7 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
         F("--moe-strategy", "MoE戦略", section="cache"),
         F("--expert-load", "エキスパート読込", section="cache"),
         F("--quant-backend", "量子化バックエンド", section="cache", help="moe.nvfp4=... 形式も可"),
-        F("--ple-backend", "PLEオフロード", section="cache",
-          help="" if bid != "freetoken-fork" else
-          "disk=fillの度チェックポイントから読込 / swap=チェックポイントread-only mmapでOS page cacheが"
-          "ホット行を保持 (diskとpinnedの中間) / pinned=テーブル全体をピン留めホストRAMに常駐"),
+        F("--ple-backend", "PLEオフロード", section="cache"),
         F("--nvfp4-backend", "NVFP4バックエンド", section="cache"),
         F("--moe-cache-size", "MoEキャッシュサイズ", section="cache", placeholder="0=自動", help="--moe-cache-rate / --moe-cache-auto と排他"),
         F("--moe-cache-rate", "MoEキャッシュ比率", section="cache", ftype="float", placeholder="例 0.5", help="--moe-cache-size と排他"),
