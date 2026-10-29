@@ -1,15 +1,20 @@
 """UI からのインストール / モデルダウンロード: シェルを介さずセットアップを完結させる。
 
 背景:
-  FreeToken 系の導入は従来ターミナルが入口だった (fork の clone -> .venv -> pip install
+  FreeToken 系の導入は従来ターミナルが入口だった (fork の clone -> .venv -> uv pip install
   -e ".[accel]"、または module/fork/freetoken/setup.sh)。モデルも HF CLI か Python で
   ダウンロードする必要があった。このモジュールは両方を launcher 内の 1 ボタンにする:
 
-    - install  : clone / .venv 作成 / pip install を argv リストで direct exec する
+    - install  : clone / .venv 作成 / uv pip install を argv リストで direct exec する
                  (shell=True は使わない — 起動コマンドにシェルを挟まないため)。
+                 uv は find_uv() が PATH + LLM_LAUNCHER_UV + 既定インストール先から
+                 絶対パスで解決する (デスクトップ / systemd 起動で PATH が短くても pip に落ちない)。
                  setup.sh と同じ条件式を here に持つのではなくここで再実装している:
                  動作中の .venv は絶対に消さない、pip の無い .venv は「インストールが
-                 本当に必要で uv が無いときだけ」作り直す (setup.sh と同じ順序)
+                 本当に必要で uv が無いときだけ」作り直す (setup.sh と同じ順序)。
+                 git / uv / pip の子プロセスには HTTP(S)_PROXY 等のプロキシを環境変数から
+                 両形 (大小文字) に揃えて引き渡す (install_env)。どのプロキシが効いているか
+                 ジョブログ先頭に伏せ字付きで印字する (proxy_log_line)
     - download : huggingface_hub.snapshot_download をスレッドで実行し、tqdm フックで
                  受信箱数を UI に返す。キャッシュは既定の HF_HUB_CACHE に置くので
                  /api/hf-models のスキャンがそのまま拾う (成功後に app.py がキャッシュ失効)
@@ -41,7 +46,7 @@ from typing import Any, Callable
 from .backends import BACKENDS, fork_dir, fork_model_root
 from .store import JsonStore, new_id, now
 
-# ログはデータベース (installs.json) に保持する。pip 実行では行が増えるので
+# ログはデータベース (installs.json) に保持する。インストール実行では行が増えるので
 # 直近 LOG_TAIL 行だけ残す (calibrate / bench と同じ)。
 LOG_TAIL = 400
 
@@ -98,6 +103,90 @@ def _module_rel(root: Path, spec: dict[str, Any]) -> str:
     if spec["fork_name"]:
         return fork_dir(root, spec["fork_name"]) or spec["module_path"]
     return spec["module_path"]
+
+
+# uv 本体の実在する場所。launcher をデスクトップ / systemd 経由で起動すると PATH が
+# 最小限になり、uv が入っていても shutil.which だけだと見つけてもらえない
+# (→ 黙って pip + python venv に落ちる)。公式インストーラ / cargo / Homebrew の
+# 既定先まで見る。LLM_LAUNCHER_UV で実行ファイルを明示もできる。
+_UV_FALLBACK_DIRS = ("~/.local/bin", "~/.cargo/bin", "/usr/local/bin", "/opt/homebrew/bin")
+
+
+def _uv_candidates() -> list[Path]:
+    """PATH 之外に探す uv の候補パス (テストから差し替え可)。"""
+    return [Path(d).expanduser() / "uv" for d in _UV_FALLBACK_DIRS]
+
+
+def find_uv() -> str:
+    """uv 実行ファイルの絶対パス (見つからなければ "")。返り値は argv[0] にそのまま使う。
+
+    LLM_LAUNCHER_UV の明示指定が最優先 (無効な値は uv 実行時に「コマンドが見つかり
+    ません」でジョブログへ出る)。次点で PATH、その次に公式インストーラの既定先。
+    """
+    cfg = (os.environ.get("LLM_LAUNCHER_UV") or "").strip()
+    if cfg:
+        return str(Path(cfg).expanduser())
+    found = shutil.which("uv")
+    if found:
+        return found
+    for cand in _uv_candidates():
+        try:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+        except OSError:
+            continue
+    return ""
+
+
+def install_tool() -> str:
+    """依存インストールに使うツール表示 (既定は uv pip、uv が本当に無い環境だけ venv の pip)。
+
+    UI の手順名 / プレビューと実際の argv を同じ判定から出す (表示と実行がズレると
+    「pip install と書いてあるのに uv が走った」になるため、この 1 箇所だけが正)。
+    """
+    return "uv" if find_uv() else "pip"
+
+
+# プロキシ設定は環境変数から取る (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY / NO_PROXY)。
+# uv / pip (requests) / git の読み方は大小文字で微妙に違うので、どちらで定義されていても
+# 両方の形に揃えて子プロセスへ引き渡す。セットアップでは何が効いているか分からなければ
+# 「使えているか分からない」のままなので、ジョブログ先頭に伏せ字付きで印字する。
+_PROXY_VARS = ("http_proxy", "https_proxy", "all_proxy", "no_proxy")
+
+
+def proxy_from_env(environ: dict[str, str] | None = None) -> dict[str, str]:
+    """環境変数に在るプロキシ設定を小文字鍵の正規形で返す (空値は除外)。"""
+    env = os.environ if environ is None else environ
+    out: dict[str, str] = {}
+    for key, val in env.items():
+        low = key.lower()
+        if low in _PROXY_VARS and val and val.strip():
+            out.setdefault(low, val.strip())
+    return out
+
+
+def _mask_proxy_val(val: str) -> str:
+    """ログに user:password を流さない (認証付きプロキシ URL を伏せ字にする)。"""
+    return re.sub(r"://([^/@:]+):([^@/]+)@", r"://\1:****@", val)
+
+
+def proxy_log_line() -> str:
+    prox = proxy_from_env()
+    if not prox:
+        return ("プロキシ: 環境変数 (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY) は未設定 — "
+                "ダイレクト接続になります")
+    return ("プロキシ: 環境変数から使用 — "
+            + ", ".join(f"{k.upper()}={_mask_proxy_val(v)}" for k, v in sorted(prox.items())))
+
+
+def install_env(*, environ: dict[str, str] | None = None) -> dict[str, str]:
+    """git / uv venv / uv pip へ渡す環境: 現環境 + プロキシの大文字小文字対 + pip 静穏化。"""
+    env = dict(os.environ if environ is None else environ)
+    for low, val in proxy_from_env(env).items():
+        env[low] = val
+        env[low.upper()] = val
+    env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    return env
 
 
 def allowed_refs(spec: dict[str, Any]) -> list[str]:
@@ -310,10 +399,11 @@ class InstallManager:
     async def start_install(self, backend_id: str, *, extras: str | None = None,
                             clean: bool = False, ref: str = "",
                             actor: dict[str, Any] | None = None) -> dict[str, Any]:
-        """clone -> .venv -> pip install -e を 1 ボタンで実行する (同時に 1 件だけ)。
+        """clone -> .venv -> uv pip install -e を 1 ボタンで実行する (同時に 1 件だけ)。
 
         ref (ブランチ) は spec["refs"] の一覧内だけ通る。未 clone 時はそのブランチを clone し、
         clone 済み時は選択ブランチへ fetch + checkout する step を挟む。
+        インストールコマンドは install_tool() が uv / pip を選ぶ (UI の表示と同じ判定)。
         """
         self._check_free()
         spec = INSTALL_SPECS.get(backend_id)
@@ -334,7 +424,8 @@ class InstallManager:
 
         if needs_clone and not spec["clone"]:
             raise InstallError(f"{module_rel} がありません")
-        tool = "uv" if shutil.which("uv") else "pip"
+        tool = install_tool()
+        uv_path = find_uv()
         venvpy = str(module_dir / ".venv" / "bin" / "python")
         verify_argv = [venvpy, "-c",
                        f"import {check}, sys; print('{check}', getattr({check}, '__version__', '?'),"
@@ -347,13 +438,14 @@ class InstallManager:
             argv += [spec["clone"], str(module_dir)]
             steps.append({"name": "clone", "argv": argv, "cwd": str(module_dir.parent)})
         elif branch:
-            # clone 済みでも「選んだブランチ」に寄せる (venv / pip より前に置く)
+            # clone 済みでも「選んだブランチ」に寄せる (venv / インストールより前に置く)
             steps.append({"name": "branch"})
         steps.append({"name": "venv"})
         steps.append({"name": "precheck", "argv": verify_argv, "cwd": str(module_dir)})
         spec_arg = f".[{extras_str}]" if extras_str else "."
-        if tool == "uv":
-            install_argv = ["uv", "pip", "install", "--python", venvpy, "-e", spec_arg]
+        if uv_path:
+            # 絶対パスのまま argv[0] に置く — 子プロセスの PATH が短くても解る
+            install_argv = [uv_path, "pip", "install", "--python", venvpy, "-e", spec_arg]
         else:
             install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off",
                             "-e", spec_arg]
@@ -362,7 +454,7 @@ class InstallManager:
 
         job = self._new_job("install", actor, backend=backend_id,
                             backend_name=BACKENDS.get(backend_id, {}).get("name", backend_id),
-                            module_path=module_rel, tool=tool,
+                            module_path=module_rel, tool=tool, uv_path=uv_path,
                             extras=extras_str, clean=bool(clean), needs_clone=needs_clone,
                             ref=branch)
         job["steps"] = [s["name"] for s in steps]
@@ -370,11 +462,15 @@ class InstallManager:
         return self._public(job)
 
     def _venv_ensure(self, job: dict[str, Any], module_dir: Path) -> str:
-        """スレッドで走る .venv 確保。setup.sh と同じ規則: 動く venv は絶対に消さない。"""
+        """スレッドで走る .venv 確保。setup.sh と同じ規則: 動く venv は絶対に消さない。
+
+        uv が見つかっているなら uv venv (job["uv_path"] は start_install が解決した
+        絶対パス。計画と実行で PATH が変わっても同じバイナリを使う)。
+        """
         venv_dir = module_dir / ".venv"
         py = venv_dir / "bin" / "python"
-        has_uv = job["tool"] == "uv"
-        if py.exists() and not has_uv:
+        uv = str(job.get("uv_path") or "")
+        if py.exists() and not uv:
             # uv が無いのに pip が無い venv (uv が作った / python3-venv 不足の Debian) は
             # インストールを実行できないので、そのときだけ作り替える
             rc = subprocess.run([str(py), "-m", "pip", "--version"],
@@ -382,8 +478,9 @@ class InstallManager:
             if rc != 0:
                 shutil.rmtree(venv_dir, ignore_errors=True)
         if not py.exists():
-            if has_uv:
-                rc = subprocess.run(["uv", "venv", str(venv_dir)], cwd=str(module_dir)).returncode
+            if uv:
+                rc = subprocess.run([uv, "venv", str(venv_dir)], cwd=str(module_dir),
+                                    env=install_env()).returncode
                 if rc != 0:
                     raise InstallError("uv venv .venv が失敗しました")
             else:
@@ -458,6 +555,9 @@ class InstallManager:
         job["status"] = "running"
         self._save()
         module_dir = (self.root / job["module_path"]).resolve()
+        self._append_log(job, proxy_log_line())
+        if job.get("uv_path"):
+            self._append_log(job, f"uv: {job['uv_path']}")
         switched = False   # ブランチ切替が起きたら依存を入れ直す (precheck スキップを効かせない)
         try:
             if job.get("clean") and (module_dir / ".venv").exists():
@@ -624,6 +724,7 @@ class InstallManager:
         job["status"] = "running"
         job["step"] = "転送開始"
         where = job["local_dir"] or "(既定の HF キャッシュ)"
+        self._append_log(job, proxy_log_line())
         self._append_log(job, f"ダウンロード開始: {job['repo_id']}"
                          + (f" revision={job['revision']}" if job["revision"] else "")
                          + (f" patterns={job['allow_patterns']}" if job["allow_patterns"] else "")
@@ -739,7 +840,7 @@ class InstallManager:
     async def _exec(self, argv: list[str], cwd: Path) -> tuple[int, str]:
         try:
             proc = await asyncio.create_subprocess_exec(
-                *argv, cwd=str(cwd), stdout=asyncio.subprocess.PIPE,
+                *argv, cwd=str(cwd), env=install_env(), stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         except FileNotFoundError:
             return 127, ""
@@ -753,7 +854,7 @@ class InstallManager:
         job["step"] = step["name"]
         self._append_log(job, f"===== {step['name']} {time.strftime('%F %T')} =====")
         self._append_log(job, shlex.join(step["argv"]))
-        env = {**os.environ, "PIP_DISABLE_PIP_VERSION_CHECK": "1"}
+        env = install_env()
         try:
             proc = await asyncio.create_subprocess_exec(
                 *step["argv"], cwd=step["cwd"], env=env,

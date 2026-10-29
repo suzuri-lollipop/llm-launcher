@@ -8,7 +8,7 @@ setup が書く maya-<model>.json の args/env 側に入る。launcher 側は
   2. 必須項目 (--host / --port) が常に argv へ出る
   3. config 側が既に持つ項目 (--config / --gpu / --parallel など) は既定 OFF = 送信しない
   4. 既定コマンドは maya.sh 経由 (module/maya/.venv のブートストラップを任せ、
-     GUI .venv をセットアップの pip install で汚さない)
+     GUI .venv をセットアップの依存インストール (既定は uv pip) で汚さない)
 必要がある。module/maya が未クローン (submodule 未 init) の環境では skip する。
 """
 from pathlib import Path
