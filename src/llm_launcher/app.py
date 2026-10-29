@@ -26,7 +26,8 @@ from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv,
                        backend_for, fork_dir, fork_model_root, launch_json_path,
-                       port_from_argv, python_candidates, resolve_port, sections_order)
+                       port_from_argv, python_candidates, resolve_port, sections_order,
+                       supported_models)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
@@ -1593,7 +1594,10 @@ def create_app(root: Path) -> FastAPI:
                  "current_ref": current_ref(root, spec), "cloned": clone_exists(root, spec),
                  "module_path": spec["module_path"], "extras": spec["extras"],
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
-                                if BACKENDS[bid].get("model_data") else "")}
+                                if BACKENDS[bid].get("model_data") else ""),
+                 # 対応モデル一覧: clone 内の docs/models.md (model_list_doc) を読んだ既知の正常構成。
+                 # 未 clone / 文書なしは空 []. 保存先がそのバックエンドのとき ② の候補に出す
+                 "supported_models": supported_models(root, backend_for(root, bid))}
                 for bid, spec in INSTALL_SPECS.items() if bid in BACKENDS]
 
     @app.get("/api/installs")

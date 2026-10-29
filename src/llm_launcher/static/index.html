@@ -515,6 +515,7 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
       <div class="row"><b style="font-size:15px">② モデルダウンロード</b>
         <span class="muted" style="font-size:12px">Hugging Face Hub から保存先へ (既定のキャッシュ <span id="ins-hfdir" class="mono"></span>)。完了後に対応モデル一覧へ反映します</span></div>
       <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
+        <select id="dl-model" onchange="dlPickModel()" title="選んだバックエンドの docs/models.md に載っている対応モデル (選ぶと repo id に入る)" style="max-width:340px" hidden></select>
         <input type="text" id="dl-repo" class="mono grow" placeholder="repo id (例: Qwen/Qwen3-30B-A3B-Instruct)" style="min-width:220px">
         <input type="text" id="dl-rev" class="mono" placeholder="revision (省略可)" style="max-width:160px">
         <select id="dl-dest" title="保存先"></select>
@@ -3324,7 +3325,7 @@ const insBusy = () => !!(S.ins && (S.ins.active || S.ins.busy));
 function insInit() {
   if (S.ins) return;                        // 何度呼ばれても状態を失わない (jobs / logs)
   S.ins = { jobs: [], active: null, installable: [], cacheDir: "", busy: false, _bSig: "",
-            _rSig: "", refPick: {}, tool: "uv", calAfter: null, scPick: "",
+            _rSig: "", _mSig: "", refPick: {}, tool: "uv", calAfter: null, scPick: "",
             logs: {}, logCursor: {}, open: "", notified: {} };
 }
 async function insPoll(force) {
@@ -3398,6 +3399,16 @@ async function insStart() {
     toast("開始失敗: " + e.message);
   } finally {
     S.ins.busy = false; insPoll(true);
+  }
+}
+function dlPickModel() {                 // 対応モデル一覧 → repo id に反映 (保存先が model_data 系なら従う)
+  const v = inputVal("#dl-model"); if (!v) return;
+  $("#dl-repo").value = v;
+  const sp = insSpec($("#ins-backend").value);
+  if (sp && sp.model_data && inputVal("#dl-dest") !== sp.id) {
+    const dd = $("#dl-dest");
+    if ([...dd.options].some(o => o.value === sp.id)) dd.value = sp.id;
+    renderSetup();
   }
 }
 async function dlStart() {
@@ -3610,6 +3621,19 @@ function renderSetup() {
     if ([...dd.options].some(o => o.value === cur)) dd.value = cur;
   }
   const dSp = insSpec(dd.value);
+  // 対応モデルドロップダウン: 保存先 (なければ ①) のバックエンドが docs/models.md の
+  // known-good 表を持つときだけ出す。選ぶと repo id に入り、model_data 系なら保存先も従う
+  const ms = $("#dl-model");
+  const mListOwner = (dSp && dSp.supported_models && dSp.supported_models.length) ? dSp : sp;
+  const mlist = (mListOwner && mListOwner.supported_models) || [];
+  const mSig = ((mListOwner && mListOwner.id) || "") + "|" + mlist.map(m => m.repo_id).join(",");
+  if (mSig !== S.ins._mSig) {
+    S.ins._mSig = mSig;
+    ms.innerHTML = `<option value="">🧾 対応モデルから選択 (${mlist.length})</option>`
+      + mlist.map(m => `<optgroup label="${esc(m.name)}">`
+                   + `<option value="${esc(m.repo_id)}">${esc(m.repo_id)}</option></optgroup>`).join("");
+  }
+  ms.hidden = !mlist.length;
   const calLock = calBusy(), insLock = !!S.ins.active;
   $("#ins-tool").textContent = insToolLabel(S.ins.tool);
   $("#dl-note").textContent = calLock ? "キャリブレーション実行中のため開始できません"
