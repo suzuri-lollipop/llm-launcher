@@ -62,6 +62,18 @@ def make_prompt(n_words: int, seed: int) -> str:
     return " ".join(words) + "\n\n上の文章の内容を一文で要約してください。"
 
 
+def make_copy_prompt(n_words: int, seed: int) -> str:
+    """逐語コピさせるプロンプト (chain / lookup 系の測定用)。
+
+    greedy 出力が入力自身の反復になるため、suffix ドラフトや MTP+lookup chain が
+    実際に発動する条件 (履歴の繰り返し) を合成プロンプトで再現できる。"""
+    rnd = random.Random(seed)
+    words = [rnd.choice(_WORD_BANK) for _ in range(max(1, n_words))]
+    passage = " ".join(words)
+    return (passage + "\n\nCopy the passage above verbatim, word for word, "
+                      "to the end. Do not add anything.")
+
+
 _CJK_RE = re.compile(
     r"[\u1100-\u115f\u2e80-\u9fff\uac00-\ud7af\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]")
 

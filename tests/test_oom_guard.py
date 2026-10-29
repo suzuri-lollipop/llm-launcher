@@ -66,6 +66,17 @@ def no_privileged_helper(helper_calls):
     return helper_calls
 
 
+@pytest.fixture(autouse=True)
+def no_lingering_engine(monkeypatch):
+    """起動ガードの lingering チェックを実プロセスから切り離す。
+
+    本番エンジンが起動中の開発機だと start() が正しく拒否してしまい、
+    OOM ガードの挙動だけを見るテストがマシンの状態で赤になる。
+    lingering 自体の検証は test_engine_drain.py が偽エンジンで担う。
+    """
+    monkeypatch.setattr(process_mod, "lingering_engine_pids", lambda: [])
+
+
 # ------------------------------------------------------------------- settings
 
 

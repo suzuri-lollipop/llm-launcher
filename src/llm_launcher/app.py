@@ -25,12 +25,13 @@ from pydantic import BaseModel, Field, model_validator
 from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv,
-                       backend_for, fork_dir, python_candidates, resolve_port,
-                       sections_order)
+                       backend_for, fork_dir, fork_model_root, launch_json_path,
+                       port_from_argv, python_candidates, resolve_port, sections_order)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
+from .installer import INSTALL_SPECS, ActiveJobError, InstallError, InstallManager
 from . import oom
 from . import rbac
 from . import sysinfo
@@ -170,10 +171,36 @@ class BenchBody(BaseModel):
 
 class CalibrateBody(BaseModel):
     """ワンクリック・キャリブレーション。profile_id のプロファイルを対象に、
-    Maya / Strata の「この PC 向け調整」を 1 ボタンで実行する (バックエンドはプロファイルから決まる)。"""
+    Maya / Strata / FreeToken の「この PC 向け調整」を 1 ボタンで実行する
+    (バックエンドはプロファイルから決まる)。"""
     profile_id: str = Field(min_length=1)
     # 調整後にサーバーを起動し直す (adjust 前の停止の代わり。既定 OFF)
     restart_after: bool = False
+    # FreeToken の測定範囲: 未指定 (既定) なら FreeToken は "auto" = 全部測りの 1 発
+    # (投機モード自動選定 + 全ノブ micro A/B、~3-4 時間)、他バックエンドは "current"。
+    # "current" 明示は FreeToken の現行モードだけの速いパス (デバッグ用)
+    mode: str | None = None
+
+
+class InstallBody(BaseModel):
+    """UI インストール (シェル不要): clone -> .venv -> pip install を実行する。"""
+    backend: str = Field(min_length=1)
+    # .venv を消して作り直す (依存の更新が反映されない時の強制再インストール)
+    clean: bool = False
+    # 追加 extras (未指定ならバックエンド既定の "accel"、"" でコア依存のみ)
+    extras: str | None = None
+
+
+class ModelDownloadBody(BaseModel):
+    """Hugging Face Hub からのモデルダウンロード。backend に model_data 系を指定すると
+    そのバックエンドのデータフォルダ (freetoken-fork なら Freetoken-data) へ落ちる。"""
+    repo_id: str = Field(min_length=1)
+    revision: str = ""
+    allow_patterns: list[str] = Field(default_factory=list)
+    # 既定 (空) は HF キャッシュ。指定は launcher の root 内の下位ディレクトリのみ
+    local_dir: str = ""
+    # 保存先の別形式: バックエンド ID。local_dir よりはたらき、モデル名サブフォルダが付く
+    backend: str = ""
 
 
 class PlaygroundChatBody(BaseModel):
@@ -318,6 +345,39 @@ def hf_hub_cache_dir() -> Path:
     return base / "hub"
 
 
+def scan_data_models(models_root: Path, max_files: int = 400) -> list[dict[str, Any]]:
+    """setup.sh / UI が <data>/models/<org>--<name> へ置いたモデルを一覧化する。
+    scan_hf_cache と同じ形のレコード (snapshot はフォルダそのもの)。"""
+    out: list[dict[str, Any]] = []
+    if not models_root.is_dir():
+        return out
+    for d in models_root.iterdir():
+        if not d.is_dir():
+            continue
+        gguf: list[dict[str, Any]] = []
+        has_weights = False
+        try:
+            for f in sorted(d.iterdir()):
+                if not f.is_file():
+                    continue
+                size = f.stat().st_size
+                suf = f.suffix.lower()
+                if suf in (".safetensors", ".bin", ".pt", ".gguf") and size > 1 << 20:
+                    has_weights = True
+                if suf == ".gguf":
+                    gguf.append({"name": f.name, "size": size})
+                if len(gguf) >= max_files:
+                    break
+            mtime = d.stat().st_mtime
+        except OSError:
+            continue
+        out.append({"repo_id": d.name.replace("--", "/", 1), "snapshot": str(d),
+                    "revision": "", "has_weights": has_weights, "gguf": gguf,
+                    "source": "data", "mtime": mtime})
+    out.sort(key=lambda m: m["mtime"], reverse=True)
+    return out
+
+
 def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, Any]:
     """HF Hub キャッシュの models--org--name からモデル一覧を構築する。"""
     base = base or hf_hub_cache_dir()
@@ -439,6 +499,8 @@ def create_app(root: Path) -> FastAPI:
     bench = BenchManager(bench_store, profiles_store, manager)
     calibrations_store = JsonStore(data_dir / "calibrations.json", [])
     calibrate = CalibrationManager(root, profiles_store, calibrations_store, manager)
+    installs_store = JsonStore(data_dir / "installs.json", [])
+    installs = InstallManager(root, installs_store, manager)
     auth = AuthManager(users_store, sessions_store)
     auth_enabled = auth_enabled_from_env()
     if auth_enabled:
@@ -529,6 +591,11 @@ def create_app(root: Path) -> FastAPI:
             "fields": b["fields"],
             "sections": [{"id": s, "label": SECTIONS_JA.get(s, s)} for s in sections_order(b)],
             "default_port": b.get("default_port", ""),
+            "launch_json": bool(b.get("launch_json")),
+            # ダウンロード保存先候補 (セットアップタブ)。無いバックエンドは空文字
+            "model_data": str(fork_model_root(root, b)) if b.get("model_data") else "",
+            # UI インストール対応 (installer.INSTALL_SPECS): ボタン表示の判定に使う
+            "installable": bid in INSTALL_SPECS,
             "detection": det,
         }
 
@@ -548,6 +615,11 @@ def create_app(root: Path) -> FastAPI:
         if lost:
             print(f"calibration recovery: {len(lost)} 件の中断ジョブを lost にしました "
                   f"({', '.join(lost[:4])})", file=sys.stderr)
+        # インストール / モデルダウンロードも fire-and-forget (installs.json を参照)
+        lost_i = installs.on_startup()
+        if lost_i:
+            print(f"install recovery: {len(lost_i)} 件の中断ジョブを lost にしました "
+                  f"({', '.join(lost_i[:4])})", file=sys.stderr)
         await manager.start_tick()
 
     @app.on_event("shutdown")
@@ -923,6 +995,89 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(404, "プロファイルが見つかりません")
         return {"ok": True}
 
+    # --------------------------------------------- FreeToken 起動 JSON (Strata 方式)
+    # JSON を起動構成の正とし、プロファイルはユーザー最小パラメータ (port / api_key /
+    # env 上書き) だけを持つ。キャリブレーションの勝者 env と machine-fit の
+    # --moe-ram-budget はこの JSON へ自動記載される (calibrate._ft_launch_update)。
+
+    def _launch_profile(profile_id: str) -> dict[str, Any]:
+        prof = next((p for p in profiles_store.load() if p.get("id") == profile_id), None)
+        if prof is None:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        bid = prof.get("backend") or ""
+        b = backend_for(root, bid) if bid in BACKENDS else None
+        if not b or not b.get("launch_json"):
+            raise HTTPException(400, "このバックエンドは起動 JSON に対応していません")
+        return prof
+
+    @app.get("/api/profiles/{profile_id}/launch-json")
+    async def get_launch_json(profile_id: str) -> dict[str, Any]:
+        prof = _launch_profile(profile_id)
+        path = launch_json_path(root, prof)
+        if path is None or not path.is_file():
+            return {"ok": True, "exists": False, "path": str(path) if path else ""}
+        try:
+            doc = json.loads(path.read_text("utf-8"))
+        except ValueError as e:
+            raise HTTPException(400, f"起動 JSON を解析できません: {e}")
+        return {"ok": True, "exists": True, "path": str(path), "launch": doc}
+
+    @app.put("/api/profiles/{profile_id}/launch-json")
+    async def put_launch_json(profile_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        prof = _launch_profile(profile_id)
+        path = launch_json_path(root, prof)
+        if path is None:
+            path = root / "data" / "launch" / f"freetoken-{profile_id}.json"
+        try:
+            doc = json.loads(str(body.get("text") or ""))
+        except ValueError as e:
+            raise HTTPException(400, f"JSON として解析できません: {e}")
+        if not isinstance(doc, dict) or not doc.get("argv"):
+            raise HTTPException(400, "起動 JSON には argv (空でないリスト) が必要です")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
+        tmp.replace(path)
+        return {"ok": True, "path": str(path)}
+
+    @app.post("/api/profiles/{profile_id}/launch-json")
+    async def export_launch_json(profile_id: str) -> dict[str, Any]:
+        """全項目モードの現値を argv/env へレンダリングして起動 JSON に書き出し、
+        プロファイルを config 主体モードへ切り替える (values.config = JSON パス)。"""
+        prof = _launch_profile(profile_id)
+        rendered = dict(prof)
+        rendered["values"] = {k: v for k, v in (prof.get("values") or {}).items()
+                              if k != "config"}
+        b = backend_for(root, prof["backend"])
+        try:
+            argv = manager.build_argv(rendered)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+        launch = {
+            "python": argv[0],
+            "argv": argv[1:],
+            "cwd": str(root / b["module_path"]),
+            "env": {str(k): str(v) for k, v in
+                    (rendered.get("_resolved_env") or rendered.get("env") or {}).items()},
+            "port": port_from_argv(argv) or int(b.get("default_port") or 0),
+            "model_name": str((prof.get("values") or {}).get("served_model_name")
+                              or prof.get("name") or ""),
+        }
+        path = root / "data" / "launch" / f"freetoken-{profile_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(launch, ensure_ascii=False, indent=1) + "\n", "utf-8")
+        tmp.replace(path)
+
+        def _set(lst: list) -> bool:
+            for p in lst:
+                if p.get("id") == profile_id:
+                    p.setdefault("values", {})["config"] = str(path)
+                    return True
+            return False
+        profiles_store.mutate(_set)
+        return {"ok": True, "path": str(path), "launch": launch}
+
     @app.post("/api/preview")
     async def preview_command(body: ProfileBody) -> dict[str, Any]:
         data = validate_profile(body)
@@ -1053,7 +1208,16 @@ def create_app(root: Path) -> FastAPI:
     @app.get("/api/hf-models")
     async def hf_models(refresh: int = 0) -> dict[str, Any]:
         if refresh or hf_cache_state["data"] is None or time.monotonic() - hf_cache_state["ts"] > 15:
-            hf_cache_state["data"] = await asyncio.to_thread(scan_hf_cache)
+            def _scan() -> dict[str, Any]:
+                data = scan_hf_cache()
+                data["models"] = [{**m, "source": "cache"} for m in data["models"]]
+                dirs = [fork_model_root(root, b) for b in BACKENDS.values() if b.get("model_data")]
+                for mr in dirs:
+                    if mr is not None:
+                        data["models"] += scan_data_models(mr)
+                data["model_dirs"] = [str(mr) for mr in dirs if mr is not None and mr.is_dir()]
+                return data
+            hf_cache_state["data"] = await asyncio.to_thread(_scan)
             hf_cache_state["ts"] = time.monotonic()
         return hf_cache_state["data"]
 
@@ -1331,10 +1495,11 @@ def create_app(root: Path) -> FastAPI:
         return manager.session_public(sid)
 
     # ------------------------------------------------------- キャリブレーション
-    # Maya / Strata の「この PC 向け調整」を 1 ボタンで実行する。エンジン起動と
-    # config 書き換えを伴うため、同じプロファイルのサーバーを止めて GPU を独占して
+    # Maya / Strata / FreeToken の「この PC 向け調整」を 1 ボタンで実行する。エンジン起動と
+    # 設定書き換えを伴うため、同じプロファイルのサーバーを止めて GPU を独占して
     # 実行する (10-40 分の長時間ジョブ = ベンチマークと同じ live ジョブ方式)。
-    # 結果 (調整値・適用記録) は data/calibrations.json に履歴として残す。
+    # FreeToken だけ CLI が無く、launcher 内でエンジン再起動 + greedy 計測を繰り返す
+    # (calibrate._run_freetoken)。結果 (調整値・適用記録) は data/calibrations.json に履歴として残す。
 
     @app.get("/api/calibrations")
     async def list_calibrations() -> dict[str, Any]:
@@ -1366,10 +1531,18 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, "このプロファイルにバックエンドが設定されていません")
         if bid not in CAL_BACKENDS:
             raise HTTPException(400, f"{BACKENDS[bid]['name']} はキャリブレーションに対応していません"
-                                     " (Maya / Strata のプロファイルで実行できます)")
+                                     " (Maya / Strata / FreeToken のプロファイルで実行できます)")
+        mode = (body.mode or "").strip().lower()
+        if mode not in ("", "current", "auto"):
+            raise HTTPException(400, "mode は current / auto のどちらかです")
+        is_ft = CAL_BACKENDS[bid] == "freetoken"
+        if mode == "auto" and not is_ft:
+            raise HTTPException(400, "自動選定 (auto) は FreeToken 系プロファイル専用です")
+        # FreeToken の既定は「全部測りの 1 発」(校正は 1 回だけ行う運用想定のため)
+        cal_mode = mode or ("auto" if is_ft else "current")
         try:
             job = await calibrate.start(profile, bid, restart_after=body.restart_after,
-                                        actor=current_user(request))
+                                        actor=current_user(request), cal_mode=cal_mode)
         except CalibrateError as e:
             raise HTTPException(409, str(e))
         return job
@@ -1391,6 +1564,93 @@ def create_app(root: Path) -> FastAPI:
         if calibrate.active_id == jid:
             raise HTTPException(409, "実行中のキャリブレーションは削除できません。中断してから削除してください")
         calibrate.delete(jid)
+        return {"ok": True}
+
+    # ------------------------------------------- インストール / モデルダウンロード
+
+    # シェルを介さないセットアップ: clone -> .venv -> pip install と HF ダウンロードを
+    # UI のボタン一発で実行する (installer.InstallManager)。calibrate と同じ
+    # fire-and-forget + ポーリングで、履歴は data/installs.json に残す。
+    def _inst_done(job: dict[str, Any]) -> None:
+        # 完了時にキャッシュだけ失効させると、次回表示で新しいモデル / インストールが映る
+        if job["kind"] == "download" and job["status"] == "done":
+            hf_cache_state["data"] = None
+        elif job["kind"] == "install" and job["status"] == "done" and job.get("backend"):
+            detect_cache.pop(job["backend"], None)
+
+    installs.on_job_done = _inst_done
+
+    def _installable_public() -> list[dict[str, Any]]:
+        # clone 前は /api/state に出ない fork でもセットアップタブで選べるよう、表示情報をここで返す
+        return [{"id": bid, "name": BACKENDS[bid]["name"], "repo": spec["clone"],
+                 "ref": spec["ref"], "module_path": spec["module_path"], "extras": spec["extras"],
+                 "model_data": (str(fork_model_root(root, BACKENDS[bid]))
+                                if BACKENDS[bid].get("model_data") else "")}
+                for bid, spec in INSTALL_SPECS.items() if bid in BACKENDS]
+
+    @app.get("/api/installs")
+    async def list_installs() -> dict[str, Any]:
+        """履歴 + 実行中ジョブ + UI インストール可能なバックエンド。"""
+        return {"jobs": installs.list_jobs(), "active": installs.active_id,
+                "installable": _installable_public(), "cache_dir": str(hf_hub_cache_dir())}
+
+    @app.get("/api/installs/{jid}")
+    async def get_install(jid: str) -> dict[str, Any]:
+        job = installs.get(jid)
+        if not job:
+            raise HTTPException(404, "ジョブが見つかりません")
+        return job
+
+    @app.get("/api/installs/{jid}/log")
+    async def install_log(jid: str, cursor: int = 0) -> dict[str, Any]:
+        try:
+            return installs.live_log(jid, cursor)
+        except KeyError:
+            raise HTTPException(404, "ジョブが見つかりません")
+
+    @app.post("/api/installs", status_code=201)
+    async def start_install(body: InstallBody, request: Request) -> dict[str, Any]:
+        try:
+            job = await installs.start_install(body.backend, clean=body.clean,
+                                               extras=body.extras,
+                                               actor=current_user(request))
+        except ActiveJobError as e:
+            raise HTTPException(409, str(e))
+        except InstallError as e:
+            raise HTTPException(400, str(e))
+        return job
+
+    @app.post("/api/installs/download", status_code=201)
+    async def start_download(body: ModelDownloadBody, request: Request) -> dict[str, Any]:
+        try:
+            job = await installs.start_download(body.repo_id, revision=body.revision,
+                                                allow_patterns=body.allow_patterns,
+                                                local_dir=body.local_dir,
+                                                backend=body.backend,
+                                                actor=current_user(request))
+        except ActiveJobError as e:
+            raise HTTPException(409, str(e))
+        except InstallError as e:
+            raise HTTPException(400, str(e))
+        return job
+
+    @app.post("/api/installs/{jid}/cancel")
+    async def cancel_install(jid: str) -> dict[str, Any]:
+        try:
+            installs.cancel(jid)
+        except KeyError:
+            raise HTTPException(404, "ジョブが見つかりません")
+        except InstallError as e:
+            raise HTTPException(409, str(e))
+        return installs.get(jid) or {"ok": True}
+
+    @app.delete("/api/installs/{jid}")
+    async def delete_install(jid: str) -> dict[str, Any]:
+        if installs.get(jid) is None:
+            raise HTTPException(404, "ジョブが見つかりません")
+        if installs.active_id == jid:
+            raise HTTPException(409, "実行中のジョブは削除できません。中断してから削除してください")
+        installs.delete(jid)
         return {"ok": True}
 
     # -------------------------------------------------------------- static

@@ -1,7 +1,8 @@
 """FreeToken (fork) バックエンドのプロファイル項目 — MTP 投機的デコード回帰テスト。
 
 fork リポジトリ (module/fork/freetoken) が `--speculative mtp` (MTP head による
-先読みデコード) を追加したので、launcher 側は
+先読みデコード) を追加し、さらに `lookup` (プロンプト照合による最大 4 token の先読み)
+が加わったので、launcher 側は
   1. 正表 fields/freetoken-fork.json に fork ソースの定義が反映されている
   2. プロファイル編集画面の項目 (select / exec セクション / 既定 OFF) に出る
   3. ON のときだけ argv に付く (OFF はサーバー既定に譲る)
@@ -29,7 +30,7 @@ def _field(bid: str, key: str) -> dict:
 def test_fork_table_has_speculative_from_source():
     table = backends.load_table("freetoken-fork")
     spec = table["--speculative"]
-    assert spec["choices"] == ["none", "mtp"]
+    assert spec["choices"] == ["none", "mtp", "lookup"]
     assert spec["default"] == "none"
 
 
@@ -37,7 +38,7 @@ def test_speculative_field_exposed_only_on_fork():
     f = _field("freetoken-fork", "speculative")
     assert f["flag"] == "--speculative"
     assert f["type"] == "select"
-    assert f["options"] == ["", "none", "mtp"]     # 空 = 送信しない (サーバー既定 none)
+    assert f["options"] == ["", "none", "mtp", "lookup"]   # 空 = 送信しない (サーバー既定 none)
     assert f["section"] == "exec"
     assert f["default_on"] is False                 # auto 導出項目は既定 OFF
     assert "speculative" in backends.DEFAULT_OFF_KEYS["freetoken-fork"]
@@ -65,7 +66,7 @@ def test_speculative_sent_only_when_toggled_on():
     assert "--speculative" not in _argv(on=False)
 
 
-@pytest.mark.parametrize("value", ["none", "mtp"])
+@pytest.mark.parametrize("value", ["none", "mtp", "lookup"])
 def test_speculative_accepts_table_choices(value: str):
     argv = _argv(on=True, value=value)
     assert argv[argv.index("--speculative") + 1] == value
