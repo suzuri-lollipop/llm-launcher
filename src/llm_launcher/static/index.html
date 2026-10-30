@@ -495,52 +495,14 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
     <div id="cal-history"></div>
   </section>
   <section id="view-setup" class="view hidden">
-    <h2 class="view-title">セットアップ <span class="muted">① インストール → ② モデルダウンロード → ③ キャリブレーション までこの画面だけで完了させます (ターミナル不要)</span></h2>
-    <div id="ins-active"></div>
-    <div class="card">
-      <div class="row"><b style="font-size:15px">① インストール</b>
-        <span class="muted" style="font-size:12px">repo clone → .venv 作成 → <span id="ins-tool" class="mono">uv pip install</span> を順に実行します (同時に 1 ジョブ)</span></div>
-      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <select id="ins-backend" class="grow" style="min-width:200px" onchange="insPickBackend()"></select>
-        <select id="ins-ref" style="min-width:190px" onchange="insPickRef()" title="clone / 切替先のブランチ"></select>
-        <label class="switch"><input type="checkbox" id="ins-clean"><span class="track"></span><span class="lab" style="font-size:12.5px">クリーン再インストール (.venv を破棄)</span></label>
-        <label class="switch need-cal" id="ins-calloc" title="インストールが成功したときだけ、このバックエンドのプロファイルを自動で計走します"><input type="checkbox" id="ins-cal"><span class="track"></span><span class="lab" style="font-size:12.5px">完了後にキャリブレーション</span></label>
-        <button class="primary" id="ins-start" onclick="insStart()">📦 インストール実行</button>
-        <span class="muted" id="ins-note"></span>
-      </div>
-      <div class="muted" id="ins-branch" style="font-size:12px;margin-top:6px"></div>
-      <div class="muted mono" id="ins-preview" style="font-size:11px;margin-top:6px"></div>
+    <h2 class="view-title">セットアップ <span class="muted">インストール / モデルダウンロード / 調整 は新しいステップ式ウィザードで行います</span></h2>
+    <div class="card" style="text-align:center;padding:36px 16px">
+      <div style="font-size:40px;line-height:1">📦</div>
+      <p class="muted" style="margin:12px 0 4px">1 画面 1 質問のセットアップ画面を用意しました。<br>
+        案内にしたがって <b>インストール → モデルのダウンロード → 調整 (任意)</b> を順番に実行できます。</p>
+      <button class="primary" style="max-width:300px;margin:14px auto 0" onclick="location.href='/setup'">セットアップを開始する</button>
+      <p class="muted" id="ins-run-note" style="margin-top:12px;font-size:12px"></p>
     </div>
-    <div class="card">
-      <div class="row"><b style="font-size:15px">② モデルダウンロード</b>
-        <span class="muted" style="font-size:12px">Hugging Face Hub から保存先へ (既定のキャッシュ <span id="ins-hfdir" class="mono"></span>)。完了後に対応モデル一覧へ反映します</span></div>
-      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <select id="dl-model" onchange="dlPickModel()" title="選んだバックエンドの docs/models.md に載っている対応モデル (選ぶと repo id に入る)" style="max-width:340px" hidden></select>
-        <input type="text" id="dl-repo" class="mono grow" placeholder="repo id (例: Qwen/Qwen3-30B-A3B-Instruct)" style="min-width:220px">
-        <input type="text" id="dl-rev" class="mono" placeholder="revision (省略可)" style="max-width:160px">
-        <select id="dl-dest" title="保存先"></select>
-      </div>
-      <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap">
-        <input type="text" id="dl-patterns" class="mono grow" placeholder="ファイル名の絞り込み (カンマ区切り、省略可。例: *.safetensors,config.json)" style="min-width:220px">
-        <button class="primary" id="dl-start" onclick="dlStart()">⬇️ ダウンロード</button>
-        <span class="muted" id="dl-note"></span>
-      </div>
-    </div>
-    <div class="card need-cal" id="sc-card">
-      <div class="row"><b style="font-size:15px">③ キャリブレーション</b>
-        <span class="muted" style="font-size:12px">この PC 向けの調整 (Maya / Strata / FreeToken 系)。実行中は対象プロファイルのサーバーを止めて GPU を独占します (10 分〜4 時間)</span>
-        <span class="grow"></span>
-        <button class="ghost" style="min-height:30px;font-size:12px" onclick="switchTab('calibrate')">🎯 詳細・全履歴</button></div>
-      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <select id="sc-profile" class="grow" style="min-width:200px" onchange="scPick()" title="調整するプロファイル"></select>
-        <label class="switch"><input type="checkbox" id="sc-restart"><span class="track"></span><span class="lab" style="font-size:12.5px">調整後にサーバーを起動し直す</span></label>
-        <button class="primary need-cal" id="sc-start" onclick="scStart()">🎯 キャリブレーション実行</button>
-        <span class="muted" id="sc-note"></span>
-      </div>
-      <div class="muted" id="sc-state" style="font-size:12px;margin-top:6px"></div>
-      <div class="muted mono" id="sc-preview" style="font-size:11px;margin-top:6px"></div>
-    </div>
-    <div id="ins-history"></div>
   </section>
 </main>
 
@@ -690,7 +652,12 @@ function setMenu(open) {
 }
 $("#menu-btn").addEventListener("click", () => setMenu(!$("#sidemen").classList.contains("open")));
 document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => {
-  b.addEventListener("click", () => { switchTab(b.dataset.tab); setMenu(false); });
+  b.addEventListener("click", () => {
+    setMenu(false);
+    /* セットアップは専用ウィザード (/setup) へ画面遷移する */
+    if (b.dataset.tab === "setup") { location.href = "/setup"; return; }
+    switchTab(b.dataset.tab);
+  });
 });
 /* ロールで開けるタブ。起動 / 稼働中は常に開ける (メンテナーの基本操作)。users は管理者のみ */
 const TAB_CAP = { home: "dashboard", history: "history", playground: "playground",
@@ -3453,10 +3420,10 @@ async function insToggle(id) {
   }
   renderSetup();
 }
+/* セットアップは /setup のステップ式ウィザード (static/setup.html) へ画面遷移する。
+   バックエンド id を渡すとその項目が预选択された状態で開く。 */
 function setupTab(bid) {
-  switchTab("setup");
-  if (bid) { const o = [...$("#ins-backend").options].find(x => x.value === bid);
-             if (o) { $("#ins-backend").value = bid; renderSetup(); } }
+  location.href = "/setup" + (bid ? "?backend=" + encodeURIComponent(bid) : "");
 }
 const insBytes = n => { n = n || 0;
   return n >= 2**30 ? (n / 2**30).toFixed(2) + " GiB"
@@ -3586,6 +3553,12 @@ function renderSetupCal(busy) {
 function renderSetup() {
   insInit();
   const sel = $("#ins-backend");
+  if (!sel) {                                   // セットアップは /setup ウィザードへ移行済み。
+    const n = $("#ins-run-note");               // 旧フォームが無い場合は「実行中」の案内だけ出す。
+    if (n) n.textContent = (S.ins.active || calBusy())
+      ? "⏳ いまジョブが実行中です — 進行中は /setup のセットアップ画面で見られます" : "";
+    return;
+  }
   const specs = S.ins.installable || [];
   const ids = specs.map(e => e.id);
   if (ids.join("|") !== S.ins._bSig || ![...sel.options].some(o => o.value === sel.value)) {
