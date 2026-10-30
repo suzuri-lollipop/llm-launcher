@@ -599,61 +599,73 @@ async function clDelete() {
 /* キャリブレーションは コンテキスト長 / KV形式 / 並列数 を前提に計測するため、
    調整の前にこの 3 値をプロファイルへ保存する。起動 JSON 主体のバックエンド
    (regen) は保存後に再生成しないと調整が古い argv で走る。 */
+/* 選択肢は「数値と単位」だけを書き、説明文は入力欄に埋め込まない
+   (見出し下の 1 行 sec.hint に集約する)。行は [値, 表示, 推奨タグ] の 3 つ組。 */
 const CF_TOK = v => { const n = Math.round(Number(v));
-  return (Number.isFinite(n) && n % 1024 === 0 && n >= 1024)
-    ? `${Math.round(n / 1024)}K トークン` : `${Number(v).toLocaleString()} トークン`; };
-const CF_CTX = [
-  ["32768", "32K トークン", "軽快・省メモリ。短いやり取り中心向け", ""],
-  ["131072", "128K トークン", "長めの文書も扱える実用バランス", "推奨"],
-  ["262144", "256K トークン", "最大構成。VRAM を多く消費します", ""],
-];
-const CF_KV = [
-  ["fp8", "fp8", "KVキャッシュを約半分のメモリに。品質はほぼ同等", "推奨"],
-  ["bf16", "bf16 (fp16系)", "品質最優先。KVメモリは約2倍", ""],
-  ["auto", "auto (エンジン既定値)", "エンジンにおまかせ", ""],
-];
-const CF_PAR = [
-  ["1", "1 並列", "1リクエストずつ処理。最も安定", ""],
-  ["2", "2 並列", "少人数の同時利用向け", ""],
-  ["4", "4 並列", "数人の同時利用の目安", "推奨"],
-  ["8", "8 並列", "大規模並列。高VRAM必須", ""],
-];
-const CF_TP = [
-  ["1", "1 GPU", "分割なし。1枚のGPUにモデル全体を載せる", ""],
-  ["2", "2 GPU", "モデルを2枚に分割。GPUあたりのメモリが下がる", ""],
-  ["4", "4 GPU", "4枚に分割。大きなモデル向け", ""],
-  ["8", "8 GPU", "8枚に分割。8枚ある環境用", ""],
-];
+  if (!Number.isFinite(n)) return String(v);
+  if (n >= 1048576 && n % 1048576 === 0) return `${Math.round(n / 1048576)}M`;
+  return (n >= 1024 && n % 1024 === 0) ? `${Math.round(n / 1024)}K` : n.toLocaleString(); };
+const CF_NUM = v => { const n = parseInt(v, 10); return Number.isFinite(n) ? String(n) : String(v); };
+const CF_CTX = [["32768", "32K", ""], ["131072", "128K", "推奨"], ["262144", "256K", ""]];
+const CF_KV = [["fp8", "fp8", "推奨"], ["bf16", "bf16", ""], ["auto", "auto", ""]];
+const CF_PAR = [["1", "1", ""], ["2", "2", ""], ["4", "4", "推奨"], ["8", "8", ""]];
+const CF_TP = [["1", "1", ""], ["2", "2", ""], ["4", "4", ""], ["8", "8", ""]];
+/* perUser 項目 (FreeToken の一人あたり設定): 画面は 1 人あたりで聞き、JSON へは
+   合計 = 1人あたり × 並列数 を書く。--num-tokens は全員で共有する KV 総量なので、
+   1人256K・4並列なら 1M を書かないと 1 人あたり 64K しか残らない。 */
+function cfParNow() {
+  const el = document.querySelector("#cf-par");
+  const n = parseInt(el && el.value, 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+/* 見出し下の補足 1 行。perUser は「1人あたり × 並列 = 合計KV」を生きた値で示す */
+function cfSyncHints() {
+  const cfg = RUNCFG[W.backend] || {};
+  for (const id of ["ctx", "kv", "tp", "par"]) {
+    const sec = cfg[id]; const hint = document.querySelector(`#cf-${id}-hint`);
+    if (!sec || !hint) continue;
+    hint.textContent = sec.hint || "";
+    if (!sec.perUser) continue;
+    const el = document.querySelector(`#cf-${id}`);
+    const n = parseInt(el ? el.value : "", 10);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const par = cfParNow();
+    const per = el.selectedOptions[0] && el.selectedOptions[0].dataset.raw === "1"
+      ? Math.round(n / par) : n;
+    hint.innerHTML = esc(sec.hint)
+      + `<br>1人あたり ${esc(CF_TOK(per))} × ${par}並列 = KV合計 ${esc(CF_TOK(per * par))}`;
+  }
+}
 const RUNCFG = {
   "freetoken-fork": { regen: true, model: true,
-    ctx: { key: "num_tokens", label: "コンテキスト長",
+    ctx: { key: "num_tokens", label: "一人当たりのコンテキスト長", short: "1人あたり", perUser: true,
            hint: "長いほどVRAMを消費します。調整はこの長さ前提のKVキャッシュで行います", opts: CF_CTX, cur: CF_TOK },
-    kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式 (fp8 / bf16 など)",
+    kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "会話履歴の格納精度です。fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
-    tp: { key: "tp_size", label: "Tensor Parallel (GPU分割数)",
-          hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: v => `${v} GPU` },
+    tp: { key: "tp_size", label: "Tensor Parallel (GPU分割数)", short: "GPU分割",
+          hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "max_running_requests", label: "並列推論数",
-           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
   "sglang": { regen: false,
     ctx: { key: "context_length", label: "コンテキスト長",
            hint: "長いほどVRAMを消費します", opts: CF_CTX, cur: CF_TOK },
     kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
     par: { key: "max_running_requests", label: "並列推論数",
-           hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: CF_NUM } },
   "vllm": { regen: false,
     ctx: { key: "max_model_len", label: "コンテキスト長",
            hint: "長いほどVRAMを消費します", opts: CF_CTX, cur: CF_TOK },
     kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
     par: { key: "max_num_seqs", label: "並列推論数",
-           hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: CF_NUM } },
   "strata": { regen: false,
     par: { key: "parallel", label: "並列推論数",
-           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
   "maya": { regen: false,
     par: { key: "parallel", label: "並列推論数",
-           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
 };
 async function renderConfig() {
   W.cfgSkip = true;
@@ -692,39 +704,57 @@ async function renderConfig() {
   const nmEl = $("#cf-name");
   if (nmEl && document.activeElement !== nmEl) nmEl.value = p.name || "";
   const parts = [];
+  // perUser 項目は保存値 (合計) を並列数で割って 1 人あたりとして見せる。
+  // 並列数の初期値は保存値、無ければ「推奨」選択肢で揃える (フォーム描画前なので DOM を使わない)
+  const parInit = (() => {
+    if (!cfg.par) return 1;
+    const s = parseInt(v[cfg.par.key] ?? "", 10);
+    if (Number.isFinite(s) && s > 0) return s;
+    const rec = cfg.par.opts.find(o => (o[2] || "").includes("推奨")) || cfg.par.opts[0] || ["1"];
+    return parseInt(rec[0], 10) || 1;
+  })();
   for (const id of ["ctx", "kv", "tp", "par"]) {
     const sec = cfg[id]; if (!sec) continue;
-    const cur = String(v[sec.key] ?? "");
+    const stored = String(v[sec.key] ?? "");
+    const perNum = sec.perUser ? Math.round(Number(stored) / parInit) : NaN;
+    const cur = (sec.perUser && stored && Number.isFinite(perNum)) ? String(perNum) : stored;
     // 未設定の項目は「推奨」(無ければ先頭) をプリチェックして、何も選まずに
     // 保存すると値が何も入らない状態を防ぐ
-    const def = cur === "" ? ((sec.opts.find(o => (o[3] || "").includes("推奨"))
+    const def = cur === "" ? ((sec.opts.find(o => (o[2] || "").includes("推奨"))
                                || sec.opts[0] || [""])[0]) : null;
     // 選択肢が 2つ以上の設定はプルダウンにまとめる (画面を縦に伸ばさない)。
-    // data-t1 にサマリーへ使う短い名称を持たせる
+    // 表示は数値と単位だけにし、data-t1 にサマリーへ使う短い名称を持たせる
     let rows = sec.opts.map(o => {
       const sel = cur ? cur === o[0] : o[0] === def;
       return `<option value="${esc(o[0])}"${sel ? " selected" : ""}`
         + ` data-t1="${esc(o[1])}">${esc(o[1])}`
-        + (o[3] ? ` (${esc(o[3])})` : "")
-        + (o[2] ? ` — ${esc(o[2])}` : "") + "</option>";
+        + (o[2] ? `（${esc(o[2])}）` : "") + "</option>";
     }).join("");
     if (cur && !sec.opts.some(o => o[0] === cur)) {
-      const t = esc(sec.cur ? sec.cur(cur) : cur);
-      rows = `<option value="${esc(cur)}" selected data-t1="${t}">`
-        + `${t} — 現在の値 (そのまま維持)</option>` + rows;
+      // 選択肢に無い既存値 (手動設定や、合計でしか書かれない値) はそのまま維持。
+      // data-raw は「JSON の値を据え置く」意味なので保存時に並列数を掛けない
+      const t = esc(sec.cur ? sec.cur(sec.perUser ? cur : stored)
+                            : (sec.perUser ? CF_TOK(cur) : stored));
+      rows = `<option value="${esc(stored)}" selected data-t1="${t}"`
+        + (sec.perUser ? ' data-raw="1"' : "") + `>${t}（現在の値）</option>` + rows;
     }
-    parts.push(`<div class="cf-group"><div class="cf-label">${esc(sec.label)}</div>`
-      + `<div class="cf-hint">${esc(sec.hint)}</div>`
+    // 見出しはフローティングラベルが兼ねるので、 group 内は「選択 → 補足1行」だけ
+    parts.push(`<div class="cf-group">`
       + `<div class="field sel-fixed"><select id="cf-${id}" data-name="${esc(id)}">${rows}</select>`
-      + `<label for="cf-${id}">${esc(sec.label)}</label></div></div>`);
+      + `<label for="cf-${id}">${esc(sec.label)}</label></div>`
+      + `<div class="cf-hint" id="cf-${id}-hint">${esc(sec.hint)}</div></div>`);
   }
   $("#cf-groups").innerHTML = parts.join("");
+  cfSyncHints();
   $("#cf-err").classList.add("hidden");
 }
 $("#cf-groups").addEventListener("change", e => {
-  const inp = e.target.closest("input"); if (!inp || inp.type !== "radio") return;
-  document.querySelectorAll(`#cf-groups input[name="${inp.name}"]`).forEach(i =>
-    i.closest(".opt").classList.toggle("sel", i.checked));
+  const inp = e.target.closest("input");
+  if (inp && inp.type === "radio") {
+    document.querySelectorAll(`#cf-groups input[name="${inp.name}"]`).forEach(i =>
+      i.closest(".opt").classList.toggle("sel", i.checked));
+  }
+  cfSyncHints();   // 並列数を変えたら 1 人あたり / KV合計の補足も追従させる
 });
 // PUT はドキュメント全体を置き換えるため、保存のたびにサーバーの最新を再取得して
 // 土台にする。古い W.calProfile のまま PUT すると、前の保存で書き込まれた
@@ -747,15 +777,22 @@ $("#cf-go").addEventListener("click", async () => {
   const vals = { ...(p.values || {}) };
   const on = p.on ? { ...p.on } : null;
   const chosen = [];
+  const par = cfParNow();   // 一人あたり項目が合計を書き込むときに使う並列数 (フォームの選択)
   for (const id of ["ctx", "kv", "tp", "par"]) {
     const sec = cfg[id]; if (!sec) continue;
     const el = document.querySelector(`#cf-groups select#cf-${id}`);
     if (!el || !el.value) continue;
-    vals[sec.key] = el.value;
-    if (on) on[sec.key] = true;
     const opt = el.selectedOptions[0];
-    chosen.push(sec.label.split(" ")[0] + " "
-      + ((opt && opt.dataset.t1) || el.value));
+    const raw = !!(opt && opt.dataset.raw === "1");
+    // perUser (一人当たり設定) は JSON へ 合計 = 1人あたり × 並列数 を書く
+    // (--num-tokens は全員で共有する KV 総量で、そのままだと 1 人あたりは並列数分で割れる)。
+    // data-raw = 「現在の値をそのまま維持」を選ぶので掛けない
+    const per = sec.perUser ? parseInt(el.value, 10) : NaN;
+    vals[sec.key] = (sec.perUser && !raw && Number.isFinite(per)) ? String(per * par) : el.value;
+    if (on) on[sec.key] = true;
+    chosen.push((sec.short || sec.label.split(" ")[0]) + " "
+      + ((opt && opt.dataset.t1) || el.value)
+      + (sec.perUser && !raw ? `×${par}並列` : ""));
   }
   // モデル未決定のプロファイルは今回ダウンロードしたモデルを指す。ページ
   // リロードで W.job を失ってもインストール履歴 (jobs) から復元する。新規
