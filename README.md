@@ -1,4 +1,6 @@
-# llm-launcher
+<div align="center">
+  <img src="assets/logo.svg" alt="LLM Launcher." width="460">
+</div>
 
 vLLM / SGLang / llama.cpp / FreeToken / Strata / Project Maya を **サブモジュールとして `module/` 配下に登録** し、
 Web UI から **起動プロファイル管理・ワンタップ起動・ログ確認・停止** まで行える管理アプリです。

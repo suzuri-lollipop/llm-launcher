@@ -34,8 +34,12 @@
   <section class="step" id="s-welcome">
     <div class="kicker">セットアップ</div>
     <h1>環境をセットアップします</h1>
-    <p class="sub">このウィザードでは次の 3 つだけを順番に行います。<br>
-      ① <b>バックエンドのインストール</b> → ② <b>モデルのダウンロード</b> → ③ <b>調整 (任意)</b></p>
+    <p class="sub tight">このウィザードでは次の 3 つだけを順番に行います。</p>
+    <ol class="plan">
+      <li><span class="n">1</span><span>バックエンドのインストール</span></li>
+      <li><span class="n">2</span><span>モデルのダウンロード</span></li>
+      <li><span class="n">3</span><span>調整 <span class="note">(任意)</span></span></li>
+    </ol>
     <div class="foot-btns"><span class="spacer"></span>
       <button class="btn" data-go="s-backend">はじめる</button></div>
   </section>
@@ -111,17 +115,36 @@
       <button class="btn" data-go="s-model">続ける</button></div>
   </section>
 
-  <!-- 5. モデルダウンロード -->
+  <!-- 5. モデル選択 (2択: 一覧からダウンロード / 済みモデルを使う) -->
   <section class="step" id="s-model">
     <div class="kicker">ステップ 2 / 5 — モデル</div>
-    <h1>モデルをダウンロード</h1>
-    <p class="sub" id="md-sub">ダウンロードするモデルの repo id を入力してください。</p>
-    <div class="field sel-fixed" id="md-rec-field" hidden><select id="md-sel">
-        <option value="">選択してください…</option></select>
-      <label for="md-sel">おすすめから選ぶ</label></div>
-    <div class="field"><input id="md-repo" type="text" placeholder=" " autocomplete="off" spellcheck="false">
-      <label for="md-repo">repo id (例: Qwen/Qwen3-30B-A3B-Instruct)</label></div>
+    <h1>使うモデルを決めます</h1>
+    <p class="sub tight" id="md-sub">新しいモデルをダウンロードするか、この PC ですでにダウンロード済みのモデルを使うかを選んでください。</p>
+    <div class="opt-list" id="md-modes">
+      <label class="opt sel"><input type="radio" name="md-mode" value="dl" checked>
+        <span class="txt"><span class="t1">モデルをダウンロードする</span>
+        <span class="t2">対応モデルの一覧から選んで取得します</span></span></label>
+      <label class="opt"><input type="radio" name="md-mode" value="local">
+        <span class="txt"><span class="t1">ダウンロード済みのモデルを使う</span>
+        <span class="t2">この PC にあるモデルから選びます (再取得しません)</span></span></label>
+    </div>
+    <div class="field sel-fixed" id="md-dl-field"><select id="md-sel"></select>
+      <label for="md-sel">ダウンロードするモデル</label></div>
+    <div class="field sel-fixed hidden" id="md-local-field"><select id="md-local"></select>
+      <label for="md-local">ダウンロード済みのモデル</label></div>
     <p class="hint" id="md-dest"></p>
+    <div class="field sel-fixed hidden" id="md-speed-field"><select id="md-speed">
+      <option value="0" selected>無制限</option>
+      <option value="512">512 KB/s</option>
+      <option value="2048">2 MB/s</option>
+      <option value="5120">5 MB/s</option>
+      <option value="10240">10 MB/s</option>
+      <option value="51200">50 MB/s</option>
+    </select><label for="md-speed">ダウンロード速度の上限</label></div>
+    <details class="log" id="md-adv"><summary>その他: repo id を直接入力する</summary>
+      <div class="field"><input id="md-repo" type="text" placeholder=" " autocomplete="off" spellcheck="false">
+      <label for="md-repo">repo id (例: Qwen/Qwen3-30B-A3B-Instruct)</label></div>
+    </details>
     <div class="err-box hidden" id="md-err"></div>
     <div class="foot-btns">
       <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
@@ -144,7 +167,24 @@
       <button class="btn-text" id="dl-cancel">中断</button>
       <span class="spacer"></span>
       <button class="btn-text" id="dl-retry" hidden>やり直す</button>
+      <button class="btn danger hidden" id="dl-force">強制停止</button>
       <button class="btn hidden" id="dl-next">次へ</button>
+    </div>
+  </section>
+
+  <!-- 5b2. 中断残骸の掃除 (ダウンロード中断後にここへ来る) -->
+  <section class="step" id="s-cleanup">
+    <div class="kicker">ステップ 2 / 5 — モデル</div>
+    <h1>ダウンロード途中のファイルを<br>削除しますか？</h1>
+    <p class="sub" id="cl-sub">中断で受信途中のデータが保存先に残っています。次に同じモデルを取り直すなら削除しておくと、容量を無駄に使いません。</p>
+    <div class="rows hidden" id="cl-box"></div>
+    <p class="hint hidden" id="cl-none">削除対象は見つかりませんでした。そのままで問題ありません。</p>
+    <div class="err-box hidden" id="cl-err"></div>
+    <div class="foot-btns">
+      <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
+      <span class="spacer"></span>
+      <button class="btn-text" id="cl-keep">残す</button>
+      <button class="btn danger" id="cl-del">削除する</button>
     </div>
   </section>
 

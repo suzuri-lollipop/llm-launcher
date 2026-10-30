@@ -58,6 +58,18 @@ body {
 h1 { font-size: 22px; font-weight: 400; margin: 0 0 8px; line-height: 1.3; }
 .sub { color: var(--ink2); margin: 0 0 24px; }
 .sub b { color: var(--ink); font-weight: 500; }
+.sub.tight { margin-bottom: 16px; }
+
+/* ---------------- ようこそ画面のステップ一覧 (番号バー、矢印なし) ---------------- */
+.plan { list-style: none; margin: 0 0 8px; padding: 0; }
+.plan li { position: relative; display: flex; align-items: center; gap: 12px;
+  padding: 7px 0; font-size: 14px; color: var(--ink); }
+.plan li:not(:last-child)::after { content: ""; position: absolute; left: 13px; top: 34px;
+  width: 2px; height: 14px; background: var(--line); }
+.plan .n { width: 28px; height: 28px; border-radius: 50%; flex: none;
+  background: var(--blue-soft); color: #174ea6; font-size: 13px; font-weight: 500;
+  display: grid; place-items: center; }
+.plan .note { color: var(--ink2); font-size: 12px; }
 
 /* ---------------- 選択肢 (アカウント選択風ラジオ行) ---------------- */
 .opt-list { display: flex; flex-direction: column; gap: 4px; margin: 0 0 8px; padding: 0; }
@@ -119,6 +131,9 @@ h1 { font-size: 22px; font-weight: 400; margin: 0 0 8px; line-height: 1.3; }
   transition: box-shadow .15s, background .15s; min-width: 88px;
 }
 .btn:hover:not(:disabled) { box-shadow: 0 1px 2px rgba(60,64,67,.3), 0 1px 3px 1px rgba(60,64,67,.15); }
+.btn.danger { background: var(--red); }
+.btn.danger:hover:not(:disabled) { background: #c5221f; }
+.btn.danger:disabled { background: #e9ecef; color: #b1b4b8; }
 .btn:disabled { background: #e9ecef; color: #b1b4b8; cursor: default; }
 .btn.full { width: 100%; margin-top: 8px; }
 .btn-text {
