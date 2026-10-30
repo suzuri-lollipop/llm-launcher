@@ -710,26 +710,48 @@ class InstallManager:
     def _make_tqdm(self, job: dict[str, Any], cancel: threading.Event) -> type:
         """snapshot_download に渡す tqdm サブクラス。update で受信 byte を数え、
         cancel を確認する (raise で転送ループそのものを止める)。
-        disable=True で描画を殺す (サーバー stderr にバーを流さない)。"""
+        disable=True で描画を殺す (サーバー stderr にバーを流さない)。
+
+        huggingface_hub 2.x では snapshot_download が集約バー (name=...transfer) を先に作り、
+        ファイル別バーや再構成バーがそこへ update を転送する。全て素直に数えると受信量を
+        2 重以上 に数えてしまうため、集約バーが見えたらそこだけ数える。
+        集約バーを作らない古いバージョンでは従来のファイル別バーを数える。"""
         from tqdm.auto import tqdm
 
+        agg_name = "huggingface_hub.snapshot_download.transfer"
+        rec_name = "huggingface_hub.snapshot_download"
+        skip_descs = ("Downloading bucket files",)  # xet の再構成側バー (受信量と重複する)
+
         class _Hook(tqdm):  # type: ignore[misc,valid-type]
+            _saw_agg = False  # クラス属性: 集約転送バーが登場したら True
+
             def __init__(self, *args: Any, **kw: Any) -> None:  # noqa: D107
                 # disable=True だと unit/desc が未設定になるので引数から控えておく
                 self._hook_unit = kw.get("unit", "it")
                 self._hook_desc = kw.get("desc") or ""
+                self._hook_agg = (kw.get("name") or "") == agg_name
+                if self._hook_agg:
+                    type(self)._saw_agg = True
                 kw["disable"] = True
                 super().__init__(*args, **kw)
+
+            def _counts(self) -> bool:
+                if self._hook_unit != "B":
+                    return False
+                if _Hook._saw_agg:
+                    return self._hook_agg  # 集約バーのみ (子バーの転送分で二重計数しない)
+                d = self._hook_desc
+                return d not in skip_descs and not d.startswith("Reconstructing")
 
             def update(self, n: float = 1) -> None:  # noqa: D102
                 if cancel.is_set():
                     raise _Cancelled()
                 super().update(n)
-                if getattr(self, "_hook_unit", "") == "B":
+                if self._counts():
                     pr = job["progress"]
                     pr["done"] += int(n or 0)
                     if self.total:
-                        pr["file_total"] = int(self.total)
+                        pr["file_total"] = int(self.total)  # 2.x の集約バー = スナップショット全体サイズ
                     pr["file"] = getattr(self, "desc", "") or self._hook_desc
                 return None
 
@@ -737,7 +759,8 @@ class InstallManager:
                 self._hook_desc = desc or ""
 
             def close(self) -> None:  # noqa: D102
-                if not getattr(self, "_hook_counted", False):
+                if not getattr(self, "_hook_counted", False) and self._hook_unit == "B" \
+                        and not self._hook_agg and self._hook_desc != rec_name:
                     self._hook_counted = True
                     job["progress"]["files_done"] = job["progress"].get("files_done", 0) + 1
                 super().close()
@@ -798,15 +821,22 @@ class InstallManager:
             self._finish(job)
 
     async def _dl_tick(self, job: dict[str, Any]) -> None:
-        """ダウンロード中は 2 秒ごとに進捗を永続化する (byte 単位で書かない)。"""
-        last_done = 0
+        """ダウンロード中は 2 秒ごとに進捗を永続化する (byte 単位で書かない)。
+        速度は直近 ~16 秒の移動平均。2 秒瞬時値だと Xet のバースト転送で
+        「0 に近い値 ↔ 巨大値」を往復して、停滞と区別できなくなるため。"""
+        samples: list[tuple[float, int]] = []
+        loop = asyncio.get_running_loop()
         with contextlib.suppress(asyncio.CancelledError):
             while True:
                 await asyncio.sleep(2.0)
                 pr = job["progress"]
-                dt = 2.0
-                pr["speed_bps"] = max(0, pr["done"] - last_done) / dt
-                last_done = pr["done"]
+                t = loop.time()
+                samples.append((t, int(pr["done"])))
+                if len(samples) > 8:
+                    samples.pop(0)
+                t0, d0 = samples[0]
+                if t - t0 >= 4.0:
+                    pr["speed_bps"] = max(0.0, (pr["done"] - d0) / (t - t0))
                 job["step"] = f"受信中 {pr['done'] / 2**20:.1f} MB" + (f" {pr['file']}" if pr["file"] else "")
                 self._save()
 
