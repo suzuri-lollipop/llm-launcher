@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>セットアップ — LLM Launcher</title>
+<link rel="stylesheet" href="/static/setup.css">
+</head>
+<body>
+<div class="logo">LLM<b>Launcher</b><span class="dot">.</span></div>
+
+<main class="card" id="card">
+
+  <!-- 0. ログインが必要 -->
+  <section class="step" id="s-login">
+    <div class="kicker">セットアップ</div>
+    <h1>続けるにはログインしてください</h1>
+    <p class="sub">セットアップには <b>インストール権限</b> を持つアカウントが必要です。</p>
+    <div class="foot-btns"><span class="spacer"></span>
+      <a class="btn" href="/">ログインする</a></div>
+  </section>
+
+  <!-- 0b. 権限なし -->
+  <section class="step" id="s-perm">
+    <div class="kicker">セットアップ</div>
+    <h1>この画面を使う権限がありません</h1>
+    <p class="sub">セットアップ (インストール) は管理者 / インストール権限のあるアカウントだけで実行できます。</p>
+    <div class="foot-btns"><span class="spacer"></span>
+      <a class="btn" href="/">ホームへ戻る</a></div>
+  </section>
+
+  <!-- 1. ようこそ -->
+  <section class="step" id="s-welcome">
+    <div class="kicker">セットアップ</div>
+    <h1>環境をセットアップします</h1>
+    <p class="sub">このウィザードでは次の 3 つだけを順番に行います。<br>
+      ① <b>バックエンドのインストール</b> → ② <b>モデルのダウンロード</b> → ③ <b>調整 (任意)</b></p>
+    <div class="foot-btns"><span class="spacer"></span>
+      <button class="btn" data-go="s-backend">はじめる</button></div>
+  </section>
+
+  <!-- 2. バックエンド選択 (Google のアカウント選択風ラジオ一覧) -->
+  <section class="step" id="s-backend">
+    <div class="kicker">ステップ 1 / 5 — インストール</div>
+    <h1>インストールするソフトを選択</h1>
+    <p class="sub">セットアップするバックエンドを選んでください。</p>
+    <div class="opt-list" id="be-list"></div>
+    <p class="hint" id="be-note"></p>
+    <div class="foot-btns">
+      <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
+      <span class="spacer"></span>
+      <button class="btn" id="be-next" data-go="s-review" disabled>次へ</button>
+    </div>
+  </section>
+
+  <!-- 2b. ブランチ選択 (refs が 2 つ以上のときだけ出る) -->
+  <section class="step" id="s-branch">
+    <div class="kicker">ステップ 1 / 5 — インストール</div>
+    <h1>バージョンを選択</h1>
+    <p class="sub" id="br-sub">インストールするブランチを選んでください。</p>
+    <div class="opt-list" id="br-list"></div>
+    <div class="foot-btns">
+      <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
+      <span class="spacer"></span>
+      <button class="btn" data-go="s-review">次へ</button>
+    </div>
+  </section>
+
+  <!-- 3. 確認 → インストール開始 -->
+  <section class="step" id="s-review">
+    <div class="kicker">ステップ 1 / 5 — インストール</div>
+    <h1 id="rv-title">インストールの内容</h1>
+    <p class="sub">下の内容でインストールを実行します。初回は数 GB をダウンロードすることがあり、完了まで数十分かかります。</p>
+    <div class="rows" id="rv-rows"></div>
+    <details class="log" id="rv-more">
+      <summary>詳細・高度なオプション</summary>
+      <label class="opt"><input type="checkbox" id="rv-clean">
+        <span class="txt"><span class="t1">クリーン再インストール</span>
+        <span class="t2">既存の .venv を破棄して作り直します (調子が悪いときだけ)</span></span></label>
+      <p class="hint mono" id="rv-preview"></p>
+    </details>
+    <div class="foot-btns">
+      <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
+      <span class="spacer"></span>
+      <button class="btn" id="rv-start">インストール</button>
+    </div>
+  </section>
+
+  <!-- 4. インストール進捗 -->
+  <section class="step" id="s-progress">
+    <div class="kicker" id="pg-kicker">ステップ 1 / 5 — インストール</div>
+    <h1 id="pg-title">インストール中…</h1>
+    <ul class="chk" id="pg-steps"></ul>
+    <div id="pg-prog"></div>
+    <div class="err-box hidden" id="pg-err"></div>
+    <details class="log" id="pg-logbox"><summary>ログを表示</summary><pre id="pg-log">(ログ待ち…)</pre></details>
+    <div class="foot-btns">
+      <button class="btn-text" id="pg-cancel">中断</button>
+      <span class="spacer"></span>
+      <button class="btn hidden" id="pg-next">次へ</button>
+    </div>
+  </section>
+
+  <!-- 4b. インストール完了 -->
+  <section class="step" id="s-installed">
+    <div class="ok-icon">✓</div>
+    <h1 id="ok-title">インストールが完了しました</h1>
+    <p class="sub" id="ok-sub"></p>
+    <div class="foot-btns"><span class="spacer"></span>
+      <button class="btn" data-go="s-model">続ける</button></div>
+  </section>
+
+  <!-- 5. モデルダウンロード -->
+  <section class="step" id="s-model">
+    <div class="kicker">ステップ 2 / 5 — モデル</div>
+    <h1>モデルをダウンロード</h1>
+    <p class="sub" id="md-sub">ダウンロードするモデルの repo id を入力してください。</p>
+    <div class="field sel-fixed" id="md-rec-field" hidden><select id="md-sel">
+        <option value="">選択してください…</option></select>
+      <label for="md-sel">おすすめから選ぶ</label></div>
+    <div class="field"><input id="md-repo" type="text" placeholder=" " autocomplete="off" spellcheck="false">
+      <label for="md-repo">repo id (例: Qwen/Qwen3-30B-A3B-Instruct)</label></div>
+    <p class="hint" id="md-dest"></p>
+    <div class="err-box hidden" id="md-err"></div>
+    <div class="foot-btns">
+      <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
+      <span class="spacer"></span>
+      <button class="btn-text" data-go="s-config">あとでする</button>
+      <button class="btn" id="md-start" disabled>ダウンロード</button>
+    </div>
+  </section>
+
+  <!-- 5b. ダウンロード進捗 -->
+  <section class="step" id="s-download">
+    <div class="kicker">ステップ 2 / 5 — モデル</div>
+    <h1 id="dl-title">ダウンロード中…</h1>
+    <p class="sub" id="dl-sub"></p>
+    <div class="bar"><i id="dl-bar"></i></div>
+    <p class="pbar-note" id="dl-note"></p>
+    <div class="err-box hidden" id="dl-err"></div>
+    <details class="log" id="dl-logbox"><summary>ログを表示</summary><pre id="dl-log">(ログ待ち…)</pre></details>
+    <div class="foot-btns">
+      <button class="btn-text" id="dl-cancel">中断</button>
+      <span class="spacer"></span>
+      <button class="btn-text" id="dl-retry" hidden>やり直す</button>
+      <button class="btn hidden" id="dl-next">次へ</button>
+    </div>
+  </section>
+
+  <!-- 5c. 稼働設定 (キャリブレーションの前に決める最小限の値) -->
+  <section class="step" id="s-config">
+    <div class="kicker">ステップ 3 / 5 — 稼働設定</div>
+    <h1>最基本的な値を決めます</h1>
+    <p class="sub" id="cf-sub">これらの値はキャリブレーションの計測とサーバー起動に使われます。後からダッシュボードでも変更できます。</p>
+    <div class="field"><input id="cf-name" type="text" placeholder=" " autocomplete="off" spellcheck="false">
+      <label for="cf-name">プロファイル名 (ダッシュボードに表示されます)</label></div>
+    <div id="cf-groups"></div>
+    <div class="err-box hidden" id="cf-err"></div>
+    <div class="foot-btns">
+      <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
+      <span class="spacer"></span>
+      <button class="btn" id="cf-go">保存して次へ</button>
+    </div>
+  </section>
+  <section class="step" id="s-net">
+    <div class="kicker">ステップ 4 / 5 — 接続設定</div>
+    <h1>アクセス方法を決めます</h1>
+    <p class="sub" id="nt-sub">サーバーの待ち受け先と API キーです。後からダッシュボードでも変更できます。</p>
+    <div class="field"><input id="nt-host" type="text" placeholder=" " autocomplete="off" spellcheck="false">
+      <label for="nt-host">ホスト (0.0.0.0 = LANからも / 127.0.0.1 = このPCのみ)</label></div>
+    <div class="field"><input id="nt-port" type="number" min="1" max="65535" placeholder=" ">
+      <label for="nt-port">ポート番号</label></div>
+    <div class="field"><input id="nt-key" type="text" placeholder=" " autocomplete="off" spellcheck="false">
+      <label for="nt-key">APIキー (空欄で認証なし)</label></div>
+    <div class="err-box hidden" id="nt-err"></div>
+    <div class="foot-btns">
+      <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
+      <span class="spacer"></span>
+      <button class="btn-text" id="nt-skip">今はスキップ</button>
+      <button class="btn" id="nt-go">保存して次へ</button>
+    </div>
+  </section>
+
+  <!-- 6. 調整 (キャリブレーション) -->
+  <section class="step" id="s-cal">
+    <div class="kicker">ステップ 5 / 5 — 調整 (任意)</div>
+    <h1>この PC に合わせますか?</h1>
+    <p class="sub" id="ca-sub">調整 (キャリブレーション) はこの機械向けの性能調整です。実行中は GPU を独占します。</p>
+    <div class="opt-list" id="ca-list">
+      <label class="opt sel"><input type="radio" name="ca" value="skip" checked>
+        <span class="txt"><span class="t1">あとで実行する</span>
+        <span class="t2">ダッシュボードの「キャリブレーション」からいつでも実行できます</span></span></label>
+      <label class="opt"><input type="radio" name="ca" value="run">
+        <span class="txt"><span class="t1">今すぐ実行する</span>
+        <span class="t2" id="ca-time">FreeToken は目安 3〜4 時間かかります</span></span></label>
+    </div>
+    <div class="foot-btns">
+      <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
+      <span class="spacer"></span>
+      <button class="btn" id="ca-go">設定を完了する</button>
+    </div>
+  </section>
+
+  <!-- 7. 完了 -->
+  <section class="step" id="s-done">
+    <div class="ok-icon">✓</div>
+    <h1>セットアップが完了しました</h1>
+    <p class="sub">ダッシュボードでモデルを起動し、チャットやベンチマークが使える状態です。</p>
+    <ul class="sum" id="dn-sum"></ul>
+    <div class="foot-btns"><span class="spacer"></span>
+      <a class="btn" href="/">ダッシュボードへ</a></div>
+  </section>
+
+</main>
+
+<div class="foot">セットアップを途中でやめても、このページをもう一度開けば続きから進められます。</div>
+<script src="/static/setup.js"></script>
+</body>
+</html>

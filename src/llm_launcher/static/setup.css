@@ -1,0 +1,188 @@
+/* ============================================================
+   セットアップ ウィザード (Google ログイン画面風)
+   1 画面 1 質問。白背景 / 440px のカード / 青い一次ボタンだけで構成し、
+   画面は横スライドの遷移で進む (setup.js が .step.active を切り替える)。
+   ============================================================ */
+:root {
+  --ink: #202124;            /* 本文 (Google grey 900) */
+  --ink2: #5f6368;           /* 補足 (grey 700) */
+  --line: #dadce0;           /* 罫線 (grey 400) */
+  --bg-hover: #f1f3f4;       /* ホバー面 (grey 100) */
+  --blue: #1a73e8;           /* 一次カラー */
+  --blue-soft: #e8f0fe;      /* 選択行の背景 */
+  --green: #188038;          /* 完了 */
+  --red: #d93025;            /* 失敗 */
+  --font: "Google Sans Text", Roboto, "Noto Sans JP", "Hiragino Sans",
+          system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  background: #fff; color: var(--ink); font-family: var(--font);
+  font-size: 14px; line-height: 1.5; min-height: 100vh;
+  display: flex; flex-direction: column; align-items: center;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------- ヘッダー / フッター ---------------- */
+.logo {
+  margin: 40px 0 24px; font-size: 20px; color: var(--ink2);
+  font-weight: 400; letter-spacing: .3px; user-select: none;
+}
+.logo b { color: var(--ink); font-weight: 500; }
+.logo .dot { color: var(--blue); }
+.foot {
+  margin: 24px 0 auto; padding: 16px; color: var(--ink2); font-size: 12px;
+  text-align: center; max-width: 480px;
+}
+
+/* ---------------- カード ---------------- */
+.card {
+  width: 100%; max-width: 440px; margin: 0 16px 40px;
+  border: 1px solid var(--line); border-radius: 8px;
+  padding: 48px 36px 24px; position: relative; overflow: hidden;
+}
+@media (max-width: 520px) {
+  .card { border: 0; margin: 0 0 24px; padding: 24px 20px 16px; }
+  .logo { margin: 20px 0 8px; }
+}
+
+/* ---------------- ステップ遷移 ---------------- */
+.step { display: none; }
+.step.active { display: block; animation: slide-in .28s cubic-bezier(.2,.7,.3,1) both; }
+.step.active.back { animation-name: slide-in-back; }
+@keyframes slide-in  { from { opacity: 0; transform: translateX(40px); } to { opacity: 1; transform: none; } }
+@keyframes slide-in-back { from { opacity: 0; transform: translateX(-40px); } to { opacity: 1; transform: none; } }
+
+.kicker { font-size: 12px; color: var(--ink2); margin-bottom: 16px; letter-spacing: .4px; }
+h1 { font-size: 22px; font-weight: 400; margin: 0 0 8px; line-height: 1.3; }
+.sub { color: var(--ink2); margin: 0 0 24px; }
+.sub b { color: var(--ink); font-weight: 500; }
+
+/* ---------------- 選択肢 (アカウント選択風ラジオ行) ---------------- */
+.opt-list { display: flex; flex-direction: column; gap: 4px; margin: 0 0 8px; padding: 0; }
+.opt {
+  display: flex; align-items: center; gap: 14px; cursor: pointer;
+  padding: 12px 14px; border-radius: 6px; border: 1px solid transparent;
+  transition: background .12s;
+}
+.opt:hover { background: var(--bg-hover); }
+.opt.sel { background: var(--blue-soft); border-color: var(--blue); }
+.opt input { accent-color: var(--blue); width: 18px; height: 18px; margin: 0; flex: none; }
+.opt .txt { min-width: 0; }
+.opt .t1 { font-size: 15px; }
+.opt.sel .t1 { color: #174ea6; font-weight: 500; }
+.opt .t2 { font-size: 12px; color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.opt .tag { margin-left: auto; flex: none; font-size: 11px; color: var(--green);
+  border: 1px solid #ceead6; background: #e6f4ea; border-radius: 999px; padding: 2px 8px; }
+.opt .tag.no { color: var(--ink2); border-color: var(--line); background: var(--bg-hover); }
+
+/* ---------------- 稼働設定のグループ見出し ---------------- */
+.cf-group { margin: 20px 0 6px; }
+.cf-label { font-size: 14px; font-weight: 500; color: var(--ink); margin: 0 0 2px; }
+.cf-hint { font-size: 12px; color: var(--ink2); margin: 0 0 8px; }
+
+/* ---------------- フローティングラベル入力 ---------------- */
+.field { position: relative; margin: 4px 0 8px; }
+.field input, .field select {
+  width: 100%; font: inherit; font-size: 16px; color: var(--ink);
+  padding: 18px 14px 8px; border: 1px solid var(--ink2); border-radius: 4px;
+  background: transparent; outline: none; appearance: none;
+}
+.field input:hover, .field select:hover { border-color: var(--ink); }
+.field input:focus, .field select:focus { border: 2px solid var(--blue); padding: 17px 13px 7px; }
+.field select {
+  cursor: pointer;
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' stroke='%235f6368' stroke-width='1.6' fill='none' stroke-linecap='round'/></svg>");
+  background-repeat: no-repeat; background-position: right 14px center;
+  padding-right: 38px;
+}
+.field select:focus { padding-right: 37px; }
+.field select option { color: var(--ink); background: #fff; }
+.field input[type="number"] { appearance: textfield; }
+.field input[type="number"]::-webkit-inner-spin-button { appearance: none; }
+.field label {
+  position: absolute; left: 14px; top: 14px; color: var(--ink2); font-size: 16px;
+  pointer-events: none; transition: all .12s ease; background: #fff; padding: 0 4px;
+}
+.field input:focus + label, .field input:not(:placeholder-shown) + label,
+.field.sel-fixed label { top: 5px; font-size: 12px; color: var(--blue); }
+.field:not(:focus-within) input:not(:placeholder-shown) + label { color: var(--ink2); }
+.hint { font-size: 12px; color: var(--ink2); margin: 0 0 8px; }
+
+/* ---------------- ボタン ---------------- */
+.foot-btns { display: flex; align-items: center; margin-top: 32px; }
+.foot-btns .spacer { flex: 1; }
+.btn {
+  font: inherit; font-size: 14px; font-weight: 500; cursor: pointer;
+  border: 0; border-radius: 4px; padding: 10px 24px; color: #fff; background: var(--blue);
+  transition: box-shadow .15s, background .15s; min-width: 88px;
+}
+.btn:hover:not(:disabled) { box-shadow: 0 1px 2px rgba(60,64,67,.3), 0 1px 3px 1px rgba(60,64,67,.15); }
+.btn:disabled { background: #e9ecef; color: #b1b4b8; cursor: default; }
+.btn.full { width: 100%; margin-top: 8px; }
+.btn-text {
+  font: inherit; font-size: 14px; font-weight: 500; cursor: pointer;
+  border: 0; background: none; color: var(--blue); padding: 10px 12px; border-radius: 4px;
+}
+.btn-text:hover:not(:disabled) { background: var(--blue-soft); }
+.btn-text:disabled { color: #b1b4b8; cursor: default; }
+a.btn-text { text-decoration: none; display: inline-block; }
+.btn-back { display: inline-flex; align-items: center; gap: 8px; }
+.btn-back .arr { font-size: 18px; line-height: 1; }
+
+/* ---------------- 確認画面の rows ---------------- */
+.rows { border-top: 1px solid var(--line); margin-bottom: 8px; }
+.row-item { display: flex; gap: 16px; padding: 12px 2px; border-bottom: 1px solid var(--line); }
+.row-item .k { width: 108px; flex: none; color: var(--ink2); font-size: 13px; padding-top: 1px; }
+.row-item .v { min-width: 0; font-size: 14px; overflow-wrap: anywhere; }
+.row-item .v .mono { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; color: var(--ink2); }
+
+/* ---------------- 進捗 (チェックリスト + ログ) ---------------- */
+.spin {
+  display: inline-block; width: 18px; height: 18px; flex: none; vertical-align: -3px;
+  border: 2px solid #c6dafc; border-top-color: var(--blue); border-radius: 50%;
+  animation: sp .9s linear infinite;
+}
+@keyframes sp { to { transform: rotate(360deg); } }
+.chk { list-style: none; margin: 4px 0 12px; padding: 0; }
+.chk li { display: flex; align-items: center; gap: 12px; padding: 9px 2px; font-size: 14px; color: var(--ink2); }
+.chk li .ic { width: 22px; height: 22px; flex: none; display: grid; place-items: center; }
+.chk li.now { color: var(--ink); font-weight: 500; }
+.chk li.ok { color: var(--ink); }
+.chk li.ok .ic { color: var(--green); }
+.chk li.bad .ic { color: var(--red); }
+.chk li.ok .ic::before { content: "✓"; font-size: 17px; }
+.chk li.bad .ic::before { content: "✕"; font-size: 15px; }
+.chk li.wait .ic::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: #d5d8dc; display: block; }
+
+.bar { height: 4px; background: #e8eaed; border-radius: 2px; overflow: hidden; margin: 4px 0 2px; }
+.bar i { display: block; height: 100%; background: var(--blue); width: 0; transition: width .5s; }
+.pbar-note { font-size: 12px; color: var(--ink2); margin: 0 0 8px; font-variant-numeric: tabular-nums; }
+
+.err-box { border: 1px solid #f0c3be; background: #fce8e6; color: #a50e0e; border-radius: 6px;
+  padding: 10px 12px; font-size: 13px; margin: 8px 0; white-space: pre-wrap; word-break: break-word; }
+.ok-icon { width: 56px; height: 56px; border-radius: 50%; background: #e6f4ea; color: var(--green);
+  display: grid; place-items: center; font-size: 30px; margin: 0 0 16px; }
+
+details.log { margin: 8px 0 4px; }
+details.log summary {
+  cursor: pointer; color: var(--blue); font-size: 13px; font-weight: 500;
+  list-style: none; padding: 6px 2px; user-select: none;
+}
+details.log summary::-webkit-details-marker { display: none; }
+details.log summary::before { content: "▾ "; }
+details.log:not([open]) summary::before { content: "▸ "; }
+details.log pre {
+  background: #f8f9fa; border: 1px solid var(--line); border-radius: 6px;
+  padding: 10px 12px; font-size: 11px; line-height: 1.5; max-height: 220px; overflow: auto;
+  white-space: pre-wrap; word-break: break-all; margin: 4px 0 8px;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* 完了画面の要約 */
+.sum { list-style: none; margin: 4px 0 8px; padding: 0; }
+.sum li { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--bg-hover); font-size: 14px; }
+.sum li .ic { color: var(--green); width: 18px; flex: none; text-align: center; }
+.sum li.skip .ic { color: var(--ink2); }
+.hidden { display: none !important; }
