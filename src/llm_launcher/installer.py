@@ -49,6 +49,9 @@ from .store import JsonStore, new_id, now
 # ログはデータベース (installs.json) に保持する。インストール実行では行が増えるので
 # 直近 LOG_TAIL 行だけ残す (calibrate / bench と同じ)。
 LOG_TAIL = 400
+# \r で同じ行を上書きする進捗出力 (uv / hf のダウンロードバー) を取り込む間隔。
+# 大きいと UI の進捗が鈍くなり、小さいとログが膨らむ。
+PROGRESS_MIN_INTERVAL = 1.0
 
 # UI からインストールできるバックエンド。strata / maya は setup.sh / maya.sh 側が
 # 対話プロンプトを含むため UI 化していない (導線を壊さない範囲で今後追加する)。
@@ -294,6 +297,16 @@ def record_launch_json_model(root: Path, spec: dict, model_dir: Path) -> str | N
     return f"起動 JSON の --model-path にモデルを記録しました: {model_dir}"
 
 
+def _uv_version(uv_path: str) -> str:
+    """uv --version を1回だけ取ってくる (ジョブログのヘッダ用。取れなくても続行)。"""
+    try:
+        r = subprocess.run([uv_path, "--version"], capture_output=True, text=True,
+                           timeout=10, env=install_env())
+        return (r.stdout or "").strip() or (r.stderr or "").strip()
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+
+
 class InstallManager:
     """1 件ずつのインストール / ダウンロード実行 + 履歴。"""
 
@@ -345,13 +358,17 @@ class InstallManager:
         return self._public(job) if job else None
 
     def live_log(self, jid: str, cursor: int = 0) -> dict[str, Any]:
-        """ジョブのログを cursor 以降で返す (cursor = 前回の start + len(lines))。"""
+        """ジョブのログを cursor 以降で返す。cursor / start / total はすべて
+        「切り詰め込みの絶対行番号」 — 前方が切り詰められた分は job["log_base"] に
+        入っているので、窓が動いてもクライアントのカーソルは壊れない。
+        クライアントは start + len(lines) を次の cursor に送ればよい。"""
         job = self.jobs.get(jid)
         if not job:
             raise KeyError(jid)
         logs = job.get("logs") or []
-        cursor = max(0, min(int(cursor or 0), len(logs)))
-        return {"lines": logs[cursor:], "start": cursor, "total": len(logs)}
+        base = int(job.get("log_base") or 0)
+        local = min(max(int(cursor or 0) - base, 0), len(logs))
+        return {"lines": logs[local:], "start": base + local, "total": base + len(logs)}
 
     def supports(self, backend_id: str) -> bool:
         return backend_id in INSTALL_SPECS
@@ -369,7 +386,11 @@ class InstallManager:
         logs = job.setdefault("logs", [])
         logs.append(strip)
         if len(logs) > LOG_TAIL:
-            del logs[:len(logs) - LOG_TAIL]
+            cut = len(logs) - LOG_TAIL
+            del logs[:cut]
+            # 切り詰めた行数は絶対オフセットとして覚ます (live_log のカーソルは絶対番号)。
+            # これが無いとクライアントのカーソルが窓の位置とずれてログが凍る。
+            job["log_base"] = int(job.get("log_base") or 0) + cut
         self._save()
 
     def _new_job(self, kind: str, actor: dict[str, Any] | None, **fields: Any) -> dict[str, Any]:
@@ -557,7 +578,8 @@ class InstallManager:
         module_dir = (self.root / job["module_path"]).resolve()
         self._append_log(job, proxy_log_line())
         if job.get("uv_path"):
-            self._append_log(job, f"uv: {job['uv_path']}")
+            ver = await asyncio.to_thread(_uv_version, str(job["uv_path"]))
+            self._append_log(job, f"uv: {job['uv_path']} ({ver or '--version 取得できず'})")
         switched = False   # ブランチ切替が起きたら依存を入れ直す (precheck スキップを効かせない)
         try:
             if job.get("clean") and (module_dir / ".venv").exists():
@@ -591,11 +613,25 @@ class InstallManager:
                         job["result"] = {"already_installed": True}
                         return
                     continue
-                rc, _out = await self._run_step(job, step)
+                rc, out = await self._run_step(job, step)
                 if job["id"] in self._cancel:
                     raise _Cancelled()
                 if rc != 0:
-                    raise InstallError(f"{name} が失敗しました (exit {rc}) — ログ末尾を確認してください")
+                    # 失敗した step の出力末尾をここに複写する — UI はログ冒頭を
+                    # 見せるため、スクロールしないと原因 (uv の error: 行) が読めない
+                    tail = [ln.rstrip() for ln in (out or "").splitlines() if ln.strip()][-30:]
+                    if tail:
+                        self._append_log(job, f"----- {name} 失敗時の出力末尾 ({rc=}) -----")
+                        for ln in tail:
+                            self._append_log(job, ln)
+                    first = next((ln for ln in tail if "error" in ln.lower()),
+                                 tail[0] if tail else "")
+                    hint = (" — exit 2 は uv/pip が起動前に死ぬ類 (uv が古い / -e 先が Python プロジェクトで"
+                            "ない) で、ネットワーク遮断 (exit 1) とは別です" if rc == 2 else "")
+                    msg = f"{name} が失敗しました (exit {rc}){hint}"
+                    if first:
+                        msg += f" — {first[:200]}"
+                    raise InstallError(msg)
             if spec.get("check") == "freetoken":
                 note = seed_launch_json(module_dir)
                 if note:
@@ -674,26 +710,48 @@ class InstallManager:
     def _make_tqdm(self, job: dict[str, Any], cancel: threading.Event) -> type:
         """snapshot_download に渡す tqdm サブクラス。update で受信 byte を数え、
         cancel を確認する (raise で転送ループそのものを止める)。
-        disable=True で描画を殺す (サーバー stderr にバーを流さない)。"""
+        disable=True で描画を殺す (サーバー stderr にバーを流さない)。
+
+        huggingface_hub 2.x では snapshot_download が集約バー (name=...transfer) を先に作り、
+        ファイル別バーや再構成バーがそこへ update を転送する。全て素直に数えると受信量を
+        2 重以上 に数えてしまうため、集約バーが見えたらそこだけ数える。
+        集約バーを作らない古いバージョンでは従来のファイル別バーを数える。"""
         from tqdm.auto import tqdm
 
+        agg_name = "huggingface_hub.snapshot_download.transfer"
+        rec_name = "huggingface_hub.snapshot_download"
+        skip_descs = ("Downloading bucket files",)  # xet の再構成側バー (受信量と重複する)
+
         class _Hook(tqdm):  # type: ignore[misc,valid-type]
+            _saw_agg = False  # クラス属性: 集約転送バーが登場したら True
+
             def __init__(self, *args: Any, **kw: Any) -> None:  # noqa: D107
                 # disable=True だと unit/desc が未設定になるので引数から控えておく
                 self._hook_unit = kw.get("unit", "it")
                 self._hook_desc = kw.get("desc") or ""
+                self._hook_agg = (kw.get("name") or "") == agg_name
+                if self._hook_agg:
+                    type(self)._saw_agg = True
                 kw["disable"] = True
                 super().__init__(*args, **kw)
+
+            def _counts(self) -> bool:
+                if self._hook_unit != "B":
+                    return False
+                if _Hook._saw_agg:
+                    return self._hook_agg  # 集約バーのみ (子バーの転送分で二重計数しない)
+                d = self._hook_desc
+                return d not in skip_descs and not d.startswith("Reconstructing")
 
             def update(self, n: float = 1) -> None:  # noqa: D102
                 if cancel.is_set():
                     raise _Cancelled()
                 super().update(n)
-                if getattr(self, "_hook_unit", "") == "B":
+                if self._counts():
                     pr = job["progress"]
                     pr["done"] += int(n or 0)
                     if self.total:
-                        pr["file_total"] = int(self.total)
+                        pr["file_total"] = int(self.total)  # 2.x の集約バー = スナップショット全体サイズ
                     pr["file"] = getattr(self, "desc", "") or self._hook_desc
                 return None
 
@@ -701,7 +759,8 @@ class InstallManager:
                 self._hook_desc = desc or ""
 
             def close(self) -> None:  # noqa: D102
-                if not getattr(self, "_hook_counted", False):
+                if not getattr(self, "_hook_counted", False) and self._hook_unit == "B" \
+                        and not self._hook_agg and self._hook_desc != rec_name:
                     self._hook_counted = True
                     job["progress"]["files_done"] = job["progress"].get("files_done", 0) + 1
                 super().close()
@@ -762,15 +821,22 @@ class InstallManager:
             self._finish(job)
 
     async def _dl_tick(self, job: dict[str, Any]) -> None:
-        """ダウンロード中は 2 秒ごとに進捗を永続化する (byte 単位で書かない)。"""
-        last_done = 0
+        """ダウンロード中は 2 秒ごとに進捗を永続化する (byte 単位で書かない)。
+        速度は直近 ~16 秒の移動平均。2 秒瞬時値だと Xet のバースト転送で
+        「0 に近い値 ↔ 巨大値」を往復して、停滞と区別できなくなるため。"""
+        samples: list[tuple[float, int]] = []
+        loop = asyncio.get_running_loop()
         with contextlib.suppress(asyncio.CancelledError):
             while True:
                 await asyncio.sleep(2.0)
                 pr = job["progress"]
-                dt = 2.0
-                pr["speed_bps"] = max(0, pr["done"] - last_done) / dt
-                last_done = pr["done"]
+                t = loop.time()
+                samples.append((t, int(pr["done"])))
+                if len(samples) > 8:
+                    samples.pop(0)
+                t0, d0 = samples[0]
+                if t - t0 >= 4.0:
+                    pr["speed_bps"] = max(0.0, (pr["done"] - d0) / (t - t0))
                 job["step"] = f"受信中 {pr['done'] / 2**20:.1f} MB" + (f" {pr['file']}" if pr["file"] else "")
                 self._save()
 
@@ -870,17 +936,39 @@ class InstallManager:
         self._procs[job["id"]] = proc
         out: list[str] = []
         kept = 0
+        carry = b""
+        prog_next = 0.0
         try:
             assert proc.stdout is not None
             while True:
-                line = await proc.stdout.readline()
-                if not line:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
                     break
-                text = line.decode("utf-8", "replace")
-                self._append_log(job, text)
-                if kept < 96 * 1024:
-                    out.append(text)
-                    kept += len(text)
+                carry += chunk
+                # uv / hf は進捗を \r で同じ行の上書きで出す。readline() だと \n が
+                # 来るまで (= ダウンロード完了まで) 固まって見えるので \r でも区切る。
+                # \r 区切りの進捗行は PROGRESS_MIN_INTERVAL 秒に 1 行へ間引く。
+                while True:
+                    i = min((j for j in (carry.find(b"\n"), carry.find(b"\r")) if j >= 0),
+                            default=-1)
+                    if i < 0:
+                        break
+                    seg, sep = carry[:i], carry[i:i + 1]
+                    carry = carry[i + 1:]
+                    text = seg.decode("utf-8", "replace")
+                    if sep == b"\n" or time.monotonic() >= prog_next:
+                        if sep == b"\r":
+                            prog_next = time.monotonic() + PROGRESS_MIN_INTERVAL
+                        if text.strip():
+                            self._append_log(job, text)
+                        if kept < 96 * 1024:
+                            out.append(text + "\n")
+                            kept += len(text)
+            if carry:
+                text = carry.decode("utf-8", "replace")
+                if text.strip():
+                    self._append_log(job, text)
+                out.append(text + "\n")
             rc = proc.returncode if proc.returncode is not None else await proc.wait()
         finally:
             self._procs.pop(job["id"], None)

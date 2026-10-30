@@ -71,8 +71,11 @@ CAL_BACKENDS = {"maya": "maya", "strata": "strata", "strata-fork": "strata",
                 "freetoken": "freetoken", "freetoken-fork": "freetoken"}
 
 # ログはデータベース (calibrations.json) に保持するが、長い実行では件数が増えるので
-# 直近 LOG_TAIL 行だけ残す (cursor は「残っている行の添字」= UI は len から取り直す)。
+# 直近 LOG_TAIL 行だけ残す。切り詰め分は job["log_base"] に絶対オフセットとして数え、
+# live_log の cursor / start / total は絶対行番号 (installer と同じ約束)。
 LOG_TAIL = 400
+# \r で同じ行を上書きする進捗出力 (ダウンロードバー等) を取り込む間隔
+PROGRESS_MIN_INTERVAL = 1.0
 
 # ---------------------------------------------------------------- FreeToken 計測グリッド
 # 座標降下で sweep するのは MTP ゲート (エンジン内部パラメータ) だけ。デフォルト値は
@@ -445,13 +448,15 @@ class CalibrationManager:
         return self._public(job) if job else None
 
     def live_log(self, jid: str, cursor: int = 0) -> dict[str, Any]:
-        """ジョブのログを cursor 以降で返す (cursor = 前回の start + len(lines))。"""
+        """ジョブのログを cursor 以降で返す。cursor / start / total はすべて
+        「切り詰め込みの絶対行番号」 (installer.live_log と同じ約束)。"""
         job = self.jobs.get(jid)
         if not job:
             raise KeyError(jid)
         logs = job.get("logs") or []
-        cursor = max(0, min(int(cursor or 0), len(logs)))
-        return {"lines": logs[cursor:], "start": cursor, "total": len(logs)}
+        base = int(job.get("log_base") or 0)
+        local = min(max(int(cursor or 0) - base, 0), len(logs))
+        return {"lines": logs[local:], "start": base + local, "total": base + len(logs)}
 
     def supports(self, backend_id: str) -> bool:
         return backend_id in CAL_BACKENDS
@@ -469,7 +474,10 @@ class CalibrationManager:
         logs = job.setdefault("logs", [])
         logs.append(strip)
         if len(logs) > LOG_TAIL:
-            del logs[:len(logs) - LOG_TAIL]
+            cut = len(logs) - LOG_TAIL
+            del logs[:cut]
+            # 切り詰め分は絶対オフセットとして覚ます (live_log のカーソルは絶対番号)
+            job["log_base"] = int(job.get("log_base") or 0) + cut
         self._save()
 
     async def start(self, profile: dict[str, Any], backend_id: str,
@@ -1428,17 +1436,38 @@ class CalibrationManager:
         protect.add_done_callback(self._extra.discard)
         out: list[str] = []
         kept = 0
+        carry = b""
+        prog_next = 0.0
         try:
             assert proc.stdout is not None
             while True:
-                line = await proc.stdout.readline()
-                if not line:
+                chunk = await proc.stdout.read(65536)
+                if not chunk:
                     break
-                text = line.decode("utf-8", "replace")
-                self._append_log(job, text)
-                if kept < 96 * 1024:       # JSON の 1 行はこの範囲に必ず入る (行は正規の JSON 出力)
-                    out.append(text)
-                    kept += len(text)
+                carry += chunk
+                # \r で同じ行を上書きする進捗 (vllm serve 等) も区切って出す。
+                # readline() だと \n まで固まって見えるため (installer._run_step と同じ)。
+                while True:
+                    i = min((j for j in (carry.find(b"\n"), carry.find(b"\r")) if j >= 0),
+                            default=-1)
+                    if i < 0:
+                        break
+                    seg, sep = carry[:i], carry[i + 1:]
+                    carry = carry[i + 1:]
+                    text = seg.decode("utf-8", "replace")
+                    if sep == b"\n" or time.monotonic() >= prog_next:
+                        if sep == b"\r":
+                            prog_next = time.monotonic() + PROGRESS_MIN_INTERVAL
+                        if text.strip():
+                            self._append_log(job, text)
+                        if kept < 96 * 1024:   # JSON の 1 行はこの範囲に必ず入る (行は正規の JSON 出力)
+                            out.append(text + "\n")
+                            kept += len(text)
+            if carry:
+                text = carry.decode("utf-8", "replace")
+                if text.strip():
+                    self._append_log(job, text)
+                out.append(text + "\n")
             rc = proc.returncode if proc.returncode is not None else await proc.wait()
         finally:
             self._procs.pop(job["id"], None)

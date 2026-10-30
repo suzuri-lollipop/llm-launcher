@@ -15,6 +15,10 @@
 #      restart を行う (プロファイルは data/ に残るので状態は引き継がれる)。
 #   3. Linger が有効ならログインしていなくても OS 起動時に立ち上がる。
 #      無効な場合は enable するコマンドを案内する。
+#   4. プロキシ受け渡し: サービスは .bashrc を読まないため、~/.bashrc の
+#      HTTP(S)_PROXY / ALL_PROXY / NO_PROXY を抽出して EnvironmentFile
+#      (~/.config/llm-launcher/env) に焼き込む。セットアップタブの git / uv /
+#      pip / HF ダウンロードがログインシェルと同じプロキシで走る。
 #
 # 設計メモ
 #   - KillMode=process: バックエンド (vLLM 等) は start_new_session で detached 起動
@@ -31,6 +35,7 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 UNIT_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
 UNIT="$UNIT_DIR/llm-launcher.service"
+ENV_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/llm-launcher/env"
 HOST=""
 PORT=""
 MODE="install"
@@ -55,7 +60,7 @@ fi
 
 if [[ "$MODE" == "uninstall" ]]; then
   systemctl --user disable --now llm-launcher 2>/dev/null || true
-  rm -f "$UNIT"
+  rm -f "$UNIT" "$ENV_FILE"
   systemctl --user daemon-reload
   systemctl --user reset-failed llm-launcher 2>/dev/null || true
   echo "✔ 削除しました: $UNIT"
@@ -81,6 +86,26 @@ ENV_BLOCK=""
 if [[ -n "$HOST" ]]; then ENV_BLOCK+="Environment=LLM_LAUNCHER_HOST=$HOST"$'\n'; fi
 if [[ -n "$PORT" ]]; then ENV_BLOCK+="Environment=LLM_LAUNCHER_PORT=$PORT"$'\n'; fi
 
+# プロキシ受け渡し: サービスは .bashrc を読まない (非ログイン / 非対話シェル)。
+# ~/.bashrc の export *_PROXY を抽出して EnvironmentFile に焼く。以後はこの
+# ファイルを編集 → systemctl --user restart で反映 (再実行だと .bashrc 再抽出)。
+PROXY_EXTRACTOR="$(dirname "${BASH_SOURCE[0]}")/proxy-env-from-bashrc.sh"
+install -d -m 0700 "$(dirname "$ENV_FILE")"
+: >"$ENV_FILE" 2>/dev/null || true; chmod 600 "$ENV_FILE"     # 先に作成し権限を締めてから内容を書く (資格情報混入対策)
+{ echo "# scripts/systemd-install.sh が生成 — サービス再起動で反映される"
+  echo "# 出典: ~/.bashrc の export *_PROXY (ここを直接編集しても可)"
+  if [[ -r "$PROXY_EXTRACTOR" ]]; then
+    bash "$PROXY_EXTRACTOR" "$HOME/.bashrc" || true
+  fi
+} >>"$ENV_FILE"
+chmod 600 "$ENV_FILE"
+if grep -q '_proxy=' "$ENV_FILE"; then
+  echo "✔ プロキシ抽出: ~/.bashrc → $ENV_FILE ($(grep -Eo '^[A-Za-z_]+_proxy' "$ENV_FILE" | sort -u | tr '\n' ' '))"
+else
+  echo "! ~/.bashrc にプロキシ設定 (*_PROXY の export) は見当たりません — ダイレクト接続です"
+  echo "  後から効かせる: $ENV_FILE に HTTP_PROXY=... を追記 → systemctl --user restart llm-launcher"
+fi
+
 install -d -m 0755 "$UNIT_DIR"
 cat >"$UNIT" <<UNIT
 # scripts/systemd-install.sh が生成 (手修正した内容は再実行で上書きされる)
@@ -93,6 +118,9 @@ Type=simple
 WorkingDirectory=$PROJECT_ROOT
 Environment=LLM_LAUNCHER_ROOT=$PROJECT_ROOT
 Environment=PYTHONUNBUFFERED=1
+# サービスは .bashrc を読まないため、インストール時に抽出したプロキシをここで
+# 引き渡す (- 頭 = ファイル無しも起動失敗にしない。中身は再実行 or 編集で更新)
+EnvironmentFile=-$ENV_FILE
 ${ENV_BLOCK}ExecStart=$UV_BIN run llm-launcher
 Restart=on-failure
 RestartSec=5s

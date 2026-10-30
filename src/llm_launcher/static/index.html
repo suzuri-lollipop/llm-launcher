@@ -495,51 +495,14 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
     <div id="cal-history"></div>
   </section>
   <section id="view-setup" class="view hidden">
-    <h2 class="view-title">セットアップ <span class="muted">① インストール → ② モデルダウンロード → ③ キャリブレーション までこの画面だけで完了させます (ターミナル不要)</span></h2>
-    <div id="ins-active"></div>
-    <div class="card">
-      <div class="row"><b style="font-size:15px">① インストール</b>
-        <span class="muted" style="font-size:12px">repo clone → .venv 作成 → <span id="ins-tool" class="mono">uv pip install</span> を順に実行します (同時に 1 ジョブ)</span></div>
-      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <select id="ins-backend" class="grow" style="min-width:200px" onchange="insPickBackend()"></select>
-        <select id="ins-ref" style="min-width:190px" onchange="insPickRef()" title="clone / 切替先のブランチ"></select>
-        <label class="switch"><input type="checkbox" id="ins-clean"><span class="track"></span><span class="lab" style="font-size:12.5px">クリーン再インストール (.venv を破棄)</span></label>
-        <label class="switch need-cal" id="ins-calloc" title="インストールが成功したときだけ、このバックエンドのプロファイルを自動で計走します"><input type="checkbox" id="ins-cal"><span class="track"></span><span class="lab" style="font-size:12.5px">完了後にキャリブレーション</span></label>
-        <button class="primary" id="ins-start" onclick="insStart()">📦 インストール実行</button>
-        <span class="muted" id="ins-note"></span>
-      </div>
-      <div class="muted" id="ins-branch" style="font-size:12px;margin-top:6px"></div>
-      <div class="muted mono" id="ins-preview" style="font-size:11px;margin-top:6px"></div>
+    <h2 class="view-title">セットアップ <span class="muted">インストール / モデルダウンロード / 調整 は新しいステップ式ウィザードで行います</span></h2>
+    <div class="card" style="text-align:center;padding:36px 16px">
+      <div style="font-size:40px;line-height:1">📦</div>
+      <p class="muted" style="margin:12px 0 4px">1 画面 1 質問のセットアップ画面を用意しました。<br>
+        案内にしたがって <b>インストール → モデルのダウンロード → 調整 (任意)</b> を順番に実行できます。</p>
+      <button class="primary" style="max-width:300px;margin:14px auto 0" onclick="location.href='/setup'">セットアップを開始する</button>
+      <p class="muted" id="ins-run-note" style="margin-top:12px;font-size:12px"></p>
     </div>
-    <div class="card">
-      <div class="row"><b style="font-size:15px">② モデルダウンロード</b>
-        <span class="muted" style="font-size:12px">Hugging Face Hub から保存先へ (既定のキャッシュ <span id="ins-hfdir" class="mono"></span>)。完了後に対応モデル一覧へ反映します</span></div>
-      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <input type="text" id="dl-repo" class="mono grow" placeholder="repo id (例: Qwen/Qwen3-30B-A3B-Instruct)" style="min-width:220px">
-        <input type="text" id="dl-rev" class="mono" placeholder="revision (省略可)" style="max-width:160px">
-        <select id="dl-dest" title="保存先"></select>
-      </div>
-      <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap">
-        <input type="text" id="dl-patterns" class="mono grow" placeholder="ファイル名の絞り込み (カンマ区切り、省略可。例: *.safetensors,config.json)" style="min-width:220px">
-        <button class="primary" id="dl-start" onclick="dlStart()">⬇️ ダウンロード</button>
-        <span class="muted" id="dl-note"></span>
-      </div>
-    </div>
-    <div class="card need-cal" id="sc-card">
-      <div class="row"><b style="font-size:15px">③ キャリブレーション</b>
-        <span class="muted" style="font-size:12px">この PC 向けの調整 (Maya / Strata / FreeToken 系)。実行中は対象プロファイルのサーバーを止めて GPU を独占します (10 分〜4 時間)</span>
-        <span class="grow"></span>
-        <button class="ghost" style="min-height:30px;font-size:12px" onclick="switchTab('calibrate')">🎯 詳細・全履歴</button></div>
-      <div class="row" style="margin-top:10px;gap:8px;flex-wrap:wrap">
-        <select id="sc-profile" class="grow" style="min-width:200px" onchange="scPick()" title="調整するプロファイル"></select>
-        <label class="switch"><input type="checkbox" id="sc-restart"><span class="track"></span><span class="lab" style="font-size:12.5px">調整後にサーバーを起動し直す</span></label>
-        <button class="primary need-cal" id="sc-start" onclick="scStart()">🎯 キャリブレーション実行</button>
-        <span class="muted" id="sc-note"></span>
-      </div>
-      <div class="muted" id="sc-state" style="font-size:12px;margin-top:6px"></div>
-      <div class="muted mono" id="sc-preview" style="font-size:11px;margin-top:6px"></div>
-    </div>
-    <div id="ins-history"></div>
   </section>
 </main>
 
@@ -689,7 +652,12 @@ function setMenu(open) {
 }
 $("#menu-btn").addEventListener("click", () => setMenu(!$("#sidemen").classList.contains("open")));
 document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => {
-  b.addEventListener("click", () => { switchTab(b.dataset.tab); setMenu(false); });
+  b.addEventListener("click", () => {
+    setMenu(false);
+    /* セットアップは専用ウィザード (/setup) へ画面遷移する */
+    if (b.dataset.tab === "setup") { location.href = "/setup"; return; }
+    switchTab(b.dataset.tab);
+  });
 });
 /* ロールで開けるタブ。起動 / 稼働中は常に開ける (メンテナーの基本操作)。users は管理者のみ */
 const TAB_CAP = { home: "dashboard", history: "history", playground: "playground",
@@ -3101,8 +3069,8 @@ async function calPollLog(jid) {
   try {
     const r = await api(`/api/calibrations/${jid}/log?cursor=${cur}`);
     const lines = r.lines || [];
-    S.cal.logs[jid] = ((S.cal.logs[jid] || "") + lines.map(l => l + "\n")).slice(-20000);
-    S.cal.logCursor[jid] = cur + lines.length;
+    S.cal.logs[jid] = ((S.cal.logs[jid] || "") + lines.map(l => l + "\n").join("")).slice(-20000);
+    S.cal.logCursor[jid] = (r.start || 0) + lines.length;   // start は絶対行番号 (切り詰め窓の外は無視)
   } catch { /* ignore */ }
 }
 /* 履歴 (終了済み / 中断済み) のログを取得する。実行中の live tail は calPollLog が積むだけなので、
@@ -3117,14 +3085,31 @@ async function calOpenLog(jid) {
   try {
     const r = await api(`/api/calibrations/${jid}/log?cursor=0`);
     S.cal.logs[jid] = (r.lines || []).join("\n");
-    S.cal.logCursor[jid] = (r.lines || []).length;
+    S.cal.logCursor[jid] = (r.start || 0) + (r.lines || []).length;
   } catch (e) { S.cal.logError = e.message; }
   renderCalibrate();
 }
 function calLogBox(jid, maxH = 260) {
   const logs = S.cal.logs[jid] || "";
   const tail = logs.split("\n").filter(Boolean).slice(-120).join("\n");
-  return `<div class="logwrap"><pre class="logbox" style="max-height:${maxH}px">${esc(tail || "(ログ無し / 取得できませんでした)")}</pre></div>`;
+  return `<div class="logwrap"><pre class="logbox" data-logkey="k:${esc(jid)}" style="max-height:${maxH}px">${esc(tail || "(ログ無し / 取得できませんでした)")}</pre></div>`;
+}
+/* 周期再描画 (innerHTML 差し替え) でログ欄のスクロール位置を保つ。これがないと
+   ポーリングのたびに scrollTop=0 に戻り「ログの一番上に飛ぶ」。末尾にいた場合は
+   追従 (新ログで下へ)、読み上げ中の位置で止まっていた場合はその位置を復元する。 */
+function logScrollSnap(el) {
+  const m = {};
+  el.querySelectorAll("[data-logkey]").forEach(p => {
+    m[p.dataset.logkey] = {top: p.scrollTop,
+                           stick: p.scrollHeight - p.scrollTop - p.clientHeight < 60};
+  });
+  return m;
+}
+function logScrollBack(el, m) {
+  el.querySelectorAll("[data-logkey]").forEach(p => {
+    const s = m[p.dataset.logkey];
+    if (s) p.scrollTop = s.stick ? p.scrollHeight : s.top;
+  });
 }
 function calBadge() {
   const nb = $("#nb-cal"); if (!nb) return;
@@ -3221,6 +3206,7 @@ function renderCalibrate() {
 function renderCalActive(run) {
   const el = $("#cal-active");
   if (!run) { el.innerHTML = ""; return; }
+  const _ls = logScrollSnap(el);
   const skew = run.status === "running" || run.status === "queued" ? (Date.now() / 1000) - (S.cal._recv || 0) : 0;
   const secs = (run.finished_at ? run.finished_at : Date.now() / 1000) - (run.started_at || 0);
   const logs = S.cal.logs[run.id] || "";
@@ -3243,14 +3229,17 @@ function renderCalActive(run) {
       ${run.restart_after && run.status === "done" ? `· <span style="color:var(--ok)">再起動済み</span>` : ""}
     </div>
     ${run.report ? calSettingsTable(run.report) : ""}
-    <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
+    <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
   </div>`;
+  logScrollBack(el, _ls);
 }
 function renderCalHistory(active) {
   const el = $("#cal-history");
+  const _ls = logScrollSnap(el);
   const runs = (S.cal.jobs || []).filter(r => r.id !== active?.id);
   if (!runs.length) {
     el.innerHTML = `<div class="empty" style="margin-top:12px">キャリブレーション履歴はまだありません。上でプロファイルを選んで 🎯 キャリブレーション実行。</div>`;
+    logScrollBack(el, _ls);
     return;
   }
   el.innerHTML = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
@@ -3280,6 +3269,7 @@ function renderCalHistory(active) {
         : calLogBox(r.id, 320)}</div>` : ""}
     </div>`;
   }).join("");
+  logScrollBack(el, _ls);
 }
 
 /* ============================================================= セットアップ (① インストール / ② モデルDL / ③ キャリブレーション) */
@@ -3302,7 +3292,7 @@ const insBusy = () => !!(S.ins && (S.ins.active || S.ins.busy));
 function insInit() {
   if (S.ins) return;                        // 何度呼ばれても状態を失わない (jobs / logs)
   S.ins = { jobs: [], active: null, installable: [], cacheDir: "", busy: false, _bSig: "",
-            _rSig: "", refPick: {}, tool: "uv", calAfter: null, scPick: "",
+            _rSig: "", _mSig: "", refPick: {}, tool: "uv", calAfter: null, scPick: "",
             logs: {}, logCursor: {}, open: "", notified: {} };
 }
 async function insPoll(force) {
@@ -3333,10 +3323,12 @@ async function insPollLog(jid) {
   const cur = S.ins.logCursor[jid] || 0;
   try {
     let r = await api(`/api/installs/${jid}/log?cursor=${cur}`);
-    if ((r.total || 0) < cur) r = await api(`/api/installs/${jid}/log?cursor=0`);  // サーバー側が切り詰めたら全取り直し
+    if ((r.total || 0) < cur) r = await api(`/api/installs/${jid}/log?cursor=0`);  // cursor/total は絶対行番号。total が減る = リセットのみ
     const lines = r.lines || [];
     if (r.start === cur && lines.length)
       S.ins.logs[jid] = ((S.ins.logs[jid] || "") + (S.ins.logs[jid] ? "\n" : "") + lines.join("\n")).slice(-40000);
+    else if (r.start > cur)   // 古い行がログ窓 (LOG_TAIL) から切り詰められた
+      S.ins.logs[jid] = ((S.ins.logs[jid] ? S.ins.logs[jid] + "\n" : "") + `(${r.start - cur} 行はログ窓から切り詰め済み)\n` + lines.join("\n")).slice(-40000);
     else if (r.start === 0) S.ins.logs[jid] = lines.join("\n");
     S.ins.logCursor[jid] = r.start + lines.length;
   } catch { /* ignore */ }
@@ -3374,6 +3366,16 @@ async function insStart() {
     toast("開始失敗: " + e.message);
   } finally {
     S.ins.busy = false; insPoll(true);
+  }
+}
+function dlPickModel() {                 // 対応モデル一覧 → repo id に反映 (保存先が model_data 系なら従う)
+  const v = inputVal("#dl-model"); if (!v) return;
+  $("#dl-repo").value = v;
+  const sp = insSpec($("#ins-backend").value);
+  if (sp && sp.model_data && inputVal("#dl-dest") !== sp.id) {
+    const dd = $("#dl-dest");
+    if ([...dd.options].some(o => o.value === sp.id)) dd.value = sp.id;
+    renderSetup();
   }
 }
 async function dlStart() {
@@ -3418,10 +3420,10 @@ async function insToggle(id) {
   }
   renderSetup();
 }
+/* セットアップは /setup のステップ式ウィザード (static/setup.html) へ画面遷移する。
+   バックエンド id を渡すとその項目が预选択された状態で開く。 */
 function setupTab(bid) {
-  switchTab("setup");
-  if (bid) { const o = [...$("#ins-backend").options].find(x => x.value === bid);
-             if (o) { $("#ins-backend").value = bid; renderSetup(); } }
+  location.href = "/setup" + (bid ? "?backend=" + encodeURIComponent(bid) : "");
 }
 const insBytes = n => { n = n || 0;
   return n >= 2**30 ? (n / 2**30).toFixed(2) + " GiB"
@@ -3551,6 +3553,12 @@ function renderSetupCal(busy) {
 function renderSetup() {
   insInit();
   const sel = $("#ins-backend");
+  if (!sel) {                                   // セットアップは /setup ウィザードへ移行済み。
+    const n = $("#ins-run-note");               // 旧フォームが無い場合は「実行中」の案内だけ出す。
+    if (n) n.textContent = (S.ins.active || calBusy())
+      ? "⏳ いまジョブが実行中です — 進行中は /setup のセットアップ画面で見られます" : "";
+    return;
+  }
   const specs = S.ins.installable || [];
   const ids = specs.map(e => e.id);
   if (ids.join("|") !== S.ins._bSig || ![...sel.options].some(o => o.value === sel.value)) {
@@ -3586,6 +3594,19 @@ function renderSetup() {
     if ([...dd.options].some(o => o.value === cur)) dd.value = cur;
   }
   const dSp = insSpec(dd.value);
+  // 対応モデルドロップダウン: 保存先 (なければ ①) のバックエンドが docs/models.md の
+  // known-good 表を持つときだけ出す。選ぶと repo id に入り、model_data 系なら保存先も従う
+  const ms = $("#dl-model");
+  const mListOwner = (dSp && dSp.supported_models && dSp.supported_models.length) ? dSp : sp;
+  const mlist = (mListOwner && mListOwner.supported_models) || [];
+  const mSig = ((mListOwner && mListOwner.id) || "") + "|" + mlist.map(m => m.repo_id).join(",");
+  if (mSig !== S.ins._mSig) {
+    S.ins._mSig = mSig;
+    ms.innerHTML = `<option value="">🧾 対応モデルから選択 (${mlist.length})</option>`
+      + mlist.map(m => `<optgroup label="${esc(m.name)}">`
+                   + `<option value="${esc(m.repo_id)}">${esc(m.repo_id)}</option></optgroup>`).join("");
+  }
+  ms.hidden = !mlist.length;
   const calLock = calBusy(), insLock = !!S.ins.active;
   $("#ins-tool").textContent = insToolLabel(S.ins.tool);
   $("#dl-note").textContent = calLock ? "キャリブレーション実行中のため開始できません"
@@ -3623,7 +3644,9 @@ function renderInsActive(run) {
   if (!el) return;
   const c = S.cal || {};
   const cal = calUiOn() ? (c.jobs || []).find(r => r.id === c.active) : null;
+  const _ls = logScrollSnap(el);
   el.innerHTML = (run ? insActiveCard(run) : "") + (cal ? calActiveCardSetup(cal) : "");
+  logScrollBack(el, _ls);
 }
 function insActiveCard(run) {
   const secs = (run.finished_at ? run.finished_at : Date.now() / 1000) - (run.started_at || Date.now() / 1000);
@@ -3642,7 +3665,7 @@ function insActiveCard(run) {
       <span class="muted mono">${fmtUp(secs)}</span>
       ${run.error ? `<span style="color:var(--err);font-size:12px">${esc(String(run.error).slice(0, 200))}</span>` : ""}
     </div>
-    <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
+    <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
   </div>`;
 }
 function calActiveCardSetup(run) {
@@ -3661,7 +3684,7 @@ function calActiveCardSetup(run) {
       <span class="muted mono">${fmtUp(secs)}</span>
       ${run.error ? `<span style="color:var(--err);font-size:12px">${esc(String(run.error).slice(0, 200))}</span>` : ""}
     </div>
-    <div class="logwrap"><pre class="logbox" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
+    <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
   </div>`;
 }
 /* 履歴は 3 種 (インストール / モデルDL / キャリブレーション) を開始時刻順で1本に束ねる。
@@ -3675,11 +3698,12 @@ function insMerged() {
 }
 function renderInsHistory(active) {
   const el = $("#ins-history");
+  const _ls = logScrollSnap(el);
   const busy = {};
   if (active) busy[active.id] = 1;
   if (calUiOn() && S.cal && S.cal.active) busy[S.cal.active] = 1;
   const runs = insMerged().filter(r => !busy[r.id]);
-  if (!runs.length) { el.innerHTML = `<div class="empty" style="margin-top:12px">セットアップ履歴はまだありません。</div>`; return; }
+  if (!runs.length) { el.innerHTML = `<div class="empty" style="margin-top:12px">セットアップ履歴はまだありません。</div>`; logScrollBack(el, _ls); return; }
   el.innerHTML = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
     const open = S.ins.open === r.id;
     const tail = (S.ins.logs[r.id] || "").split("\n").filter(Boolean).slice(-120).join("\n");
@@ -3704,9 +3728,10 @@ function renderInsHistory(active) {
         <span class="grow"></span>
         <button class="ghost danger" onclick="insDelete('${r.id}')">削除</button>
       </div>
-      ${open ? `<div class="logwrap" style="padding:0"><pre class="logbox" style="max-height:320px;margin-top:6px">${esc(tail || "(ログ無し)")}</pre></div>` : ""}
+      ${open ? `<div class="logwrap" style="padding:0"><pre class="logbox" data-logkey="k:${esc(r.id)}" style="max-height:320px;margin-top:6px">${esc(tail || "(ログ無し)")}</pre></div>` : ""}
     </div>`;
   }).join("");
+  logScrollBack(el, _ls);
 }
 
 /* ============================================================= boot */

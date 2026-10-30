@@ -762,6 +762,8 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         # 起動 JSON 主体モード (Strata 方式): values.config の JSON が argv/env の正になり、
         # キャリブレーションの勝者もそこへ自動記載される (calibrate_lookup spec と同一形式)
         "launch_json": True,
+        # セットアップ画面 ② に出す対応モデル一覧の出し元 (clone 内の known-good 表)
+        "model_list_doc": "docs/models.md",
     },
     "freetoken-fork": {
         "id": "freetoken-fork", "name": "FreeToken (fork)",
@@ -778,6 +780,8 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         # fork の setup.sh と同じモデル置き場 (clone 隣接の Freetoken-data)。
         # UI ダウンロードの保存先候補と、完了後の起動 JSON への記入に使われる
         "model_data": "Freetoken-data",
+        # セットアップ画面 ② に出す対応モデル一覧 (fork docs/models.md の known-good 表)
+        "model_list_doc": "docs/models.md",
     },
     "strata": {
         "id": "strata", "name": "Strata",
@@ -932,6 +936,63 @@ def fork_model_root(root: Path, backend: dict[str, Any]) -> Path | None:
     if env:
         return Path(env).expanduser() / "models"
     return (root / str(backend.get("module_path", ""))).parent / str(rel) / "models"
+
+
+# ---------------------------------------------------------------------------
+# 対応モデル一覧 (docs/models.md の known-good 表)
+# ---------------------------------------------------------------------------
+
+# セットアップ画面 ② の「対応モデルから選択」ドロップダウンの出し元。
+# 表の行 = | 対象モデル | ... [org/name](https://huggingface.co/org/name) ... |。
+# Image input の表など HF リンクを持たない行は自然に除外される。
+_HF_REPO_IN_DOC = re.compile(r"https?://huggingface\.co/([^)\s|]+)")
+_models_doc_cache: dict[str, tuple[int, int, list[dict[str, Any]]]] = {}
+
+
+def parse_supported_models(text: str) -> list[dict[str, Any]]:
+    """docs/models.md の known-good 表を [{name, repo_id}] にする (repo_id は重複排除)。
+    見出し / 区切り行 / リンクなし行は読み飛ばす。"""
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line in text.splitlines():
+        s = line.strip()
+        if not s.startswith("|") or "huggingface.co" not in s:
+            continue
+        cells = [c.strip() for c in s.strip("|").split("|")]
+        name = cells[0].strip().strip("*_`")
+        if not name or set(name) <= set("-: "):
+            continue  # 見出し / 区切り行
+        for m in _HF_REPO_IN_DOC.finditer(s):
+            # /tree/..., /resolve/... 等が来ても org/name までが repo id
+            repo = "/".join(m.group(1).rstrip("/").split("/")[:2])
+            if repo.count("/") != 1 or repo.lower() in seen:
+                continue
+            seen.add(repo.lower())
+            out.append({"name": name, "repo_id": repo})
+    return out
+
+
+def supported_models(root: Path, backend: dict[str, Any]) -> list[dict[str, Any]]:
+    """model_list_doc を持つバックエンドの対応モデル一覧。未 clone / 文書なしは空。
+    (mtime, size) でキャッシュするので /api/installs のポーリングでも安価。"""
+    rel = str(backend.get("model_list_doc") or "")
+    if not rel:
+        return []
+    path = root / str(backend.get("module_path") or "") / rel
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    key = str(path)
+    hit = _models_doc_cache.get(key)
+    if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    try:
+        parsed = parse_supported_models(path.read_text("utf-8", errors="replace"))
+    except OSError:
+        return []
+    _models_doc_cache[key] = (st.st_mtime_ns, st.st_size, parsed)
+    return parsed
 
 
 def launch_json_path(root: Path, profile: dict[str, Any]) -> Path | None:

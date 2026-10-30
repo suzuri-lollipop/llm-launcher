@@ -79,6 +79,7 @@ scripts/systemd-install.sh --uninstall  # 停止 + 登録解除 + ユニット�
 - 管理コマンド: `systemctl --user status llm-launcher` / `{start,stop,restart}`、ログ: `journalctl --user -u llm-launcher -f`
 - OS 起動時 (ログイン前) に立ち上げるには Linger が必要です。未設定なら `sudo loginctl enable-linger $USER` を一度だけ実行
 - ユーザーマネージャーの PATH に `~/.local/bin` は含まれないため、ユニットには uv の絶対パス (`~/.local/bin/uv`) を埋め込みます
+- **プロキシは `~/.bashrc` から自動で引き継ぎます** — systemd サービスは (.bashrc を読まないため) インストール時に `scripts/proxy-env-from-bashrc.sh` で `export HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` を抽出し、`~/.config/llm-launcher/env` (EnvironmentFile) に書き出してユニットに接続する。セットアップタブの `git` / `uv` / `pip` / HF ダウンロードがログインシェルと同じプロキシで走り、ジョブログ先頭に使用中プロキシ (伏せ字付き) が印字される。`.bashrc` を変えたらインストーラ再実行 (または env ファイル直接編集 → restart)。`$VAR` 展開入りの値は EnvironmentFile では展開されないため警告してスキップされます
 - **`systemctl --user` で restart / stop しても稼働中のバックエンドサーバーは巻き添えになりません** (ユニットは `KillMode=process`。本体再起動後は生存サーバーを「引き継ぎ」として再検出)。サーバーごと停止するには先に UI から停止してください
 - `uv run` は起動時に `.venv` を `uv.lock` と同期するため、`git pull` 後の restart で依存更新も反映されます
 - OOM 対策モード 1 (sudoers ヘルパー) はこのサービスからも有効です (起動ログに `oom-guard:` が出ます)。モード 2 (`sudo scripts/oom-protect-install.sh --systemd`) はシステム側に**同名**の別ユニット (`/etc/systemd/system/llm-launcher.service`, venv python 実行・ポート 8088) を作るため、併用すると二重起動になります。切り替えるときは `systemctl --user disable --now llm-launcher` してから
@@ -208,7 +209,7 @@ sudo scripts/oom-protect-install.sh --uninstall  # 削除
 ```
 
 - 1) は `/usr/local/lib/llm-launcher/oom-protect` にヘルパーを置き、sudoers で「**引数なしのそのパスだけ**」を NOPASSWD で許可します。stdin で `pid` と `score` の 2 行だけを受け取り、`/proc/<pid>/oom_score_adj` をその PID と子孫にのみ書き込みます (親方向 — sshd やユーザーセッション — には書きません)。`--user` で対象ユーザーを指定できます
-- 2) はユニットに `MemoryHigh` (実メモリの 85%) / `MemoryMax` (92%) を書くため、超過分は kill ではなく throttle され、同居するプロセスごと巻き添えになりにくくなります。ユーザーセッション (`systemd-run --user`) では `OOMScoreAdjust` が無視されるので、必ず**システム**側に入れてください
+- 2) はユニットに `MemoryHigh` (実メモリの 85%) / `MemoryMax` (92%) を書くため、超過分は kill ではなく throttle され、同居するプロセスごと巻き添えになりにくくなります。またサービスは .bashrc を読まないため、対象ユーザーの `.bashrc` から `export HTTP(S)_PROXY` / `ALL_PROXY` / `NO_PROXY` を抽出して `/etc/llm-launcher/env` (EnvironmentFile、`root:<ユーザー> 0640`) に書き出し `EnvironmentFile=-` で接続します — 変更時はこのインストーラ再実行か env ファイル直接編集 → `sudo systemctl restart llm-launcher`。ユーザーセッション (`systemd-run --user`) では `OOMScoreAdjust` が無視されるので、必ず**システム**側に入れてください
 - 適用状況はセッションカード (🛡 保護中 / 未適用とその理由 / 逼迫 / OOM 推定) とホームの通知に表示され、セッションログには `[oom]` 行として記録されます
 
 

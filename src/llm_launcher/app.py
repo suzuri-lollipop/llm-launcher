@@ -14,6 +14,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +27,8 @@ from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv,
                        backend_for, fork_dir, fork_model_root, launch_json_path,
-                       port_from_argv, python_candidates, resolve_port, sections_order)
+                       port_from_argv, python_candidates, resolve_port, sections_order,
+                       supported_models)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import BenchError, BenchManager
@@ -1013,6 +1015,53 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, "このバックエンドは起動 JSON に対応していません")
         return prof
 
+    def _launch_new_path(prof: dict[str, Any], b: dict[str, Any],
+                         profile_id: str) -> Path:
+        """起動 JSON の保存先。freetoken-fork は Strata 方式にならい
+        プロジェクトルート (module/fork/freetoken) へ「モデル名-uuid」の
+        一意なベース名で置く (同名の .sh と一組)。すでにルート配下に
+        あれば再生成でも同じ名前を使い続ける。他バックエンドは従来通り
+        values.config か data/launch/freetoken-<id>.json。"""
+        v = prof.get("values") or {}
+        cur = launch_json_path(root, prof)
+        if prof.get("backend") == "freetoken-fork":
+            mod = (root / b["module_path"]).resolve()
+            if cur is not None and mod in cur.resolve().parents:
+                return cur
+            label = str(v.get("served_model_name") or prof.get("name")
+                        or Path(str(v.get("model_path") or "")).name or "freetoken")
+            slug = re.sub(r"[^A-Za-z0-9._-]+", "-", label.replace("\\", "/")
+                          .rstrip("/").split("/")[-1]).strip("-.")[:48]
+            return mod / f"{slug or 'freetoken'}-{uuid.uuid4().hex[:8]}.json"
+        return cur if cur is not None else root / "data" / "launch" / f"freetoken-{profile_id}.json"
+
+    def _launch_sh_text(path: Path, doc: dict[str, Any]) -> str:
+        """起動 JSON と同名・同梱の起動シェルスクリプト本文 (Strata の run-*.sh 相当)。"""
+        py = str(doc.get("python") or sys.executable)
+        cwd = str(doc.get("cwd") or path.parent)
+        head = ("#!/bin/sh\n"
+                f"# llm-launcher 起動スクリプト — 起動の正は同名の起動 JSON です\n"
+                f"# config: {path}\n")
+        if (Path(cwd) / "python" / "freetoken" / "serve_spec.py").is_file():
+            # JSON を正として起動 (llm-launcher の起動と完全一致, --port 等も上書き可)
+            return (head
+                    + "# 使い方: ./" + path.stem + ".sh [--port N] [--api-key KEY] [--dry-run]\n"
+                    + f'cd "{cwd}"\n'
+                    + f'exec "{py}" -m freetoken.serve_spec "{path}" "$@"\n')
+        args = " ".join(shlex.quote(str(a)) for a in (doc.get("argv") or []))
+        return head + f'cd "{cwd}"\n' + f'exec "{py}" {args} "$@"\n'
+
+    def _launch_write_pair(path: Path, doc: dict[str, Any]) -> Path:
+        """起動 JSON と同名 .sh を原子的に書き出す。返り値は .sh のパス。"""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
+        tmp.replace(path)
+        sh = path.with_suffix(".sh")
+        sh.write_text(_launch_sh_text(path, doc), "utf-8")
+        sh.chmod(0o755)
+        return sh
+
     @app.get("/api/profiles/{profile_id}/launch-json")
     async def get_launch_json(profile_id: str) -> dict[str, Any]:
         prof = _launch_profile(profile_id)
@@ -1037,17 +1086,22 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, f"JSON として解析できません: {e}")
         if not isinstance(doc, dict) or not doc.get("argv"):
             raise HTTPException(400, "起動 JSON には argv (空でないリスト) が必要です")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
-        tmp.replace(path)
-        return {"ok": True, "path": str(path)}
+        sh = _launch_write_pair(path, doc)
+        return {"ok": True, "path": str(path), "sh": str(sh)}
 
     @app.post("/api/profiles/{profile_id}/launch-json")
     async def export_launch_json(profile_id: str) -> dict[str, Any]:
         """全項目モードの現値を argv/env へレンダリングして起動 JSON に書き出し、
-        プロファイルを config 主体モードへ切り替える (values.config = JSON パス)。"""
+        プロファイルを config 主体モードへ切り替える (values.config = JSON パス)。
+        freetoken-fork では Strata 方式にならい プロジェクトルートへ
+        「モデル名-uuid」同名の .json / .sh 一組として保存する。"""
         prof = _launch_profile(profile_id)
+        # モデルなしの起動JSONは argparse エラーで起動不能になるため生成しない
+        # (セットアップ画面の守卫と二重の防御。2026-10-30 の起動失敗の実例)。
+        v0 = prof.get("values") or {}
+        if not str(v0.get("model_path") or v0.get("model") or "").strip():
+            raise HTTPException(400, "モデルが未設定のため起動JSONを生成できません。"
+                                     "先にモデルをダウンロード / 選択してください")
         rendered = dict(prof)
         rendered["values"] = {k: v for k, v in (prof.get("values") or {}).items()
                               if k != "config"}
@@ -1066,11 +1120,9 @@ def create_app(root: Path) -> FastAPI:
             "model_name": str((prof.get("values") or {}).get("served_model_name")
                               or prof.get("name") or ""),
         }
-        path = root / "data" / "launch" / f"freetoken-{profile_id}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(launch, ensure_ascii=False, indent=1) + "\n", "utf-8")
-        tmp.replace(path)
+        # freetoken-fork はプロジェクトルートへ モデル名+uuid 一組 (json/sh) で保存
+        path = _launch_new_path(prof, b, profile_id)
+        sh = _launch_write_pair(path, launch)
 
         def _set(lst: list) -> bool:
             for p in lst:
@@ -1079,7 +1131,7 @@ def create_app(root: Path) -> FastAPI:
                     return True
             return False
         profiles_store.mutate(_set)
-        return {"ok": True, "path": str(path), "launch": launch}
+        return {"ok": True, "path": str(path), "sh": str(sh), "launch": launch}
 
     @app.post("/api/preview")
     async def preview_command(body: ProfileBody) -> dict[str, Any]:
@@ -1593,7 +1645,10 @@ def create_app(root: Path) -> FastAPI:
                  "current_ref": current_ref(root, spec), "cloned": clone_exists(root, spec),
                  "module_path": spec["module_path"], "extras": spec["extras"],
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
-                                if BACKENDS[bid].get("model_data") else "")}
+                                if BACKENDS[bid].get("model_data") else ""),
+                 # 対応モデル一覧: clone 内の docs/models.md (model_list_doc) を読んだ既知の正常構成。
+                 # 未 clone / 文書なしは空 []. 保存先がそのバックエンドのとき ② の候補に出す
+                 "supported_models": supported_models(root, backend_for(root, bid))}
                 for bid, spec in INSTALL_SPECS.items() if bid in BACKENDS]
 
     @app.get("/api/installs")
@@ -1676,6 +1731,17 @@ def create_app(root: Path) -> FastAPI:
     async def simple_page() -> FileResponse:
         """ロール user 向けの開始 / 停止だけの簡易画面 (機械に詳しくない人向け)。"""
         return FileResponse(STATIC_DIR / "simple.html")
+
+    @app.get("/setup")
+    async def setup_page() -> FileResponse:
+        """ステップ式のセットアップ ウィザード (Google ログイン画面風)。
+
+        index.html のセットアップタブから /setup として遷移してくる専用ページ。
+        1 画面 1 質問で インストール → モデル DL → 調整 だけを扱い、既存の
+        /api/installs と /api/calibrations を叩く (ページ自体は無認証で配信し、
+        認証は API 側の 401 / setup.js の案内で処理する)。
+        """
+        return FileResponse(STATIC_DIR / "setup.html")
 
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
