@@ -25,6 +25,8 @@ from llm_launcher.store import JsonStore
 
 FORK = INSTALL_SPECS["freetoken-fork"]
 HTML = (Path(llm_launcher.__file__).parent / "static" / "index.html").read_text("utf-8")
+SETUP = "".join((Path(llm_launcher.__file__).parent / "static" / n).read_text("utf-8")
+                for n in ("setup.html", "setup.js"))
 
 
 def _which(monkeypatch, *, uv: bool) -> None:
@@ -176,12 +178,12 @@ def test_api_reports_the_real_install_tool(monkeypatch, tmp_path: Path):
 # --------------------------------------------------------- セットアップ画面の配線
 
 @pytest.mark.parametrize("probe, why", [
-    ('id="ins-tool"', "インストール手順名 (uv pip / pip) を実際のツールで書く枠"),
-    ("insToolLabel", "tool → 表示文言の対応 (1 箇所だけ)"),
-    ('j.tool || "uv"', "poll で API の tool を取り込む"),
+    ("toolLabel()", "セットアップ画面: tool → 表示文言の対応 (1 箇所だけ)"),
+    ('tool: inst.tool || "uv"', "refresh で API の tool を取り込む"),
+    ('${toolLabel()} -e', "手順プレビューが実ツールの文言を作る"),
 ])
 def test_setup_screen_labels_install_with_the_real_tool(probe: str, why: str):
-    assert probe in HTML, why
+    assert probe in SETUP, why
 
 
 def test_setup_screen_does_not_hardcode_pip_install():
@@ -191,16 +193,16 @@ def test_setup_screen_does_not_hardcode_pip_install():
 
 
 @pytest.mark.parametrize("probe, why", [
-    ('id="sc-card"', "セットアップ ③ キャリブレーションカード"),
-    ('id="sc-profile"', "③ の対象プロファイル選択"),
-    ('id="ins-calloc"', "① の「インストール後にキャリブレーション」オプトイン"),
-    ("async function insAfterInstall(", "インストール成功後の自動計走"),
-    ("calRun(pid, ", "🎯 タブと共通の実行コア"),
+    ('id="s-cal"', "セットアップ画面: キャリブレーション (調整) ステップ"),
+    ('id="ca-list"', "インストール後の調整を走る/スキップするの選択"),
+    ('id="ca-go"', "調整開始または設定完了のボタン"),
+    ('api("/api/calibrations", { method: "POST"', "調整ジョブの実配線"),
+    ("calRun(pid, ", "ダッシュボード 🎯 タブと共通の実行コア"),
     ("insEp(", "履歴のログ / 削除を installs / calibrations に振り分け"),
     ("insMerged(", "履歴を 3 種 1 本の時系列に束ねる"),
 ])
 def test_setup_screen_wires_calibration_into_the_install_flow(probe: str, why: str):
-    assert probe in HTML, why
+    assert probe in SETUP + HTML, why
 
 
 def test_ui_default_calibration_backends_match_the_server():
