@@ -37,7 +37,8 @@ import shlex
 import shutil
 import signal
 import subprocess
-import threading
+import sys
+import tempfile
 import time
 import venv as venv_mod
 from pathlib import Path
@@ -319,7 +320,6 @@ class InstallManager:
         self._tasks: dict[str, asyncio.Task] = {}
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         self._cancel: set[str] = set()
-        self._dl_cancel: dict[str, threading.Event] = {}   # download は cooperative cancel
         self._extra: set[asyncio.Task] = set()
         self.on_job_done: Callable[[dict[str, Any]], None] | None = None
 
@@ -657,6 +657,7 @@ class InstallManager:
     async def start_download(self, repo_id: str, *, revision: str = "",
                              allow_patterns: list[str] | None = None,
                              local_dir: str = "", backend: str = "",
+                             max_kbps: int = 0,
                              actor: dict[str, Any] | None = None) -> dict[str, Any]:
         """HF Hub からモデルをダウンロードする。既定は HF キャッシュ (app が成功後に
         スキャン失効)。backend に model_data 系 (freetoken-fork) を指定すると
@@ -672,6 +673,12 @@ class InstallManager:
         for p in pats:
             if len(p) > 100 or ".." in p or p.startswith("-"):
                 raise InstallError(f"allow_patterns が不正です: {p}")
+        try:
+            kb = int(max_kbps or 0)
+        except (TypeError, ValueError):
+            raise InstallError("max_kbps が不正です")
+        if kb < 0 or kb > 10_000_000:
+            raise InstallError("max_kbps が不正です (0〜10,000,000 KB/s)")
         spec = BACKENDS.get(backend) or {}
         dest = (local_dir or "").strip()
         if dest:
@@ -690,7 +697,8 @@ class InstallManager:
             # フォルダ名は setup.sh の sed 's|/|--|g' と同じ規約
             model_root = fork_model_root(self.root, spec)
             dest = str(model_root / repo.replace("/", "--")) if model_root else ""
-        # tqdm フックが進捗と cooperative cancel の唯一の経路なので、API の提供を確認する
+        # 子プロセス側 (_make_hook 相当) が tqdm_class フックで進捗を出すため、
+        # API の提供を先に確認しておくと失敗が早い
         try:
             from huggingface_hub import snapshot_download
             ok_hook = "tqdm_class" in inspect.signature(snapshot_download).parameters
@@ -699,114 +707,128 @@ class InstallManager:
         if not ok_hook:
             raise InstallError("この huggingface_hub では UI からのダウンロードは使えません")
 
+        # 中断残骸の掃除先 (UI が「削除しますか?」で参照する)。既存ファイルが
+        # ある場所への再ダウンロードなら、削除は .incomplete だけに限定する
+        pdir = dest or self.hub_model_dir(repo) or ""
+        pre = False
+        if pdir:
+            try:
+                pre = Path(pdir).is_dir() and any(Path(pdir).iterdir())
+            except OSError:
+                pre = False
         job = self._new_job("download", actor, backend=backend if spec.get("model_data") else "",
                             backend_name=str(spec.get("name") or "Hugging Face"),
                             repo_id=repo, revision=rev, allow_patterns=pats, local_dir=dest,
+                            max_kbps=kb, partial_dir=pdir, pre_existing=pre,
                             progress={"done": 0, "file_total": 0, "file": "",
                                       "files_done": 0, "speed_bps": 0})
         self._tasks[job["id"]] = asyncio.create_task(self._run_download(job))
         return self._public(job)
 
-    def _make_tqdm(self, job: dict[str, Any], cancel: threading.Event) -> type:
-        """snapshot_download に渡す tqdm サブクラス。update で受信 byte を数え、
-        cancel を確認する (raise で転送ループそのものを止める)。
-        disable=True で描画を殺す (サーバー stderr にバーを流さない)。
-
-        huggingface_hub 2.x では snapshot_download が集約バー (name=...transfer) を先に作り、
-        ファイル別バーや再構成バーがそこへ update を転送する。全て素直に数えると受信量を
-        2 重以上 に数えてしまうため、集約バーが見えたらそこだけ数える。
-        集約バーを作らない古いバージョンでは従来のファイル別バーを数える。"""
-        from tqdm.auto import tqdm
-
-        agg_name = "huggingface_hub.snapshot_download.transfer"
-        rec_name = "huggingface_hub.snapshot_download"
-        skip_descs = ("Downloading bucket files",)  # xet の再構成側バー (受信量と重複する)
-
-        class _Hook(tqdm):  # type: ignore[misc,valid-type]
-            _saw_agg = False  # クラス属性: 集約転送バーが登場したら True
-
-            def __init__(self, *args: Any, **kw: Any) -> None:  # noqa: D107
-                # disable=True だと unit/desc が未設定になるので引数から控えておく
-                self._hook_unit = kw.get("unit", "it")
-                self._hook_desc = kw.get("desc") or ""
-                self._hook_agg = (kw.get("name") or "") == agg_name
-                if self._hook_agg:
-                    type(self)._saw_agg = True
-                kw["disable"] = True
-                super().__init__(*args, **kw)
-
-            def _counts(self) -> bool:
-                if self._hook_unit != "B":
-                    return False
-                if _Hook._saw_agg:
-                    return self._hook_agg  # 集約バーのみ (子バーの転送分で二重計数しない)
-                d = self._hook_desc
-                return d not in skip_descs and not d.startswith("Reconstructing")
-
-            def update(self, n: float = 1) -> None:  # noqa: D102
-                if cancel.is_set():
-                    raise _Cancelled()
-                super().update(n)
-                if self._counts():
-                    pr = job["progress"]
-                    pr["done"] += int(n or 0)
-                    if self.total:
-                        pr["file_total"] = int(self.total)  # 2.x の集約バー = スナップショット全体サイズ
-                    pr["file"] = getattr(self, "desc", "") or self._hook_desc
-                return None
-
-            def set_description(self, desc: str = "", refresh: bool = True) -> None:  # noqa: D102
-                self._hook_desc = desc or ""
-
-            def close(self) -> None:  # noqa: D102
-                if not getattr(self, "_hook_counted", False) and self._hook_unit == "B" \
-                        and not self._hook_agg and self._hook_desc != rec_name:
-                    self._hook_counted = True
-                    job["progress"]["files_done"] = job["progress"].get("files_done", 0) + 1
-                super().close()
-
-        return _Hook
-
-    def _snapshot(self, job: dict[str, Any], cancel: threading.Event) -> str:
-        from huggingface_hub import snapshot_download
-        kwargs: dict[str, Any] = {
-            "repo_id": job["repo_id"],
-            "revision": job["revision"] or None,
-            "allow_patterns": job["allow_patterns"] or None,
-            "local_dir": job["local_dir"] or None,
-            "tqdm_class": self._make_tqdm(job, cancel),
-            "max_workers": 8,
-        }
-        return str(snapshot_download(**kwargs))
+    @staticmethod
+    def hub_model_dir(repo_id: str) -> str:
+        """既定保存先 (HF キャッシュ) でのこの repo のモデルディレクトリ。"""
+        if "/" not in repo_id:
+            return ""
+        try:
+            from huggingface_hub import constants as hfc
+            base = Path(hfc.HF_HUB_CACHE)
+        except Exception:  # noqa: BLE001
+            home = Path(os.environ.get("HF_HOME", "~/.cache/huggingface")).expanduser()
+            base = Path(os.environ.get("HF_HUB_CACHE") or (home / "hub"))
+        return str(base / f"models--{repo_id.replace('/', '--')}")
 
     async def _run_download(self, job: dict[str, Any]) -> None:
         job["status"] = "running"
         job["step"] = "転送開始"
+        if job["id"] in self._cancel:           # キュー待ちで中断された場合
+            job["status"] = "cancelled"
+            self._append_log(job, "開始前に中断されました")
+            self._finish(job)
+            return
         where = job["local_dir"] or "(既定の HF キャッシュ)"
         self._append_log(job, proxy_log_line())
         self._append_log(job, f"ダウンロード開始: {job['repo_id']}"
                          + (f" revision={job['revision']}" if job["revision"] else "")
                          + (f" patterns={job['allow_patterns']}" if job["allow_patterns"] else "")
                          + f" 保存先={where}")
+        if job.get("max_kbps"):
+            cap = (f"{job['max_kbps'] / 1024:.1f} MB/s" if job["max_kbps"] >= 1024
+                   else f"{job['max_kbps']} KB/s")
+            self._append_log(job, f"速度上限 {cap} を適用"
+                                  " (hf_transfer / Xet は無効化してスロットルを通す)")
         self._save()
-        cancel = threading.Event()
-        self._dl_cancel[job["id"]] = cancel
+        # ダウンロードは子プロセスで走らせる: スレッドは殺せないが、プロセスは
+        # SIGTERM → 数秒で SIGKILL にエスカレーションすれば必ず止まる
+        cfg = {"repo_id": job["repo_id"], "revision": job["revision"],
+               "allow_patterns": job["allow_patterns"], "local_dir": job["local_dir"],
+               "max_kbps": int(job.get("max_kbps") or 0)}
+        env = install_env()
+        if cfg["max_kbps"] > 0:
+            env["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+            env["HF_HUB_DISABLE_XET"] = "1"
+        fd, cfg_path = tempfile.mkstemp(prefix="llm-launcher-dl-", suffix=".json")
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False)
         tick = asyncio.create_task(self._dl_tick(job))
+        final: tuple[str, str] | None = None
         try:
-            path = await asyncio.to_thread(self._snapshot, job, cancel)
-            pr = job["progress"]
-            self._append_log(job, f"完了: {path} ({pr['done'] / 2**30:.2f} GiB,"
-                             f" {pr['files_done']} ファイル)")
-            if job.get("backend") and job.get("local_dir"):
-                note = record_launch_json_model(self.root, BACKENDS[job["backend"]],
-                                                Path(job["local_dir"]))
-                if note:
-                    self._append_log(job, note)
-            job["status"] = "done"
-            job["result"] = {"path": path, "bytes": pr["done"]}
-        except _Cancelled:
-            job["status"] = "cancelled"
-            self._append_log(job, "キャンセルされました (受信済みの一部ファイルはキャッシュに残ります)")
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    sys.executable, str(Path(__file__).parent / "dlchild.py"), cfg_path,
+                    stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT, env=env, start_new_session=True)
+            except OSError as e:
+                raise InstallError(f"ダウンロードプロセスを起動できません: {e}")
+            self._procs[job["id"]] = proc
+            if job["id"] in self._cancel:
+                self._signal_group(proc.pid, signal.SIGKILL)
+            assert proc.stdout is not None
+            while True:
+                raw = await proc.stdout.readline()
+                if not raw:
+                    break
+                line = raw.decode("utf-8", "replace").rstrip("\r\n")
+                if not line.strip():
+                    continue
+                if line.startswith("#@ "):
+                    try:
+                        ev = json.loads(line[3:])
+                    except ValueError:
+                        continue
+                    et = ev.get("ev")
+                    if et == "prog":
+                        pr = job["progress"]
+                        for k in ("done", "file_total", "files_done"):
+                            if isinstance(ev.get(k), int):
+                                pr[k] = ev[k]
+                        if ev.get("file"):
+                            pr["file"] = str(ev["file"])
+                    elif et == "done":
+                        final = ("done", str(ev.get("path") or ""))
+                    elif et == "err":
+                        final = ("err", str(ev.get("msg") or "ダウンロードに失敗しました"))
+                    continue
+                self._append_log(job, line)
+            rc = await proc.wait()
+            if job["id"] in self._cancel:
+                job["status"] = "cancelled"
+                self._append_log(job, "中断しました (受信済みの一部ファイルはそのまま残っています)")
+            elif final and final[0] == "done":
+                pr = job["progress"]
+                self._append_log(job, f"完了: {final[1]} ({pr['done'] / 2**30:.2f} GiB,"
+                                 f" {pr['files_done']} ファイル)")
+                if job.get("backend") and job.get("local_dir"):
+                    note = record_launch_json_model(self.root, BACKENDS[job["backend"]],
+                                                    Path(job["local_dir"]))
+                    if note:
+                        self._append_log(job, note)
+                job["status"] = "done"
+                job["result"] = {"path": final[1], "bytes": pr["done"]}
+            elif final and final[0] == "err":
+                raise InstallError(final[1])
+            else:
+                raise InstallError(f"ダウンロードプロセスが終了しました (exit code {rc})")
         except InstallError as e:
             job["status"] = "failed"
             job["error"] = str(e)
@@ -817,7 +839,9 @@ class InstallManager:
             self._append_log(job, f"失敗: {job['error']}")
         finally:
             tick.cancel()
-            self._dl_cancel.pop(job["id"], None)
+            self._procs.pop(job["id"], None)
+            with contextlib.suppress(OSError):
+                os.unlink(cfg_path)
             self._finish(job)
 
     async def _dl_tick(self, job: dict[str, Any]) -> None:
@@ -853,7 +877,7 @@ class InstallManager:
             with contextlib.suppress(Exception):
                 self.on_job_done(self._public(job))
 
-    def cancel(self, jid: str) -> dict[str, Any]:
+    def cancel(self, jid: str, *, force: bool = False) -> dict[str, Any]:
         job = self.jobs.get(jid)
         if not job:
             raise KeyError(jid)
@@ -863,17 +887,25 @@ class InstallManager:
         proc = self._procs.get(jid)
         if proc is not None and proc.returncode is None:
             pid = proc.pid
-            self._signal_group(pid, signal.SIGTERM)
-            self._kill_later(jid, pid)
-        ev = self._dl_cancel.get(jid)
-        if ev is not None:
-            ev.set()
-            self._append_log(job, "キャンセル要求: 転送ブロックの切れ目で停止します")
+            if force:
+                self._signal_group(pid, signal.SIGKILL)
+                self._append_log(job, "強制停止: プロセスグループを SIGKILL で停止しました")
+            else:
+                self._signal_group(pid, signal.SIGTERM)
+                if job.get("kind") == "download":
+                    # ダウンロードは「中断が効かない」対策で猶予を数秒に短縮し、
+                    # 消えていなければ必ず SIGKILL にエスカレーションする
+                    self._kill_later(jid, pid, grace=float(
+                        os.environ.get("LLM_LAUNCHER_DL_KILL_GRACE_S", "5")))
+                    self._append_log(job, "中断要求: 転送プロセスを停止します (数秒で強制停止に切替)")
+                else:
+                    self._kill_later(jid, pid)
         self._save()
         return self._public(job)
 
-    def _kill_later(self, jid: str, pid: int) -> None:
-        grace = float(os.environ.get("LLM_LAUNCHER_INSTALL_KILL_GRACE_S", "60"))
+    def _kill_later(self, jid: str, pid: int, *, grace: float | None = None) -> None:
+        if grace is None:
+            grace = float(os.environ.get("LLM_LAUNCHER_INSTALL_KILL_GRACE_S", "60"))
 
         async def wait_kill() -> None:
             t0 = time.monotonic()
@@ -892,6 +924,86 @@ class InstallManager:
         """履歴を削除する (実行中は呼び出し側が確認済みであること)。"""
         self.jobs.pop(jid, None)
         self._save()
+
+    # ---------------------------------------------- 中断残骸 (途中ファイル)
+
+    def _partial_target(self, jid: str) -> tuple[dict[str, Any], Path]:
+        """中断したダウンロードの残骸場所を返す。実行中ジョブでは使えない。"""
+        job = self.jobs.get(jid)
+        if not job:
+            raise KeyError(jid)
+        if job.get("kind") != "download":
+            raise InstallError("ジョブがダウンロードではありません")
+        if job.get("status") in ("queued", "running") or self.active_id == jid:
+            raise InstallError("実行中のジョブです")
+        pdir = str(job.get("partial_dir") or "").strip()
+        if not pdir:
+            raise InstallError("削除先が特定できません")
+        path = Path(pdir)
+        home = Path.home()
+        if not path.is_absolute() or str(path) in ("/", str(home)) or path.parent == path:
+            raise InstallError("削除先が危険なので拒否しました")
+        return job, path
+
+    @staticmethod
+    def _partial_stat(path: Path) -> dict[str, int]:
+        files = total = partials = 0
+        try:
+            for f in path.rglob("*"):
+                try:
+                    if not f.is_file():
+                        continue
+                    files += 1
+                    total += f.stat().st_size
+                    if f.name.endswith(".incomplete"):
+                        partials += 1
+                except OSError:
+                    continue
+        except OSError:
+            pass
+        return {"files": files, "bytes": total, "partials": partials}
+
+    def partial_info(self, jid: str) -> dict[str, Any]:
+        """中断で残った途中ファイルの存在・サイズ (削除確認画面用)。"""
+        job, path = self._partial_target(jid)
+        out: dict[str, Any] = {"ok": True, "jid": jid, "kind": "download",
+                               "status": job.get("status"), "path": str(path),
+                               "pre_existing": bool(job.get("pre_existing"))}
+        if not path.is_dir():
+            return {**out, "exists": False, "files": 0, "bytes": 0, "partials": 0}
+        return {**out, "exists": True, **self._partial_stat(path)}
+
+    def partial_delete(self, jid: str) -> dict[str, Any]:
+        """途中ファイルを削除する。既存モデルがある場所では .incomplete のみ。"""
+        job, path = self._partial_target(jid)
+        if not path.is_dir():
+            return {"ok": True, "path": str(path), "bytes": 0, "files": 0,
+                    "partial_only": False, "note": "存在しません"}
+        st = self._partial_stat(path)
+        pre = bool(job.get("pre_existing"))
+        removed = count = 0
+        if pre:
+            for f in sorted(path.rglob("*.incomplete"), reverse=True):
+                try:
+                    if f.is_file():
+                        removed += f.stat().st_size
+                        f.unlink()
+                        count += 1
+                except OSError:
+                    continue
+        else:
+            try:
+                shutil.rmtree(path)
+            except OSError as e:
+                raise InstallError(f"削除に失敗しました: {e}") from e
+            if path.exists():
+                raise InstallError("削除に失敗しました (一部残っています)")
+            removed, count = st["bytes"], st["files"]
+        self._append_log(job, f"中断残骸を削除しました ({removed / 2**20:.1f} MB / "
+                              f"{count} 個{' · 未完のみ' if pre else ''})")
+        self._save()
+        return {"ok": True, "path": str(path), "bytes": removed, "files": count,
+                "partial_only": pre}
 
     @staticmethod
     def _signal_group(pid: int, sig: signal.Signals) -> None:

@@ -206,6 +206,8 @@ class ModelDownloadBody(BaseModel):
     local_dir: str = ""
     # 保存先の別形式: バックエンド ID。local_dir よりはたらき、モデル名サブフォルダが付く
     backend: str = ""
+    # 下り速度の上限 (KB/s)。0 = 無制限。子プロセス内でトークンバケット適用
+    max_kbps: int = 0
 
 
 class PlaygroundChatBody(BaseModel):
@@ -1695,6 +1697,7 @@ def create_app(root: Path) -> FastAPI:
                                                 allow_patterns=body.allow_patterns,
                                                 local_dir=body.local_dir,
                                                 backend=body.backend,
+                                                max_kbps=body.max_kbps,
                                                 actor=current_user(request))
         except ActiveJobError as e:
             raise HTTPException(409, str(e))
@@ -1703,14 +1706,36 @@ def create_app(root: Path) -> FastAPI:
         return job
 
     @app.post("/api/installs/{jid}/cancel")
-    async def cancel_install(jid: str) -> dict[str, Any]:
+    async def cancel_install(jid: str, force: bool = False) -> dict[str, Any]:
+        """中断要求。force=true は猶予なしの SIGKILL (ダウンロードの「止まらない」対策)。"""
         try:
-            installs.cancel(jid)
+            installs.cancel(jid, force=force)
         except KeyError:
             raise HTTPException(404, "ジョブが見つかりません")
         except InstallError as e:
             raise HTTPException(409, str(e))
         return installs.get(jid) or {"ok": True}
+
+    @app.get("/api/installs/{jid}/partial")
+    async def install_partial(jid: str) -> dict[str, Any]:
+        """中断したダウンロードが残した (はずの) ディレクトリの情報。"""
+        try:
+            return installs.partial_info(jid)
+        except KeyError:
+            raise HTTPException(404, "ジョブが見つかりません")
+        except InstallError as e:
+            raise HTTPException(400, str(e))
+
+    @app.delete("/api/installs/{jid}/partial")
+    async def install_partial_delete(jid: str) -> dict[str, Any]:
+        """中断残骸の削除。既存モデルへの再ダウンロードだった場合は
+        未完 (.incomplete) ファイルのみ削除する。"""
+        try:
+            return installs.partial_delete(jid)
+        except KeyError:
+            raise HTTPException(404, "ジョブが見つかりません")
+        except InstallError as e:
+            raise HTTPException(400, str(e))
 
     @app.delete("/api/installs/{jid}")
     async def delete_install(jid: str) -> dict[str, Any]:
