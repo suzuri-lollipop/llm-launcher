@@ -66,12 +66,18 @@ button:disabled{opacity:.45;cursor:default}
 .badge.err{color:#d93025;border-color:#f5c0bb;background:#fce8e6}
 .badge.info{color:#1a73e8;border-color:#c6dafc;background:#e8f0fe}
 .badge.purple{color:#8430ce;border-color:#dfc8f7;background:#f3e8fd}
-.chip{font-size:11.5px;font-weight:700;padding:2.5px 8px;border-radius:4px;color:#fff;display:inline-flex;align-items:center;gap:5px}
+/* chip は flex 行の中でも絶対折り返さない・縮めない (long path と争うため)。
+   background にフォールバック: 未定義 ID の chip が「白背景に白文字」で消える事故防止 */
+.chip{font-size:11.5px;font-weight:700;padding:2.5px 8px;border-radius:4px;color:#fff;
+  background:var(--sub);white-space:nowrap;flex:none;
+  display:inline-flex;align-items:center;gap:5px}
 .chip.vllm{background:var(--vllm)} .chip.sglang{background:var(--sglang)}
 .chip.llamacpp{background:var(--llamacpp)} .chip.freetoken{background:var(--purple)}
 .chip.freetoken-fork{background:var(--freetoken)}
-.chip.strata{background:var(--strata)}
+.chip.strata{background:var(--strata)} .chip.strata-fork{background:var(--strata)}
 .chip.maya{background:var(--maya)}
+/* fork 系は基底版と色を共有するので白いインナーボーダーで区別を出す (ID 末尾 -fork に自動で効く) */
+.chip[class*="-fork"]{box-shadow:inset 0 0 0 1.5px rgba(255,255,255,.75)}
 .filters{display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;scrollbar-width:none}
 .filters::-webkit-scrollbar{display:none}
 .fchip{border:1px solid var(--line);background:var(--bg2);color:var(--sub);border-radius:999px;
@@ -239,8 +245,11 @@ button.tile .t-v{font-size:25px;font-weight:800;line-height:1.25;font-variant-nu
 button.tile .t-s{font-size:11.5px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
 button.tile.ok .t-v{color:var(--ok)} button.tile.warn .t-v{color:var(--warn)}
 button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
-.dash-2col{display:grid;gap:12px;align-items:start}
-@media(min-width:760px){.dash-2col{grid-template-columns:1fr 1.15fr}}
+/* 既定の stretch で 2 列のカード高さをそろえる (低い側は下部が余白になるが枠は揃う) */
+.dash-2col{display:grid;gap:12px}
+/* minmax(0,..) で min-content クランプを解除: 稼働中行の nowrap 操作群が左列を実幅より細く固定し、
+   余白が右列へ流れて 1:1.15 の比が壊れる (カード内は ellip / wrap で適応) */
+@media(min-width:760px){.dash-2col{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr)}}
 .card-h{font-size:12px;font-weight:800;color:var(--acc);letter-spacing:.4px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
 .meter{margin:10px 0}
 .m-hd{display:flex;align-items:baseline;gap:8px;font-size:12.5px;color:var(--sub);min-width:0}
@@ -252,6 +261,10 @@ button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
 .gpu-item{margin-top:12px;padding-top:10px;border-top:1px dashed var(--line)}
 .mini{display:flex;align-items:center;gap:8px;padding:8px 2px;border-bottom:1px solid var(--line);font-size:13.5px;min-width:0}
 .mini:last-child{border-bottom:0}
+/* ホーム 稼働中サーバー: 狭い列でも潰れないよう 1行目=識別子 / 2行目=右寄せ操作 の2段組み */
+#home-live .mini{flex-wrap:wrap}
+#home-live .lact{display:flex;align-items:center;gap:6px;width:100%;justify-content:flex-end;flex-wrap:wrap;margin-top:-2px}
+#home-live .lact .upt{white-space:nowrap}
 /* ---------------- playground ---------------- */
 #pg-msgs{max-height:56vh;min-height:130px;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:2px 2px 6px}
 .pg-msg{max-width:86%;padding:9px 12px;border-radius:10px;border:1px solid var(--line);font-size:14px;overflow-wrap:break-word;word-break:normal}
@@ -687,6 +700,15 @@ const fmtUp = sec => {
 const fmtDT = ts => ts
   ? new Date(ts * 1000).toLocaleString("ja-JP", {month:"2-digit", day:"2-digit", hour:"2-digit", minute:"2-digit"})
   : "-";
+/* 長い絶対パスは /module/ 以降だけ表示 (末尾 ellipsis で .venv/bin/python 等が隠れる対策)。
+   前綴がパス文字列のときだけ短縮し、「未検出 (…)」等のメッセージ文はそのまま通す。全文は title に出す */
+const shortPath = p => {
+  const s = String(p ?? "");
+  const i = s.indexOf("/module/");
+  if (i > 0 && /^[\w./+\-@~]+$/.test(s.slice(0, i))) return "…" + s.slice(i);   // 前綴がパスなら /module/ 以降へ短縮
+  const v = s.startsWith("/") ? s.indexOf("/.venv/") : -1;   // プロジェクト直下 .venv のときも末尾が見えるように
+  return v > 0 ? "…" + s.slice(v) : s;
+};
 
 async function api(path, opts = {}) {
   const r = await fetch(path, {
@@ -1214,13 +1236,15 @@ function renderHomeLive(){
     const url = s.port?`http://${esc(S.state.system.ip)}:${s.port}`:"";
     return `<div class="mini">
       ${statusBadge(s)}
-      <span class="grow ellip"><b style="font-size:13.5px">${esc(s.profile_name)}</b>
-        <span class="chip ${esc(s.backend)}" style="margin-left:6px">${esc(s.backend_name)}</span></span>
-      ${url?`<a class="btn" style="min-height:0;padding:4px 8px;font-size:12px" href="${url}" target="_blank" rel="noopener">:${s.port}↗</a>`:""}
-      ${s.ready?`<button class="ghost" style="min-height:0;padding:4px 8px;font-size:12px" title="プレイグラウンドでチャット" onclick="openPlayground('${s.id}')"><svg class=ic aria-hidden=true><use href=#i-flask /></svg></button>`:""}
-      ${s.ready?`<button class="ghost" style="min-height:0;padding:4px 8px;font-size:12px" title="ベンチマーク" onclick="openBench('${s.profile_id}')"><svg class=ic aria-hidden=true><use href=#i-chart /></svg></button>`:""}
-      <span class="muted upt mono" data-sid="${s.id}" style="font-size:11.5px">${fmtUp(s.uptime)}</span>
-      <button class="danger" style="min-height:0;padding:4px 10px;font-size:12px" onclick="stopSession('${s.id}')"><svg class=ic aria-hidden=true><use href=#i-stop /></svg></button>
+      <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
+      <b class="grow ellip" style="font-size:13.5px">${esc(s.profile_name)}</b>
+      <span class="lact">
+        ${url?`<a class="btn" style="min-height:0;padding:4px 8px;font-size:12px" href="${url}" target="_blank" rel="noopener" title="OpenAI互換APIのルートを開く">:${s.port}↗</a>`:""}
+        ${s.ready?`<button class="ghost" style="min-height:0;padding:4px 8px;font-size:12px" title="プレイグラウンドでチャット" onclick="openPlayground('${s.id}')"><svg class=ic aria-hidden=true><use href=#i-flask /></svg></button>`:""}
+        ${s.ready?`<button class="ghost" style="min-height:0;padding:4px 8px;font-size:12px" title="ベンチマーク" onclick="openBench('${s.profile_id}')"><svg class=ic aria-hidden=true><use href=#i-chart /></svg></button>`:""}
+        <span class="muted upt mono" data-sid="${s.id}" data-pfx="稼働 " style="font-size:11.5px">稼働 ${fmtUp(s.uptime)}</span>
+        <button class="danger" style="min-height:0;padding:4px 10px;font-size:12px" onclick="stopSession('${s.id}')"><svg class=ic aria-hidden=true><use href=#i-stop /></svg></button>
+      </span>
     </div>`;
   }).join("");
 }
@@ -1231,7 +1255,7 @@ function renderHomeBackends(){
     const cls = det.installed?"ok":"err";
     return `<div class="mini">
       <span class="chip ${esc(b.id)}">${esc(b.name)}</span>
-      <span class="grow ellip muted" style="font-size:11.5px">${esc(det.python||det.detail||b.module_path)}</span>
+      <span class="grow ellip muted" style="font-size:11.5px" title="${esc(det.python||det.detail||b.module_path)}">${esc(shortPath(det.python||det.detail||b.module_path))}</span>
       ${live?`<span class="badge info"><span class="dot"></span>稼働 ${live}</span>`:""}
       <span class="badge ${cls}"><span class="dot"></span>${det.installed?"検出":"未検出"}</span>
     </div>`;
@@ -1446,7 +1470,7 @@ function sessionCard(s) {
 function patchUptime(root, ss) {
   for (const s of ss) {
     const u = root.querySelector(`.upt[data-sid="${s.id}"]`);
-    if (u) u.textContent = fmtUp(s.uptime);
+    if (u) u.textContent = (u.dataset.pfx || "") + fmtUp(s.uptime);
   }
 }
 
