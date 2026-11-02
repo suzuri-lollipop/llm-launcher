@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 306 56" role="img" aria-label="LLM Launcher.">
+  <text x="0" y="41" font-family="'Google Sans Text', Roboto, 'Noto Sans JP', 'Hiragino Sans', system-ui, sans-serif" font-size="40" letter-spacing="0.4">
+    <tspan fill="#5f6368" font-weight="400">LLM</tspan><tspan fill="#202124" font-weight="500">Launcher</tspan><tspan fill="#1a73e8" font-weight="500">.</tspan>
+  </text>
+</svg>

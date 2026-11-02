@@ -47,6 +47,8 @@ const W = {
   backend: "", ref: "", clean: false,
   kind: "", job: null, timer: null, logCursor: 0, logText: "",
   ema: null, tLast: 0, dLast: 0, growT: 0,
+  cancelAt: 0,            // 中断要求を出した時刻 (強制停止ボタンの表示判定)
+  cleanupShown: false,    // 中断残骸の削除画面は 1 ジョブ 1 回だけ出す
   cfgSkip: true, calProfile: null,
   cfgProfId: null, cfgProfNew: false, backends: null,
   summary: [],
@@ -87,7 +89,7 @@ document.addEventListener("click", e => {
 /* 「もどる」は論理的な前ステップへ (ラン中画面からは戻れない) */
 const BACK = { "s-backend": "s-welcome", "s-branch": "s-backend", "s-review": "s-backend",
                "s-model": "s-installed", "s-config": "s-model", "s-net": "s-config",
-               "s-cal": "s-net", "s-installed": "s-backend" };
+               "s-cal": "s-net", "s-installed": "s-backend", "s-cleanup": "s-model" };
 function goBack() {
   if (curStep === "s-branch") { go("s-backend", true); return; }
   if (curStep === "s-review") { go(spec() && (spec().refs || []).length > 1 ? "s-branch" : "s-backend", true); return; }
@@ -326,6 +328,8 @@ function finishJob() {
     } else if (r.status === "cancelled") {
       $("#dl-title").textContent = "中断しました";
       $("#dl-retry").hidden = false;
+      /* 中断後はダウンロード途中のモデルを削除するか選ぶ画面へ (1 ジョブ 1 回) */
+      if (!W.cleanupShown) { W.cleanupShown = true; renderCleanup(); go("s-cleanup"); }
     } else {
       $("#dl-err").textContent = r.error || "ダウンロードに失敗しました";
       $("#dl-err").classList.remove("hidden");
@@ -358,42 +362,96 @@ $("#pg-cancel").addEventListener("click", async () => {
 $("#dl-retry").addEventListener("click", () => { renderModel(); go("s-model"); });
 $("#dl-next").addEventListener("click", () => { renderConfig(); go("s-config"); });
 
-/* ---------------------------------------------------------------- 2: モデル */
-function renderModel() {
+/* ---------------------------------------------------------------- 2: モデル
+   2択のプルダウン: 「ダウンロードする」= supported_models 表から / 「済みのを使う」
+   = /api/hf-models (HF キャッシュ + 各バックエンドのモデルフォルダ) から選ぶ。
+   repo id 直接入力は「その他」の details に格納し、既定の導線にはしない。 */
+let mdLocal = [];                                   // /api/hf-models のダウンロード済み一覧
+const mdMode = () => ($$("#md-modes input").find(i => i.checked) || {}).value || "dl";
+function mdSync() {
+  const mode = mdMode();
+  $$("#md-modes .opt").forEach(o => {
+    const i = o.querySelector("input"); o.classList.toggle("sel", i.checked); });
+  const adv = $("#md-adv");
+  adv.hidden = mode !== "dl";
+  if (mode !== "dl") $("#md-repo").value = "";       // 直接入力はダウンロード時のみ意味を持つ
+  $("#md-dl-field").classList.toggle("hidden", mode !== "dl");
+  $("#md-local-field").classList.toggle("hidden", mode !== "local");
+  $("#md-speed-field").classList.toggle("hidden", mode !== "dl");
+  const btn = $("#md-start");
+  if (mode === "dl") {
+    btn.textContent = "ダウンロード";
+    btn.disabled = !$("#md-repo").value.trim() && !$("#md-sel").value;
+    const sp = spec();
+    $("#md-dest").textContent = sp && sp.model_data
+      ? `保存先: ${sp.name} のモデルフォルダ (起動設定に自動で反映されます)`
+      : `保存先: HF キャッシュ (${W.installs.cacheDir || "既定"})`;
+  } else {
+    btn.textContent = "このモデルを使う";
+    btn.disabled = !$("#md-local").value;
+    const m = mdLocal.find(x => x.repo_id === $("#md-local").value);
+    $("#md-dest").textContent = m ? `場所: ${m.snapshot}` : "";
+  }
+}
+async function renderModel() {
   const sp = spec();
   const ms = (sp && sp.supported_models) || [];
-  const sel = $("#md-sel");
-  $("#md-rec-field").hidden = !ms.length;
-  sel.innerHTML = '<option value="">その他 (下に直接入力)</option>' + ms.map(m => `
-    <option value="${esc(m.repo_id)}">${esc(m.repo_id)}${m.name ? " — " + esc(m.name) : ""}</option>`).join("");
-  const repo = $("#md-repo");
-  if (ms.some(m => m.repo_id === repo.value.trim())) sel.value = repo.value.trim();
-  sel.onchange = () => {
-    if (sel.value) repo.value = sel.value;
-    repo.focus();
-    $("#md-start").disabled = !repo.value.trim();
-  };
-  const hasData = sp && sp.model_data;
-  $("#md-dest").textContent = hasData
-    ? `保存先: ${sp.name} のモデルフォルダ (起動設定に自動で反映されます)`
-    : `保存先: HF キャッシュ (${W.installs.cacheDir || "既定"})`;
+  try {
+    const hm = await api("/api/hf-models");
+    mdLocal = (hm.models || []).filter(m => m.has_weights && m.repo_id);
+  } catch { mdLocal = []; }
+  $("#md-sel").innerHTML = ms.length
+    ? ms.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
+        + `${esc(m.repo_id)}${m.name ? " — " + esc(m.name) : ""}</option>`).join("")
+    : '<option value="">(このバックエンドに対応モデル一覧がありません)</option>';
+  $("#md-local").innerHTML = mdLocal.length
+    ? mdLocal.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
+        + `${esc(m.repo_id)}${m.source === "data" ? " — 導入済みモデルフォルダ" : ""}</option>`).join("")
+    : '<option value="">(ダウンロード済みのモデルが見つかりません)</option>';
+  /* 済みモデルが 0 件ならその選択を不可にしてダウンロード択に寄せる */
+  const localR = $$("#md-modes input").find(i => i.value === "local");
+  localR.disabled = !mdLocal.length;
+  $$("#md-modes .opt").forEach(o => { if (o.contains(localR)) o.style.opacity = mdLocal.length ? "" : ".45"; });
+  if (localR.disabled && mdMode() === "local") {
+    $$("#md-modes input").find(i => i.value === "dl").checked = true;
+  }
   $("#md-err").classList.add("hidden");
-  $("#md-start").disabled = !repo.value.trim();
   $("#md-sub").textContent = ms.length
-    ? "一覧から選ぶか、それ以外は repo id を直接入力してください。"
-    : "Hugging Face の repo id を入力してください (例: Qwen/Qwen3-30B-A3B-Instruct)。";
+    ? "新しいモデルをダウンロードするか、この PC ですでにダウンロード済みのモデルを使うかを選んでください。"
+    : "このバックエンドには対応モデル一覧がないため、「その他: repo id を直接入力する」から選ぶか、ダウンロード済みのモデルを使ってください。";
+  mdSync();
 }
-$("#md-repo").addEventListener("input", () => { $("#md-start").disabled = !$("#md-repo").value.trim(); });
+$$("#md-modes input").forEach(i => i.addEventListener("change", mdSync));
+$("#md-sel").addEventListener("change", mdSync);
+$("#md-local").addEventListener("change", mdSync);
+$("#md-repo").addEventListener("input", mdSync);
 $("#md-start").addEventListener("click", async () => {
-  const repo = $("#md-repo").value.trim();
+  const btn = $("#md-start");
+  $("#md-err").classList.add("hidden");
+  if (mdMode() === "local") {
+    /* 済みモデルは「完了済みのダウンロードジョブ」に化かして後続 (稼働設定の
+       プロファイル名 / model_path 解決) をそのまま通す */
+    const m = mdLocal.find(x => x.repo_id === $("#md-local").value);
+    if (!m) return;
+    W.kind = "download";
+    W.job = { id: "", kind: "download", status: "done", backend: W.backend,
+              repo_id: m.repo_id, result: { path: m.snapshot }, local_dir: m.snapshot };
+    W.cfgProfId = null; W.cfgProfNew = false;
+    W.summary.push({ ok: true, t: `ダウンロード済みのモデル ${m.repo_id} を使用します` });
+    renderConfig(); go("s-config");
+    return;
+  }
+  const repo = $("#md-repo").value.trim() || $("#md-sel").value;
   if (!repo) return;
   const sp = spec();
-  const btn = $("#md-start");
   btn.disabled = true; btn.textContent = "開始中…";
   try {
+    const kb = parseInt($("#md-speed").value, 10) || 0;
     const job = await api("/api/installs/download", { method: "POST",
-      body: { repo_id: repo, revision: "", backend: (sp && sp.model_data) ? sp.id : "", allow_patterns: [] } });
+      body: { repo_id: repo, revision: "", backend: (sp && sp.model_data) ? sp.id : "",
+              allow_patterns: [], max_kbps: kb } });
     W.kind = "download"; W.job = job;
+    W.cancelAt = 0; W.cleanupShown = false;   // 中断/掃除の状態を新しいジョブ用にリセット
     // 新しいセットアップ (モデル取得) を始めたので、稼働設定用の
     // プロファイルは作り直しになる
     W.cfgProfId = null; W.cfgProfNew = false;
@@ -402,7 +460,7 @@ $("#md-start").addEventListener("click", async () => {
     $("#md-err").textContent = "開始できませんでした: " + e.message;
     $("#md-err").classList.remove("hidden");
   } finally {
-    btn.textContent = "ダウンロード"; if ($("#md-repo").value.trim()) btn.disabled = false;
+    btn.textContent = "ダウンロード"; mdSync();
   }
 });
 function renderDownload() {
@@ -447,76 +505,167 @@ function renderDownload() {
     err.classList.remove("hidden");
   } else if (!bad) err.classList.add("hidden");
   $("#dl-log").textContent = W.logText || "(ログ待ち…)";
-  $("#dl-cancel").style.display = running ? "" : "none";
+  const canceling = running && !!W.cancelAt;
+  const cbtn = $("#dl-cancel");
+  cbtn.style.display = running ? "" : "none";
+  cbtn.disabled = canceling;
+  cbtn.textContent = canceling ? "停止中…" : "中断";
+  /* 中断要求から 8 秒経っても process が死なない場合は強制停止 (SIGKILL) を出せるようにする */
+  const force = canceling && (Date.now() - W.cancelAt > 8000);
+  $("#dl-force").classList.toggle("hidden", !force);
   $("#dl-retry").hidden = !bad;
   $("#dl-next").classList.toggle("hidden", r.status !== "done");
 }
 $("#dl-cancel").addEventListener("click", async () => {
-  if (!W.job) return;
-  if (!confirm("ダウンロードを中断しますか?")) return;
-  try { await api(`/api/installs/${W.job.id}/cancel`, { method: "POST" }); }
-  catch (e) { alert("中断できませんでした: " + e.message); }
+  if (!W.job || W.cancelAt) return;
+  if (!confirm("ダウンロードを中断しますか?\n転送プロセスを停止し、途中ファイルを掃除する確認に進みます。")) return;
+  try {
+    await api(`/api/installs/${W.job.id}/cancel`, { method: "POST" });
+    W.cancelAt = Date.now();
+  } catch (e) { alert("中断できませんでした: " + e.message); }
 });
+$("#dl-force").addEventListener("click", async () => {
+  if (!W.job) return;
+  if (!confirm("それでも停止しません。強制停止 (SIGKILL) を実行しますか?\n転送中のデータは途中で止まります (破損ファイルは次の掃除画面で削除できます)。")) return;
+  $("#dl-force").disabled = true;
+  $("#dl-force").textContent = "強制停止中…";
+  try { await api(`/api/installs/${W.job.id}/cancel?force=true`, { method: "POST" }); }
+  catch (e) { alert("強制停止できませんでした: " + e.message); }
+  $("#dl-force").disabled = false;
+  $("#dl-force").textContent = "強制停止";
+});
+
+/* ------------------------------------------------- 2b: 中断残骸の掃除
+   ダウンロードを中断すると、受信途中のファイルが保存先に残る。
+   GET /api/installs/{id}/partial で存在・サイズを見て、DELETE で削除する。
+   既存モデルへの上書きダウンロードだった場合は .incomplete のOnly削除。 */
+let clInfo = null;
+async function renderCleanup() {
+  const id = (W.job || {}).id || "";
+  clInfo = null;
+  $("#cl-err").classList.add("hidden");
+  $("#cl-box").classList.add("hidden");
+  $("#cl-none").classList.add("hidden");
+  $("#cl-del").disabled = false; $("#cl-del").textContent = "削除する";
+  $("#cl-keep").disabled = false; $("#cl-keep").textContent = "残す";
+  $("#cl-sub").textContent = "中断で受信途中のデータが保存先に残っています。"
+    + "次に同じモデルを取り直すなら削除しておくと、容量を無駄に使いません。";
+  const delBtn = $("#cl-del");
+  delBtn.onclick = clDelete;
+  $("#cl-keep").onclick = () => { renderModel(); go("s-model"); };
+  if (!id) { $("#cl-none").classList.remove("hidden"); return; }
+  try {
+    clInfo = await api(`/api/installs/${id}/partial`);
+  } catch { clInfo = null; }
+  if (!clInfo || !clInfo.exists || !clInfo.bytes) {
+    $("#cl-none").textContent = "削除対象は見つかりませんでした。そのままで問題ありません。";
+    $("#cl-none").classList.remove("hidden");
+    $("#cl-del").classList.add("hidden");
+    $("#cl-keep").textContent = "モデル選びに戻る";
+    return;
+  }
+  $("#cl-del").classList.remove("hidden");
+  $("#cl-box").innerHTML =
+      `<div class="row-item"><span class="k">場所</span>`
+    + `<span class="v"><span class="mono">${esc(clInfo.path)}</span></span></div>`
+    + `<div class="row-item"><span class="k">サイズ</span>`
+    + `<span class="v">${bytes(clInfo.bytes)} (${clInfo.files} ファイル${clInfo.partials ? ` · 未完 ${clInfo.partials} 件` : ""})</span></div>`
+    + (clInfo.pre_existing ? `<div class="row-item"><span class="k">注意</span>`
+        + `<span class="v">既存のモデルがある場所です。削除されるのは未完 (.incomplete) のファイルだけです。</span></div>` : "");
+  $("#cl-box").classList.remove("hidden");
+}
+async function clDelete() {
+  const id = (W.job || {}).id || "";
+  if (!id || !clInfo || !clInfo.exists) { renderModel(); go("s-model"); return; }
+  if (!confirm("ダウンロード途中のファイルを削除しますか?\nこの操作は取り消せません。")) return;
+  const b = $("#cl-del");
+  b.disabled = true; b.textContent = "削除中…";
+  try {
+    const r = await api(`/api/installs/${id}/partial`, { method: "DELETE" });
+    $("#cl-sub").textContent = (r.bytes ? bytes(r.bytes) : "0 B") + " を削除しました。"
+      + (r.partial_only ? " (未完のファイルのみ)" : "") + "モデル選びに戻ります。";
+    $("#cl-box").classList.add("hidden");
+    $("#cl-del").classList.add("hidden");
+    $("#cl-keep").textContent = "モデル選びに戻る";
+    $("#cl-keep").disabled = false;
+  } catch (e) {
+    $("#cl-err").textContent = "削除できませんでした: " + e.message;
+    $("#cl-err").classList.remove("hidden");
+    b.disabled = false; b.textContent = "削除する";
+  }
+}
 
 /* ------------------------------------------------- 3b: 稼働設定 (調整の前) */
 /* キャリブレーションは コンテキスト長 / KV形式 / 並列数 を前提に計測するため、
    調整の前にこの 3 値をプロファイルへ保存する。起動 JSON 主体のバックエンド
    (regen) は保存後に再生成しないと調整が古い argv で走る。 */
+/* 選択肢は「数値と単位」だけを書き、説明文は入力欄に埋め込まない
+   (見出し下の 1 行 sec.hint に集約する)。行は [値, 表示, 推奨タグ] の 3 つ組。 */
 const CF_TOK = v => { const n = Math.round(Number(v));
-  return (Number.isFinite(n) && n % 1024 === 0 && n >= 1024)
-    ? `${Math.round(n / 1024)}K トークン` : `${Number(v).toLocaleString()} トークン`; };
-const CF_CTX = [
-  ["32768", "32K トークン", "軽快・省メモリ。短いやり取り中心向け", ""],
-  ["131072", "128K トークン", "長めの文書も扱える実用バランス", "推奨"],
-  ["262144", "256K トークン", "最大構成。VRAM を多く消費します", ""],
-];
-const CF_KV = [
-  ["fp8", "fp8", "KVキャッシュを約半分のメモリに。品質はほぼ同等", "推奨"],
-  ["bf16", "bf16 (fp16系)", "品質最優先。KVメモリは約2倍", ""],
-  ["auto", "auto (エンジン既定値)", "エンジンにおまかせ", ""],
-];
-const CF_PAR = [
-  ["1", "1 並列", "1リクエストずつ処理。最も安定", ""],
-  ["2", "2 並列", "少人数の同時利用向け", ""],
-  ["4", "4 並列", "数人の同時利用の目安", "推奨"],
-  ["8", "8 並列", "大規模並列。高VRAM必須", ""],
-];
-const CF_TP = [
-  ["1", "1 GPU", "分割なし。1枚のGPUにモデル全体を載せる", ""],
-  ["2", "2 GPU", "モデルを2枚に分割。GPUあたりのメモリが下がる", ""],
-  ["4", "4 GPU", "4枚に分割。大きなモデル向け", ""],
-  ["8", "8 GPU", "8枚に分割。8枚ある環境用", ""],
-];
+  if (!Number.isFinite(n)) return String(v);
+  if (n >= 1048576 && n % 1048576 === 0) return `${Math.round(n / 1048576)}M`;
+  return (n >= 1024 && n % 1024 === 0) ? `${Math.round(n / 1024)}K` : n.toLocaleString(); };
+const CF_NUM = v => { const n = parseInt(v, 10); return Number.isFinite(n) ? String(n) : String(v); };
+const CF_CTX = [["32768", "32K", ""], ["131072", "128K", "推奨"], ["262144", "256K", ""]];
+const CF_KV = [["fp8", "fp8", "推奨"], ["bf16", "bf16", ""], ["auto", "auto", ""]];
+const CF_PAR = [["1", "1", ""], ["2", "2", ""], ["4", "4", "推奨"], ["8", "8", ""]];
+const CF_TP = [["1", "1", ""], ["2", "2", ""], ["4", "4", ""], ["8", "8", ""]];
+/* perUser 項目 (FreeToken の一人あたり設定): 画面は 1 人あたりで聞き、JSON へは
+   合計 = 1人あたり × 並列数 を書く。--num-tokens は全員で共有する KV 総量なので、
+   1人256K・4並列なら 1M を書かないと 1 人あたり 64K しか残らない。 */
+function cfParNow() {
+  const el = document.querySelector("#cf-par");
+  const n = parseInt(el && el.value, 10);
+  return Number.isFinite(n) && n > 0 ? n : 1;
+}
+/* 見出し下の補足 1 行。perUser は「1人あたり × 並列 = 合計KV」を生きた値で示す */
+function cfSyncHints() {
+  const cfg = RUNCFG[W.backend] || {};
+  for (const id of ["ctx", "kv", "tp", "par"]) {
+    const sec = cfg[id]; const hint = document.querySelector(`#cf-${id}-hint`);
+    if (!sec || !hint) continue;
+    hint.textContent = sec.hint || "";
+    if (!sec.perUser) continue;
+    const el = document.querySelector(`#cf-${id}`);
+    const n = parseInt(el ? el.value : "", 10);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const par = cfParNow();
+    const per = el.selectedOptions[0] && el.selectedOptions[0].dataset.raw === "1"
+      ? Math.round(n / par) : n;
+    hint.innerHTML = esc(sec.hint)
+      + `<br>1人あたり ${esc(CF_TOK(per))} × ${par}並列 = KV合計 ${esc(CF_TOK(per * par))}`;
+  }
+}
 const RUNCFG = {
   "freetoken-fork": { regen: true, model: true,
-    ctx: { key: "num_tokens", label: "コンテキスト長",
+    ctx: { key: "num_tokens", label: "一人当たりのコンテキスト長", short: "1人あたり", perUser: true,
            hint: "長いほどVRAMを消費します。調整はこの長さ前提のKVキャッシュで行います", opts: CF_CTX, cur: CF_TOK },
-    kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式 (fp8 / bf16 など)",
+    kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "会話履歴の格納精度です。fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
-    tp: { key: "tp_size", label: "Tensor Parallel (GPU分割数)",
-          hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: v => `${v} GPU` },
+    tp: { key: "tp_size", label: "Tensor Parallel (GPU分割数)", short: "GPU分割",
+          hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "max_running_requests", label: "並列推論数",
-           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
   "sglang": { regen: false,
     ctx: { key: "context_length", label: "コンテキスト長",
            hint: "長いほどVRAMを消費します", opts: CF_CTX, cur: CF_TOK },
     kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
     par: { key: "max_running_requests", label: "並列推論数",
-           hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: CF_NUM } },
   "vllm": { regen: false,
     ctx: { key: "max_model_len", label: "コンテキスト長",
            hint: "長いほどVRAMを消費します", opts: CF_CTX, cur: CF_TOK },
     kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
     par: { key: "max_num_seqs", label: "並列推論数",
-           hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: CF_NUM } },
   "strata": { regen: false,
     par: { key: "parallel", label: "並列推論数",
-           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
   "maya": { regen: false,
     par: { key: "parallel", label: "並列推論数",
-           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: v => `${v} 並列` } },
+           hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
 };
 async function renderConfig() {
   W.cfgSkip = true;
@@ -555,35 +704,57 @@ async function renderConfig() {
   const nmEl = $("#cf-name");
   if (nmEl && document.activeElement !== nmEl) nmEl.value = p.name || "";
   const parts = [];
+  // perUser 項目は保存値 (合計) を並列数で割って 1 人あたりとして見せる。
+  // 並列数の初期値は保存値、無ければ「推奨」選択肢で揃える (フォーム描画前なので DOM を使わない)
+  const parInit = (() => {
+    if (!cfg.par) return 1;
+    const s = parseInt(v[cfg.par.key] ?? "", 10);
+    if (Number.isFinite(s) && s > 0) return s;
+    const rec = cfg.par.opts.find(o => (o[2] || "").includes("推奨")) || cfg.par.opts[0] || ["1"];
+    return parseInt(rec[0], 10) || 1;
+  })();
   for (const id of ["ctx", "kv", "tp", "par"]) {
     const sec = cfg[id]; if (!sec) continue;
-    const cur = String(v[sec.key] ?? "");
+    const stored = String(v[sec.key] ?? "");
+    const perNum = sec.perUser ? Math.round(Number(stored) / parInit) : NaN;
+    const cur = (sec.perUser && stored && Number.isFinite(perNum)) ? String(perNum) : stored;
     // 未設定の項目は「推奨」(無ければ先頭) をプリチェックして、何も選まずに
     // 保存すると値が何も入らない状態を防ぐ
-    const def = cur === "" ? ((sec.opts.find(o => (o[3] || "").includes("推奨"))
+    const def = cur === "" ? ((sec.opts.find(o => (o[2] || "").includes("推奨"))
                                || sec.opts[0] || [""])[0]) : null;
+    // 選択肢が 2つ以上の設定はプルダウンにまとめる (画面を縦に伸ばさない)。
+    // 表示は数値と単位だけにし、data-t1 にサマリーへ使う短い名称を持たせる
     let rows = sec.opts.map(o => {
       const sel = cur ? cur === o[0] : o[0] === def;
-      return `<label class="opt${sel ? " sel" : ""}"><input type="radio" name="cf-${id}" value="${esc(o[0])}"${sel ? " checked" : ""}>`
-        + `<span class="txt"><span class="t1">${esc(o[1])}</span>`
-        + (o[2] ? `<span class="t2">${esc(o[2])}</span>` : "") + "</span>"
-        + (o[3] ? `<span class="tag">${esc(o[3])}</span>` : "") + "</label>";
+      return `<option value="${esc(o[0])}"${sel ? " selected" : ""}`
+        + ` data-t1="${esc(o[1])}">${esc(o[1])}`
+        + (o[2] ? `（${esc(o[2])}）` : "") + "</option>";
     }).join("");
     if (cur && !sec.opts.some(o => o[0] === cur)) {
-      rows = `<label class="opt sel"><input type="radio" name="cf-${id}" value="${esc(cur)}" checked>`
-        + `<span class="txt"><span class="t1">${esc(sec.cur ? sec.cur(cur) : cur)}</span>`
-        + `<span class="t2">現在の値 (そのまま維持)</span></span></label>` + rows;
+      // 選択肢に無い既存値 (手動設定や、合計でしか書かれない値) はそのまま維持。
+      // data-raw は「JSON の値を据え置く」意味なので保存時に並列数を掛けない
+      const t = esc(sec.cur ? sec.cur(sec.perUser ? cur : stored)
+                            : (sec.perUser ? CF_TOK(cur) : stored));
+      rows = `<option value="${esc(stored)}" selected data-t1="${t}"`
+        + (sec.perUser ? ' data-raw="1"' : "") + `>${t}（現在の値）</option>` + rows;
     }
-    parts.push(`<div class="cf-group"><div class="cf-label">${esc(sec.label)}</div>`
-      + `<div class="cf-hint">${esc(sec.hint)}</div><div class="opt-list">${rows}</div></div>`);
+    // 見出しはフローティングラベルが兼ねるので、 group 内は「選択 → 補足1行」だけ
+    parts.push(`<div class="cf-group">`
+      + `<div class="field sel-fixed"><select id="cf-${id}" data-name="${esc(id)}">${rows}</select>`
+      + `<label for="cf-${id}">${esc(sec.label)}</label></div>`
+      + `<div class="cf-hint" id="cf-${id}-hint">${esc(sec.hint)}</div></div>`);
   }
   $("#cf-groups").innerHTML = parts.join("");
+  cfSyncHints();
   $("#cf-err").classList.add("hidden");
 }
 $("#cf-groups").addEventListener("change", e => {
-  const inp = e.target.closest("input"); if (!inp || inp.type !== "radio") return;
-  document.querySelectorAll(`#cf-groups input[name="${inp.name}"]`).forEach(i =>
-    i.closest(".opt").classList.toggle("sel", i.checked));
+  const inp = e.target.closest("input");
+  if (inp && inp.type === "radio") {
+    document.querySelectorAll(`#cf-groups input[name="${inp.name}"]`).forEach(i =>
+      i.closest(".opt").classList.toggle("sel", i.checked));
+  }
+  cfSyncHints();   // 並列数を変えたら 1 人あたり / KV合計の補足も追従させる
 });
 // PUT はドキュメント全体を置き換えるため、保存のたびにサーバーの最新を再取得して
 // 土台にする。古い W.calProfile のまま PUT すると、前の保存で書き込まれた
@@ -606,14 +777,22 @@ $("#cf-go").addEventListener("click", async () => {
   const vals = { ...(p.values || {}) };
   const on = p.on ? { ...p.on } : null;
   const chosen = [];
+  const par = cfParNow();   // 一人あたり項目が合計を書き込むときに使う並列数 (フォームの選択)
   for (const id of ["ctx", "kv", "tp", "par"]) {
     const sec = cfg[id]; if (!sec) continue;
-    const el = document.querySelector(`#cf-groups input[name="cf-${id}"]:checked`);
-    if (!el) continue;
-    vals[sec.key] = el.value;
+    const el = document.querySelector(`#cf-groups select#cf-${id}`);
+    if (!el || !el.value) continue;
+    const opt = el.selectedOptions[0];
+    const raw = !!(opt && opt.dataset.raw === "1");
+    // perUser (一人当たり設定) は JSON へ 合計 = 1人あたり × 並列数 を書く
+    // (--num-tokens は全員で共有する KV 総量で、そのままだと 1 人あたりは並列数分で割れる)。
+    // data-raw = 「現在の値をそのまま維持」を選ぶので掛けない
+    const per = sec.perUser ? parseInt(el.value, 10) : NaN;
+    vals[sec.key] = (sec.perUser && !raw && Number.isFinite(per)) ? String(per * par) : el.value;
     if (on) on[sec.key] = true;
-    const t1 = el.closest("label").querySelector(".t1");
-    chosen.push(sec.label.split(" ")[0] + " " + (t1 ? t1.textContent.trim() : el.value));
+    chosen.push((sec.short || sec.label.split(" ")[0]) + " "
+      + ((opt && opt.dataset.t1) || el.value)
+      + (sec.perUser && !raw ? `×${par}並列` : ""));
   }
   // モデル未決定のプロファイルは今回ダウンロードしたモデルを指す。ページ
   // リロードで W.job を失ってもインストール履歴 (jobs) から復元する。新規

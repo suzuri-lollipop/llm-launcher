@@ -3,13 +3,13 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<meta name="theme-color" content="#0e1116">
+<meta name="theme-color" content="#ffffff">
 <title>AI サーバー 起動・停止</title>
 <style>
 :root{
-  --bg:#0e1116; --bg2:#151a22; --card:#1a2029; --line:#2a323d;
-  --text:#eef3f8; --sub:#93a1b3; --acc:#4da3ff; --ok:#3ddc84; --warn:#ffb020; --err:#ff5d5d;
-  --r:18px;
+  --bg:#ffffff; --bg2:#f1f3f4; --card:#ffffff; --line:#dadce0;
+  --text:#202124; --sub:#5f6368; --acc:#1a73e8; --ok:#188038; --warn:#b06000; --err:#d93025;
+  --r:8px;
   /* 1vh 相当の実数単位。dvh が使えるブラウザでは「URL バーを引いた実際の高さ」に
      合わせる (見えている高さより大きく採って全画面表示がはみ出すのを防ぐ)。 */
   --vh1:1vh;
@@ -19,13 +19,13 @@
 html,body{margin:0;padding:0}
 body{
   background:var(--bg); color:var(--text);
-  font-family:system-ui,-apple-system,"Segoe UI","Hiragino Sans","Noto Sans JP",sans-serif;
+  font-family:"Google Sans Text",Roboto,"Noto Sans JP","Hiragino Sans",system-ui,sans-serif;
   font-size:17px; line-height:1.6; min-height:100vh;
   padding-bottom:calc(20px + env(safe-area-inset-bottom));
 }
 header{
   position:sticky; top:0; z-index:20;
-  background:rgba(14,17,22,.92); backdrop-filter:blur(10px);
+  background:rgba(255,255,255,.95); backdrop-filter:blur(10px);
   border-bottom:1px solid var(--line);
   padding:calc(11px + env(safe-area-inset-top)) 16px 11px;
   display:flex; align-items:center; gap:12px;
@@ -36,28 +36,29 @@ main{max-width:760px; margin:0 auto; padding:14px 16px 20px}
 .hidden{display:none!important}
 .muted{color:var(--sub); font-size:15px}
 .card{background:var(--card); border:1px solid var(--line); border-radius:var(--r);
-  padding:16px; margin-bottom:12px}
+  padding:16px; margin-bottom:12px; box-shadow:0 1px 2px rgba(60,64,67,.10)}
 .srv{display:flex; flex-direction:column; gap:12px}
 .srv.tap{cursor:pointer}
 .srv.tap:focus-visible{outline:2px solid var(--acc); outline-offset:2px}
-.srv-name{font-size:22px; font-weight:800; line-height:1.3; word-break:break-word}
-.pill{display:inline-flex; align-items:center; gap:9px; font-size:17px; font-weight:800;
+.srv-name{font-size:22px; font-weight:500; line-height:1.3; word-break:break-word}
+.pill{display:inline-flex; align-items:center; gap:9px; font-size:17px; font-weight:500;
   padding:7px 15px; border-radius:999px; border:1px solid var(--line); background:var(--bg2);
   color:var(--sub); align-self:flex-start}
 .pill .dot{width:13px; height:13px; border-radius:50%; background:currentColor}
-.pill.ok{color:var(--ok); border-color:#274d38; background:#12251c}
-.pill.warn{color:var(--warn); border-color:#4d3d1f; background:#241d10}
-.pill.err{color:var(--err); border-color:#4d2323; background:#241213}
+.pill.ok{color:var(--ok); border-color:#b7dfc0; background:#e6f4ea}
+.pill.warn{color:var(--warn); border-color:#f0c674; background:#fef7e0}
+.pill.err{color:var(--err); border-color:#f5c0bb; background:#fce8e6}
 .pill.ok .dot{animation:blink 1.6s ease-in-out infinite}
 @keyframes blink{50%{opacity:.35}}
 button{
-  appearance:none; border:1px solid var(--line); background:var(--card,#20272f); color:var(--text);
-  border-radius:14px; padding:15px 20px; font-size:20px; font-weight:800; cursor:pointer;
+  appearance:none; border:1px solid var(--line); background:var(--bg2); color:var(--text);
+  border-radius:8px; padding:15px 20px; font-size:20px; font-weight:500; cursor:pointer;
   min-height:64px; width:100%; font-family:inherit;
 }
 button:active{transform:scale(.98)}
-button.go{background:var(--ok); border-color:var(--ok); color:#062012}
-button.stop{background:transparent; border-color:#4c2a30; color:var(--err)}
+button.go{background:var(--ok); border-color:var(--ok); color:#fff;
+  box-shadow:0 1px 2px rgba(60,64,67,.3),0 1px 3px 1px rgba(60,64,67,.15)}
+button.stop{background:transparent; border-color:#f5c0bb; color:var(--err)}
 button.small{min-height:44px; font-size:16px; padding:10px 14px; width:auto; font-weight:600}
 button:disabled{opacity:.5; cursor:default}
 .spin{display:inline-block; width:16px; height:16px; border:2px solid currentColor;
@@ -90,12 +91,12 @@ button:disabled{opacity:.5; cursor:default}
   align-items:center; justify-content:center; gap:clamp(8px,calc(var(--vh1)*3),24px)}
 #player .art{width:var(--art); height:var(--art); border-radius:50%; display:grid; place-items:center;
   flex:0 0 auto; border:1px solid var(--line); color:var(--sub);
-  background:radial-gradient(circle at 50% 32%,#20272f,#11161c)}
-#player .art.ok{border-color:#274d38; color:var(--ok);
-  background:radial-gradient(circle at 50% 32%,#173221,#0e1f15)}
-#player .art.warn{border-color:#4d3d1f; color:var(--warn);
-  background:radial-gradient(circle at 50% 32%,#2b2413,#15171c)}
-#player .p-status{font-size:var(--status); font-weight:900; line-height:1.2;
+  background:radial-gradient(circle at 50% 32%,#ffffff,#f1f3f4)}
+#player .art.ok{border-color:#b7dfc0; color:var(--ok);
+  background:radial-gradient(circle at 50% 32%,#e6f4ea,#d7ebdd)}
+#player .art.warn{border-color:#f0c674; color:var(--warn);
+  background:radial-gradient(circle at 50% 32%,#fef7e0,#fbeecb)}
+#player .p-status{font-size:var(--status); font-weight:500; line-height:1.2;
   letter-spacing:.5px; color:var(--sub)}
 #player .p-status.ok{color:var(--ok)}
 #player .p-status.warn{color:var(--warn)}
@@ -126,26 +127,28 @@ body.plock>header,body.plock>main{visibility:hidden}
 /* ---------------- 全画面アラート ---------------- */
 /* プレイヤーと同じ考え方: 高さが足りないときは文字・余白・ボタン高を連動して縮める
    (警告は最優先で読ませたいので下限はプレイヤーより甘くしない)。 */
-#alert{position:fixed; inset:0; z-index:60; background:#2a0d10; display:flex;
+#alert{position:fixed; inset:0; z-index:60; background:#fce8e6; display:flex;
   flex-direction:column; align-items:center; justify-content:center; text-align:center;
   padding:clamp(12px,calc(var(--vh1)*3.4),28px) clamp(14px,4vw,20px);
   gap:clamp(8px,calc(var(--vh1)*2.4),18px); overflow:auto}
 #alert .big{font-size:clamp(19px,min(8.7vw,calc(var(--vh1)*6.4)),34px); font-weight:900;
-  line-height:1.35; color:#fff}
-#alert .mid{font-size:clamp(13px,min(5.6vw,calc(var(--vh1)*4.2)),22px); color:#ffd9d9; font-weight:700}
-#alert .contact{font-size:clamp(15px,min(6.7vw,calc(var(--vh1)*4.8)),26px); font-weight:900;
-  background:#3d1317; border:2px solid #7a2a30; border-radius:16px; color:#fff; line-height:1.5;
+  line-height:1.35; color:var(--text)}
+#alert .mid{font-size:clamp(13px,min(5.6vw,calc(var(--vh1)*4.2)),22px); color:#a3231b; font-weight:500}
+#alert .contact{font-size:clamp(15px,min(6.7vw,calc(var(--vh1)*4.8)),26px); font-weight:700;
+  background:#ffffff; border:2px solid #f5c0bb; border-radius:8px; color:var(--text); line-height:1.5;
+  box-shadow:0 1px 2px rgba(60,64,67,.3),0 1px 3px 1px rgba(60,64,67,.15);
   max-width:640px; padding:clamp(9px,calc(var(--vh1)*2.4),18px) clamp(12px,3.4vw,20px)}
-#alert .tech{font-size:13px; color:#e3a9a9; max-width:640px; max-height:26vh; overflow:auto;
-  word-break:break-all; background:#1d090b; border:1px solid #4d2323; border-radius:10px;
+#alert .tech{font-size:13px; color:#3c4043; max-width:640px; max-height:26vh; overflow:auto;
+  word-break:break-all; background:#f8f9fa; border:1px solid var(--line); border-radius:8px;
   padding:10px 12px}
 #alert .btns{display:flex; gap:clamp(8px,calc(var(--vh1)*1.8),12px); flex-wrap:wrap;
   justify-content:center; width:100%; max-width:560px}
 #alert .btns button{flex:1 1 200px; min-height:clamp(46px,calc(var(--vh1)*8),64px);
   font-size:clamp(16px,min(5.6vw,calc(var(--vh1)*3.4)),20px)}
 #toast{position:fixed; left:50%; bottom:calc(24px + env(safe-area-inset-bottom));
-  transform:translateX(-50%); background:#20272f; border:1px solid var(--line); color:var(--text);
-  border-radius:12px; padding:12px 18px; font-size:16px; z-index:70; opacity:0;
+  transform:translateX(-50%); background:#202124; border:0; color:#fff;
+  border-radius:8px; padding:12px 18px; font-size:16px; z-index:70; opacity:0;
+  box-shadow:0 1px 2px rgba(60,64,67,.3),0 1px 3px 1px rgba(60,64,67,.15);
   transition:opacity .25s; pointer-events:none; max-width:90vw}
 #toast.on{opacity:1}
 /* ---------------- 縦が短い環境 (横画面スマホ / 小さなウィンドウ) ------------- */
@@ -156,7 +159,7 @@ body.plock>header,body.plock>main{visibility:hidden}
   header h1{font-size:18px}
   header .meta{font-size:13px}
   main{padding:10px 14px 16px}
-  .card{padding:12px 14px; margin-bottom:10px; border-radius:14px}
+  .card{padding:12px 14px; margin-bottom:10px; border-radius:8px}
   .srv{gap:9px}
   .srv-name{font-size:19px}
   .pill{font-size:15px; padding:5px 13px}
@@ -164,11 +167,19 @@ body.plock>header,body.plock>main{visibility:hidden}
   button{min-height:clamp(46px,calc(var(--vh1)*10),64px);
     font-size:clamp(17px,calc(var(--vh1)*4.4),20px); padding:10px 16px}
 }
+.ic{width:1.05em;height:1.05em;fill:currentColor;flex:none;vertical-align:-.15em}
+.sprite{position:absolute;width:0;height:0;overflow:hidden}
 </style>
 </head>
 <body>
+<svg class="sprite" aria-hidden="true" focusable="false">
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><path d="M6 6h12v12H6z"/></symbol>
+<symbol id="i-alert" viewBox="0 0 24 24"><path d="M1 21h22L12 2 1 21zm12-3h-2v-2h2v2zm0-4h-2v-4h2v4z"/></symbol>
+<symbol id="i-phone" viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></symbol>
+</svg>
 <header class="hidden" id="hdr">
-  <h1>🤖 AI サーバー</h1>
+  <h1>AI サーバー</h1>
   <div class="meta" id="host"></div>
   <button class="small" onclick="doLogout()">ログアウト</button>
 </header>
@@ -205,6 +216,7 @@ function saveFocus(pid) {
   try { sessionStorage.setItem("llm.simple.focus", FOCUS || ""); }
   catch { /* 使えなくても画面自体は動く */ }
 }
+const I0 = n => `<svg class=ic aria-hidden=true><use href=#i-${n} /></svg>`;
 function openPlayer(pid) {
   if (FOCUS === pid) return;
   saveFocus(pid);
@@ -263,15 +275,15 @@ const STATE = {
   running:  ["ok", "稼働中", "そのままお使いいただけます"],
   starting: ["warn", "起動中", "このままお待ちください（1〜2 分かかることがあります）"],
   stopping: ["warn", "停止中", "まもなく止まります"],
-  stopped:  ["", "停止中", "「▶ 起動する」を押すと始まります"],
+  stopped:  ["", "停止中", "「起動する」を押すと始まります"],
 };
 async function boot() {
   let st = null;
   try { st = await api("/api/auth/status"); }
   catch {
     if (LEAVING) return;                       // 401 で / へリダイレクト済み
-    $("#list").innerHTML = '<div class="card muted">⚠ 接続できませんでした。'
-      + '時間をおいて再度お試しください</div>';
+    $("#list").innerHTML = `<div class="card muted">${I0("alert")} 接続できませんでした。`
+      + "時間をおいて再度お試しください</div>";
     setTimeout(boot, 5000);                    // サーバーの一時不通はここで再試行
     return;
   }
@@ -286,7 +298,7 @@ async function tick() {
   try { DATA = await api("/api/simple"); }
   catch (e) {
     if (LEAVING) return;                            // / へ移動中なのでエラーを出さない
-    if (!DATA) $("#list").innerHTML = `<div class="card muted">⚠ ${esc(e.message)}</div>`;
+    if (!DATA) $("#list").innerHTML = `<div class="card muted">${I0("alert")} ${esc(e.message)}</div>`;
     return;
   }
   $("#host").textContent = DATA.hostname || "";
@@ -320,8 +332,8 @@ function render() {
       <div class="pill ${st[0]}"><span class="dot"></span>${
         busy ? '<span class="spin"></span> 処理中…' : st[1]}</div>
       ${live
-        ? `<button class="stop" onclick="event.stopPropagation();stopSrv('${pid}')" ${busy ? "disabled" : ""}>■ 停止する</button>`
-        : `<button class="go" onclick="event.stopPropagation();startSrv('${pid}')" ${busy ? "disabled" : ""}>▶ 起動する</button>`}
+        ? `<button class="stop" onclick="event.stopPropagation();stopSrv('${pid}')" ${busy ? "disabled" : ""}>${I0("stop")} 停止する</button>`
+        : `<button class="go" onclick="event.stopPropagation();startSrv('${pid}')" ${busy ? "disabled" : ""}>${I0("play")} 起動する</button>`}
     </div>`;
   }).join("");
   $("#foot").innerHTML = "カードをタップすると大きく表示します ・ 5 秒ごとに自動更新します"
@@ -352,8 +364,8 @@ function renderPlayer() {
     </div>
     <div class="p-btns">
       ${live
-        ? `<button class="stop" onclick="stopSrv('${pid}')" ${busy ? "disabled" : ""}>■ 停止する</button>`
-        : `<button class="go" onclick="startSrv('${pid}')" ${busy ? "disabled" : ""}>▶ 起動する</button>`}
+        ? `<button class="stop" onclick="stopSrv('${pid}')" ${busy ? "disabled" : ""}>${I0("stop")} 停止する</button>`
+        : `<button class="go" onclick="startSrv('${pid}')" ${busy ? "disabled" : ""}>${I0("play")} 起動する</button>`}
       <button class="back" onclick="closePlayer()">← 一覧に戻る</button>
     </div>`;
   el.classList.remove("hidden");
@@ -363,10 +375,10 @@ function renderPlayer() {
 function alertText(a) {
   const n = a.profile_name || "サーバー";
   if (a.kind === "memory")
-    return ["🚨 このマシンのメモリが不足しています", "サーバーが停止する前に管理者へ連絡してください"];
+    return ["このマシンのメモリが不足しています", "サーバーが停止する前に管理者へ連絡してください"];
   if (a.kind === "lost")
-    return [`🚨 ${n} と通信できません`, "「もう一度起動する」を押してください"];
-  return [`🚨 ${n} が停止しました`, "「もう一度起動する」でも失敗する場合は管理者へ連絡してください"];
+    return [`${n} と通信できません`, "「もう一度起動する」を押してください"];
+  return [`${n} が停止しました`, "「もう一度起動する」でも失敗する場合は管理者へ連絡してください"];
 }
 function renderAlert() {
   const el = $("#alert"), alerts = DATA.alerts || [];
@@ -384,12 +396,12 @@ function renderAlert() {
   if (fresh) { beep(); if (!beep._loop) beep._loop = setInterval(beep, 30000); }
   const a = alerts[0], t = alertText(a);
   el.innerHTML = `
-    <div class="big">${esc(t[0])}</div>
+    <div class="big">${I0("alert")} ${esc(t[0])}</div>
     <div class="mid">${esc(t[1])}</div>
-    ${DATA.contact ? `<div class="contact">📞 ${esc(DATA.contact)}</div>`
+    ${DATA.contact ? `<div class="contact">${I0("phone")} ${esc(DATA.contact)}</div>`
                    : `<div class="mid">周囲の管理者に伝えてください</div>`}
     <div class="btns">
-      ${a.profile_id ? `<button class="go" onclick="startSrv('${esc(a.profile_id)}')">▶ もう一度起動する</button>` : ""}
+      ${a.profile_id ? `<button class="go" onclick="startSrv('${esc(a.profile_id)}')">${I0("play")} もう一度起動する</button>` : ""}
       <button class="small" onclick="dismissAlert()">今は様子を見るだけ</button>
     </div>
     ${a.detail ? `<details style="max-width:640px"><summary class="muted" style="cursor:pointer">管理者用 詳細</summary>
@@ -405,7 +417,7 @@ async function startSrv(pid) {
   try {
     await api("/api/simple/start", { profile_id: pid });
     toast("起動しました — 完了まで 1〜2 分かかることがあります");
-  } catch (e) { toast("⚠ " + e.message); }
+  } catch (e) { toast("エラー: " + e.message); }
   BUSY[pid] = false;
   await tick();
 }
@@ -413,7 +425,7 @@ async function stopSrv(pid) {
   pinFocus();                                 // 停止後も同じ大きな表示に留まる
   BUSY[pid] = true; if (DATA) render();
   try { await api("/api/simple/stop", { profile_id: pid }); toast("停止しました"); }
-  catch (e) { toast("⚠ " + e.message); }
+  catch (e) { toast("エラー: " + e.message); }
   BUSY[pid] = false;
   await tick();
 }
