@@ -19,8 +19,9 @@ body{
   background:var(--bg); color:var(--text);
   font-family:"Google Sans Text",Roboto,"Noto Sans JP","Hiragino Sans",system-ui,-apple-system,sans-serif;
   font-size:14px; line-height:1.5;
-  padding-left:56px; padding-bottom:calc(20px + env(safe-area-inset-bottom));
+  padding-bottom:calc(20px + env(safe-area-inset-bottom));
 }
+body.menu-open{overflow:hidden}   /* ドロワーを開いている間、裏側をスクロールさせない */
 a{color:var(--acc); text-decoration:none}
 header{
   position:sticky; top:0; z-index:20;
@@ -84,21 +85,25 @@ button:disabled{opacity:.45;cursor:default}
 .hrow-act{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:0 13px 12px}
 .hrow-act button{min-height:34px;padding:6px 11px;font-size:12.5px}
 .hrow .logwrap{padding:0 13px 13px}
-/* ---------------- 左サイドバー: ハンバーガーメニュー ---------------- */
+/* ---------------- 左ドロワー: ハンバーガーメニュー (閉じると完全に隠れる) ---------------- */
 nav#sidemen{
-  position:fixed;left:0;top:0;bottom:0;z-index:30;width:56px;
+  position:fixed;left:0;top:0;bottom:0;z-index:30;width:min(268px,84vw);
   background:rgba(255,255,255,.97);backdrop-filter:blur(12px);
   border-right:1px solid var(--line);
   display:flex;flex-direction:column;gap:2px;
   padding:calc(8px + env(safe-area-inset-top)) 8px calc(8px + env(safe-area-inset-bottom));
-  transition:width .22s ease,box-shadow .22s ease;
+  transform:translateX(-100%);visibility:hidden;
+  transition:transform .22s ease,visibility .22s;
 }
-nav#sidemen.open{width:268px;box-shadow:0 0 30px rgba(60,64,67,.2)}
-#menu-btn{width:40px;height:40px;min-height:40px;padding:0;flex:none;
+nav#sidemen.open{transform:none;visibility:visible;box-shadow:0 0 30px rgba(60,64,67,.2)}
+/* ☰ はヘッダー、✕ はドロワーの中。見た目は揃えておく */
+#menu-btn,#menu-close{width:40px;height:40px;min-height:40px;padding:0;flex:none;
   background:transparent;border:0;border-radius:var(--r2);font-size:20px;color:var(--text);justify-content:center}
-#menu-btn:hover{background:var(--card2)}
+#menu-btn:hover,#menu-close:hover{background:var(--card2)}
+.menu-head{display:flex;align-items:center;gap:8px;min-height:40px;padding-left:6px}
+.menu-head .menu-title{font-size:13.5px;font-weight:700;color:var(--sub);letter-spacing:.3px}
+#menu-close{margin-left:auto}
 .menu-items{display:flex;flex-direction:column;gap:2px;margin-top:10px;overflow-x:hidden}
-nav#sidemen:not(.open) .menu-items{display:none}
 nav#sidemen .mitem{
   width:100%;background:transparent;border:0;border-radius:var(--r2);
   min-height:44px;padding:0 10px;justify-content:flex-start;gap:12px;
@@ -366,6 +371,7 @@ button .ic{margin-right:1px}
   </div>
 </div>
 <header>
+  <button id="menu-btn" type="button" aria-label="メニュー" aria-expanded="false" aria-controls="menu-items"><svg class=ic aria-hidden=true><use href=#i-menu /></svg></button>
   <div id="live-dot"></div>
   <h1>LLM Launcher</h1>
   <div id="acct">
@@ -617,8 +623,11 @@ button .ic{margin-right:1px}
   </section>
 </main>
 
-<nav id="sidemen">
-  <button id="menu-btn" aria-label="メニューを開く" aria-expanded="false" aria-controls="menu-items"><svg class=ic aria-hidden=true><use href=#i-menu /></svg></button>
+<nav id="sidemen" aria-label="メインメニュー">
+  <div class="menu-head">
+    <span class="menu-title">メニュー</span>
+    <button id="menu-close" type="button" aria-label="メニューを閉じる"><svg class=ic aria-hidden=true><use href=#i-close /></svg></button>
+  </div>
   <div class="menu-items" id="menu-items">
     <button class="mitem on" data-tab="home" id="mi-home"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-home /></svg></span>ホーム</button>
     <button class="mitem" data-tab="launch"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-rocket /></svg></span>起動</button>
@@ -755,16 +764,15 @@ function startTimers() {
 }
 
 /* ============================================================= side menu (ハンバーガー) */
+/* ☰ はヘッダー、✕ はドロワーの中。閉じるとドロワーは画面の外へ出る (横バーは残らない) */
 function setMenu(open) {
-  const nav = $("#sidemen");
-  nav.classList.toggle("open", open);
+  $("#sidemen").classList.toggle("open", open);
   $("#menu-veil").classList.toggle("on", open);
-  const btn = $("#menu-btn");
-  btn.innerHTML = open ? IC("close") : IC("menu");
-  btn.setAttribute("aria-expanded", open ? "true" : "false");
-  btn.setAttribute("aria-label", open ? "メニューを閉じる" : "メニューを開く");
+  document.body.classList.toggle("menu-open", open);
+  $("#menu-btn").setAttribute("aria-expanded", open ? "true" : "false");
 }
 $("#menu-btn").addEventListener("click", () => setMenu(!$("#sidemen").classList.contains("open")));
+$("#menu-close").addEventListener("click", () => setMenu(false));
 document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => {
   b.addEventListener("click", () => {
     setMenu(false);
