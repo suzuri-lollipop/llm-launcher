@@ -2545,6 +2545,8 @@ function pgMsgHtml(m, i) {
     : (src ? pgMd(src) : (m.streaming ? `<span class="muted">考え中…</span>` : "<i class=\"muted\">(空)</i>"));
   const reason = m.reasoning
     ? `<details class="pg-reason"><summary><svg class=ic aria-hidden=true><use href=#i-chat /></svg> 推論 (${m.reasoning.length.toLocaleString()} 字)</summary><div class="rb">${esc(m.reasoning)}</div></details>` : "";
+  // bits は <svg> を含む HTML 断片。必ず esc せず join すること
+  // (esc するとアイコンが文字列としてベタ表示されていた)。格納値は数値・定数のみ。
   const bits = [];
   if (!me && m.streaming && m._live) {
     // 配信中: 生成速度をリアルタイム表示
@@ -2561,8 +2563,9 @@ function pgMsgHtml(m, i) {
     bits.push(m.stats.secs.toFixed(1) + "s");
     if (m.stats.ttft != null) bits.push("first " + m.stats.ttft.toFixed(2) + "s");
     if (m.usage && m.usage.completion_tokens != null) {
-      const pt = m.usage.prompt_tokens != null ? m.usage.prompt_tokens + "→" : "";
-      bits.push(`${pt}${m.usage.completion_tokens} tok`);
+      // esc を外すためエンジン由来の値も数値に正規化 (文字列が混入してもタグ化しない)
+      const ut = Number(m.usage.completion_tokens), upt = Number(m.usage.prompt_tokens);
+      bits.push((isFinite(upt) ? upt + "→" : "") + (isFinite(ut) ? ut : m.usage.completion_tokens) + " tok");
     } else if (m.stats.tok != null) {
       bits.push(`≈${m.stats.tok} tok`);
     } else {
@@ -2574,7 +2577,7 @@ function pgMsgHtml(m, i) {
   return `<div class="pg-msg ${me ? "me" : "ai"}">
     <div class="who">${esc(me ? "あなた" : (pgSession()?.backend_name || "model"))}<span style="font-weight:400">${t}</span></div>
     ${reason}<div class="pg-body${m.streaming ? " pg-cursor" : ""}">${body}</div>
-    ${bits.length ? `<div class="pg-meta">${bits.map(b => esc(b)).join(" · ")}`
+    ${bits.length ? `<div class="pg-meta">${bits.join(" · ")}`
         + (!me ? `<button class="ghost" style="min-height:0;padding:0 8px;font-size:11px" onclick="pgCopyMsg(${i})">コピー</button>` : "")
         + `</div>` : ""}
   </div>`;
@@ -2965,6 +2968,7 @@ function renderBenchActive(run) {
                  warmup: "ウォームアップ中 (統計外)", measure: "計測中", done: "完了"}[pr.phase] || pr.phase || "";
   const doneNote = pr.phase === "measure"
     ? `リクエスト ${pr.done || 0}/${pr.total} (OK ${pr.ok || 0}${pr.fail ? ` / NG ${pr.fail}` : ""})` : "";
+  // tpsNote は HTML 断片。下位で esc しない (esc すると <svg> がそのまま文字列になる)
   const tpsNote = tps != null ? ` · <svg class=ic aria-hidden=true><use href=#i-bolt /></svg> ${bmTps(tps)} tok/s 累積` : "";
   const modelNote = run.model ? `model: ${run.model}` : bmParamsSummary(run.params || {});
   el.innerHTML = `<div class="card" style="border-color:#c6dafc">
@@ -2977,7 +2981,7 @@ function renderBenchActive(run) {
     <div class="muted mono ellip" style="margin-top:4px;font-size:11px">${esc(modelNote)}</div>
     <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">${chips}</div>
     <div class="meter" style="margin:10px 0 4px"><div class="m-hd"><b>${esc(phase)}</b>
-      <span class="r">${esc(doneNote)}${esc(tpsNote)} · ${bmF1(secs)}s</span></div>
+      <span class="r">${esc(doneNote)}${tpsNote} · ${bmF1(secs)}s</span></div>
       <div class="mbar"><i class="warn" style="width:${pctw}%"></i></div></div>
     ${(run.stages || []).length ? bmStageTable(run.stages) : ""}
   </div>`;
