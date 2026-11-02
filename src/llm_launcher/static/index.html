@@ -30,7 +30,7 @@ header{
   display:flex; align-items:center; gap:10px;
 }
 header h1{font-size:17px; margin:0; letter-spacing:.3px}
-header .meta{margin-left:auto; font-size:11.5px; color:var(--sub); text-align:right; line-height:1.3}
+/* ヘッダ右端の ホスト名/IP・ユーザーバッジ・ログアウト は #acct のアイコン 1 個に集約した */
 #live-dot{width:9px;height:9px;border-radius:50%;background:var(--err);flex:none}
 #live-dot.on{background:var(--ok)}
 main{max-width:920px;margin:0 auto;padding:14px 14px 20px}
@@ -184,7 +184,39 @@ details.adv .inner{padding:0 12px 12px}
   padding:9px 12px;font-size:12.5px;margin-top:10px}
 #login .foot{color:var(--sub);font-size:11px;text-align:center;margin-top:14px;line-height:1.6}
 #login button.primary{width:100%;margin-top:16px;min-height:46px;font-size:15px}
-#hdr-user{display:flex;align-items:center;gap:6px;margin-left:10px;flex:none}
+/* ---------------- 右上: アカウントチップ (1 アイコン + 吹き出し) ----------------
+   アバター 1 個だけ置き、ホスト名 / IP / @ユーザー名 / ロール / ログアウトは
+   クリックで出る吹き出しの中に出す (Google のアカウントチップ相当)。 */
+#acct{position:relative;margin-left:auto;flex:none;display:flex;align-items:center}
+/* 吹き出しの尻尾。#acct-pop は角丸でクリップされるので、親側に描く (open クラスのときだけ出す) */
+#acct::before{content:"";display:none;position:absolute;top:calc(100% + 3px);right:13px;width:11px;height:11px;z-index:1;
+  background:var(--card);border-left:1px solid var(--line);border-top:1px solid var(--line);transform:rotate(45deg)}
+#acct.open::before{display:block}
+#acct-btn{width:40px;height:40px;min-height:40px;padding:0;gap:0;background:var(--card);color:var(--sub);
+  border:1px solid var(--line);border-radius:999px;justify-content:center;overflow:hidden}
+#acct-btn:hover{background:#f1f3f4}
+#acct-btn[aria-expanded=true]{border-color:var(--acc);box-shadow:0 0 0 2px #e8f0fe}
+#acct-avatar{width:30px;height:30px;border-radius:50%;flex:none;display:flex;align-items:center;
+  justify-content:center;background:var(--sub);color:#fff;font-size:12px;font-weight:700;line-height:1;letter-spacing:.2px}
+#acct-avatar .ic{width:17px;height:17px}
+#acct-pop{position:absolute;top:calc(100% + 9px);right:2px;z-index:36;width:min(274px,calc(100vw - 28px));
+  background:var(--card);border:1px solid var(--line);border-radius:12px;text-align:left;overflow:hidden;
+  box-shadow:0 1px 2px rgba(60,64,67,.3),0 2px 6px 2px rgba(60,64,67,.15)}
+.ap-head{display:flex;align-items:center;gap:11px;padding:13px 14px}
+.ap-av{width:38px;height:38px;border-radius:50%;flex:none;display:flex;align-items:center;
+  justify-content:center;background:var(--sub);color:#fff;font-size:16px;font-weight:700}
+.ap-id{min-width:0;flex:1}
+.ap-name{font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ap-sub{font-size:12px;color:var(--sub);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ap-id .badge{margin-top:5px}
+.ap-sep{height:1px;background:var(--line)}
+.ap-kv{display:flex;align-items:baseline;gap:10px;padding:7px 14px;font-size:12.5px}
+.ap-kv .k{color:var(--sub);flex:none}
+.ap-kv .v{margin-left:auto;color:var(--text);overflow-wrap:anywhere;min-width:0;text-align:right}
+.ap-note{padding:0 14px 9px;font-size:11.5px;color:var(--sub);line-height:1.5}
+.ap-act{width:100%;background:transparent;border:0;border-radius:0;color:var(--acc);justify-content:flex-start;
+  gap:10px;min-height:44px;padding:0 14px;font-size:13.5px;font-weight:500}
+.ap-act:hover{background:var(--card2)}
 body.auth-lock{overflow:hidden}
 /* ---------------- ユーザー管理 ---------------- */
 .keyline{display:flex;align-items:center;gap:6px;margin-top:9px;flex-wrap:wrap}
@@ -306,6 +338,7 @@ button .ic{margin-right:1px}
 <symbol id="i-chev_down" viewBox="0 0 24 24"><path d="M16.59 8.59L12 13.17 7.41 8.59 6 10l6 6 6-6z"/></symbol>
 <symbol id="i-phone" viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></symbol>
 <symbol id="i-external" viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></symbol>
+<symbol id="i-logout" viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L16.17 11H9v2h7.17l-.58.58L17 15l4-4-4-4zM5 5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h7v-2H5V5z"/></symbol>
 </svg>
 <div id="login">
   <div class="box">
@@ -335,11 +368,29 @@ button .ic{margin-right:1px}
 <header>
   <div id="live-dot"></div>
   <h1>LLM Launcher</h1>
-  <div class="meta" id="hdr-meta">connecting…</div>
-  <div id="hdr-user" class="hidden">
-    <span class="badge info" id="hdr-user-name"></span>
-    <span class="badge" id="hdr-user-role"></span>
-    <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="logout()">ログアウト</button>
+  <div id="acct">
+    <button id="acct-btn" type="button" aria-haspopup="true" aria-expanded="false" aria-controls="acct-pop"
+            onclick="toggleAcct(event)"><span id="acct-avatar"></span></button>
+    <div id="acct-pop" class="hidden" role="dialog" aria-label="アカウント情報">
+      <div class="ap-head">
+        <span class="ap-av" id="ap-avatar"></span>
+        <div class="ap-id">
+          <div class="ap-name" id="ap-name"></div>
+          <div class="ap-sub" id="ap-sub"></div>
+          <div class="ap-role" id="ap-role"></div>
+        </div>
+      </div>
+      <div class="ap-sep"></div>
+      <div class="ap-kv"><span class="k">ホスト</span><span class="v" id="ap-host"></span></div>
+      <div class="ap-kv"><span class="k">IP</span><span class="v mono" id="ap-ip"></span></div>
+      <div class="ap-note hidden" id="ap-note"></div>
+      <div class="ap-sep hidden" id="ap-menu-sep"></div>
+      <button class="ap-act hidden" id="ap-users" type="button"
+              onclick="closeAcct();switchTab('users')"><svg class=ic aria-hidden=true><use href=#i-users /></svg> ユーザー管理</button>
+      <div class="ap-sep hidden" id="ap-logout-sep"></div>
+      <button class="ap-act" id="ap-logout" type="button"
+              onclick="closeAcct();logout()"><svg class=ic aria-hidden=true><use href=#i-logout /></svg> ログアウト</button>
+    </div>
   </div>
 </header>
 
@@ -598,6 +649,7 @@ const S = {
   sys: undefined,          // /api/system 結果 (undefined=未取得 null=失敗  object=OK)
   editing: null,           // ドラフト: {name,backend,values,on,extra_args,env,cwd,command,custom_only,note}
   hf: undefined,           // HF Hub キャッシュスキャン結果 (遅延取得)
+  hdr: {host:"", ip:""},   // 右上アカウントチップの吹き出しに出すホスト情報 (refresh() が更新)
   openLogs: new Set(), logCursor: {}, logBuf: {},   // logBuf: sid -> 蓄積ログ文字列
   autoScroll: {}, busy: {}, _ssSig: "", _hsSig: "",
   pm: {q:"", sort:"updated", backend:"all", batch:false, sel:new Set()},   // 管理画面の状態
@@ -672,11 +724,12 @@ async function refresh(silent = true) {
     S.state = await api("/api/state");
     $("#live-dot").classList.add("on");
     const sys = S.state.system;
-    $("#hdr-meta").innerHTML = `${esc(sys.hostname)}<br><span class="mono">${esc(sys.ip)}</span>`;
+    S.hdr = { host: sys.hostname, ip: sys.ip };   // 右上の吹き出しに出す (ヘッダにはアイコンだけ)
+    renderAcct();
     renderAll(!silent);
   } catch (e) {
     $("#live-dot").classList.remove("on");
-    $("#hdr-meta").textContent = "接続エラー";
+    S.hdr = { err: true }; renderAcct();          // 接続エラーは吹き出しの中と live-dot の赤で示す
     if (!silent) toast("状態取得に失敗: " + e.message);
   }
 }
@@ -729,6 +782,7 @@ function tabAllowed(tab) {
   return cap ? can(cap) : true;
 }
 function switchTab(tab) {
+  closeAcct();                                    // 吹き出しを開いたままタブを切り替えても残さない
   if (!tabAllowed(tab)) tab = "launch";
   S.tab = tab;
   document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
@@ -794,6 +848,7 @@ function setLoginMode(mode) {
   loginError("");
 }
 function showLogin(msg) {
+  closeAcct();                                    // ログイン画面へ戻るなら吹き出しも閉じる
   setLoginMode(AUTH.needsSetup ? "setup" : "login");
   $("#login").classList.remove("hidden");
   document.body.classList.add("auth-lock");
@@ -849,22 +904,7 @@ function roleBadge(role) {
   return `<span class="badge ${r[1]}">${esc(r[0])}</span>`;
 }
 function applyAuthUi() {
-  const box = $("#hdr-user");
-  const u = AUTH.user;
-  if (u) {
-    box.classList.remove("hidden");
-    // ユーザー名とロールを別バッジにする (表示名を混ぜると「管理者・管理者」のように重複する)
-    $("#hdr-user-name").textContent = "@" + u.username;
-    const role = $("#hdr-user-role");
-    const rb = ROLE_BADGE[u.role] || ["ユーザー", ""];
-    role.textContent = rb[0];
-    role.className = "badge" + (rb[1] ? " " + rb[1] : "");
-    const dn = u.display_name && u.display_name !== u.username ? u.display_name : "";
-    box.title = dn ? `${dn} (@${u.username})` : `@${u.username}`;
-  } else {
-    box.classList.add("hidden");
-    box.title = "";
-  }
+  renderAcct();                                   // 右上はアバター 1 個。名前・ロール等は吹き出しの中
   // ボタン類 (body の no-* クラスと .need-* で一括に隠す)
   const b = document.body.classList;
   b.toggle("no-admin", !AUTH.isAdmin);
@@ -883,6 +923,69 @@ function applyAuthUi() {
   $("#mi-users").classList.toggle("hidden", !AUTH.isAdmin);
   if (!tabAllowed(S.tab)) switchTab("launch");
 }
+/* ---------------- 右上アカウントチップ (ヘッダの情報を 1 アイコンに集約) ----------------
+   以前ヘッダに並べていた ホスト名 / IP / @ユーザー名 / ロール / ログアウト を、アバター
+   1 個の吹き出しにまとめた (Google のアカウントチップ相当)。表示内容は renderAcct() が
+   毎回 DOM を更新する (ログイン状態・ロール・ホスト情報の 3 つが変わりうるため)。 */
+const ROLE_COLOR = { admin: "#8430ce", maintainer: "#1a73e8", user: "#188038" };
+function acctLabel(u) {
+  if (!u) return "";
+  return (u.display_name && u.display_name !== u.username) ? u.display_name : u.username;
+}
+function initialsOf(name) {
+  const s = String(name || "").trim();
+  if (!s) return "?";
+  const parts = s.split(/[\s._\-@/]+/).filter(Boolean);
+  return (parts.length > 1 ? parts[0][0] + parts[1][0] : s.slice(0, 2)).toUpperCase();
+}
+function renderAcct() {
+  const btn = $("#acct-btn"), av = $("#acct-avatar"), pop = $("#acct-pop");
+  if (!btn || !av || !pop) return;
+  const u = AUTH.user;
+  const col = u ? (ROLE_COLOR[u.role] || "var(--acc)") : "var(--sub)";
+  const inner = u ? esc(initialsOf(acctLabel(u))) : IC("user");
+  av.innerHTML = inner; av.style.background = col;
+  $("#ap-avatar").innerHTML = inner; $("#ap-avatar").style.background = col;
+  $("#ap-name").textContent = u ? acctLabel(u) : (AUTH.enabled ? "未ログイン" : "認証を無効にして起動中");
+  $("#ap-sub").textContent = u ? "@" + u.username : "";
+  $("#ap-role").innerHTML = u ? roleBadge(u.role) : "";
+  const h = S.hdr || {};
+  $("#ap-host").textContent = h.err ? "取得失敗" : (h.host || "-");
+  $("#ap-ip").textContent = h.err ? "-" : (h.ip || "-");
+  const note = $("#ap-note");
+  const showNote = !!h.err || !u;
+  note.textContent = h.err
+    ? "状態を取得できません (左上のインジケータが赤です)"
+    : (AUTH.enabled ? "ログインしていないため、ログアウトはできません"
+                    : "ログアウトはありません (--no-auth / LLM_LAUNCHER_AUTH=0 で起動中)");
+  note.classList.toggle("hidden", !showNote);
+  const showLogout = !!u, showUsers = !!AUTH.isAdmin;
+  $("#ap-logout").classList.toggle("hidden", !showLogout);
+  $("#ap-users").classList.toggle("hidden", !showUsers);
+  $("#ap-menu-sep").classList.toggle("hidden", !(showLogout || showUsers));
+  $("#ap-logout-sep").classList.toggle("hidden", !(showLogout && showUsers));
+  btn.title = u ? `${acctLabel(u)} (@${u.username})` : "アカウント";
+}
+function openAcct() {
+  renderAcct();
+  $("#acct").classList.add("open");
+  $("#acct-pop").classList.remove("hidden");
+  $("#acct-btn").setAttribute("aria-expanded", "true");
+}
+function closeAcct() {
+  const wrap = $("#acct"), pop = $("#acct-pop"), btn = $("#acct-btn");
+  if (wrap) wrap.classList.remove("open");
+  if (pop) pop.classList.add("hidden");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+}
+function toggleAcct(ev) {
+  if (ev) ev.stopPropagation();                   // 開いたクリックで外側判定をしない
+  if ($("#acct-pop").classList.contains("hidden")) openAcct(); else closeAcct();
+}
+document.addEventListener("click", e => {
+  const wrap = $("#acct");
+  if (wrap && !wrap.contains(e.target)) closeAcct();
+});
 async function loginSubmit(ev) {
   ev.preventDefault();
   const btn = $("#login-btn"), label = btn.textContent;
@@ -2013,7 +2116,8 @@ async function saveEditor() {
 }
 document.addEventListener("keydown", e => {
   if (e.key !== "Escape") return;
-  if ($("#sidemen").classList.contains("open")) setMenu(false);
+  if (!$("#acct-pop").classList.contains("hidden")) closeAcct();   // 最前面はアカウントの吹き出し
+  else if ($("#sidemen").classList.contains("open")) setMenu(false);
   else if ($("#umodal").style.display === "flex") umClose();
   else closeEditor();
 });
