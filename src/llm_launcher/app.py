@@ -1457,6 +1457,11 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(409, str(e))
         return bench.get(rid) or {"ok": True}
 
+    @app.delete("/api/benchmarks")
+    async def clear_benchmarks() -> dict[str, Any]:
+        # 履歴の一括消去。実行中 / 待機中の run は触らず、完了分だけ消す。
+        return {"ok": True, "removed": bench.clear_all()}
+
     @app.delete("/api/benchmarks/{rid}")
     async def delete_benchmark(rid: str) -> dict[str, Any]:
         try:
@@ -1791,6 +1796,17 @@ def create_app(root: Path) -> FastAPI:
         """
         return FileResponse(STATIC_DIR / "setup.html")
 
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    class NoCacheStatic(StaticFiles):
+        """静的ファイルへ常に Cache-Control: no-cache を付す。JS/CSS は URL に
+        バージョン query が無いため、既定 (ヒューリスティックキャッシュ) だと
+        デプロイ後もブラウザが古い UI を保持して「反映されない」事故になる。
+        no-cache は毎回再検証するだけで、中身が変わらなければ 304 で安い。"""
+
+        async def get_response(self, path: str, scope):  # type: ignore[override]
+            resp = await super().get_response(path, scope)
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+    app.mount("/static", NoCacheStatic(directory=STATIC_DIR), name="static")
 
     return app

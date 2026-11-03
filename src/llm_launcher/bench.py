@@ -34,6 +34,13 @@ CANCEL_JOIN_S = 5.0  # 中断がテスト/UI 上で「即座」とみなせる�
 PROMPT_SEED_GAP = 1_000_003     # ステージ間でプロンプト列をずらす幅
 WARMUP_SEED_OFFSET = 500_000    # warmup は測定本体と別のプロンプト列
 MAX_STAGES = 8                  # 並列度ステージの上限
+# 経時記録 (グラフ用): measure 中この間隔でサンプル点を 1 個積む。上限を超えたら
+# 古い点を等間隔のまま半分に間引き、次のサンプルから間隔を 2 倍にする (段あたりの
+# 記録点数を有界に保ちつつ、長い実行も曲線として重ねられるようにする)。
+SAMPLE_EVERY = 1.0
+MAX_SAMPLES = 180
+MAX_REQS = 256        # フェーズ記録 (reqs) の段あたり保存点数上限 (超えら等間隔間引き)
+MAX_STORE_BYTES = 8_000_000  # bench.json の概算上限 (超えたら古い完了分から整理)
 
 # 生成中の「人間の体感停止」の閾値: ストリームのチャンク間隔がこれを超えたら
 # 1 回と数える (stall_count)。最長停止 (stall_worst_s / gap_max) は閾値と無関係に
@@ -166,12 +173,17 @@ def _first_model(base: str, auth: dict[str, str] | None = None) -> str | None:
 def _one_request(base: str, path: str, payload: dict[str, Any],
                  stream: bool, timeout: float,
                  auth: dict[str, str] | None = None,
-                 stop: threading.Event | None = None) -> dict[str, Any]:
+                 stop: threading.Event | None = None,
+                 live: "dict[str, float] | None" = None) -> dict[str, Any]:
     """OpenAI 互換リクエストを 1 本実行し、所要時間・TTFT・トークン数を返す。
 
     例外は投げず ok/error で結果を返す (ワーカー側を集計しやすくするため)。
     stop は中断シグナル: SSE のイベント境界で見て、立っていれば接続を閉じて
-    `cancelled` を付けて返す (GPU 上に前の負荷を残さないため)。"""
+    `cancelled` を付けて返す (GPU 上に前の負荷を残さないため)。
+    live を渡すと、content が届くたびに est_tokens(piece) を即时加算する
+    (単一書きのスレッド専用スロット)。サンプラーがこの合計の 1 秒あたりの
+    増分を測ることで、「完了時にまとめて確定」ではなく「その秒に実際に生成された
+    トークン」を経時記録できる。"""
     t0 = time.perf_counter()
     req = urllib.request.Request(
         base + path,
@@ -270,6 +282,10 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
             # TTFT は取れない (一括応答なので最初のトークン時刻が存在しない)。
             # ttft=None のまま decode 速度を割らないよう、呼び出し側が除外する。
             _finish_timer()
+            if live is not None:
+                # 非ストリームは「到着」が存在しないので、確定した全部を一度に加算する
+                # (経時グラフ上は完了の瞬間のバースになる — それが実態)
+                live["f"] += int(out) if out is not None else est
             return {"ok": True, "secs": time.perf_counter() - t0, "ttft": None,
                     "out_tokens": int(out) if out is not None else est,
                     "in_tokens": usage.get("prompt_tokens"),
@@ -328,6 +344,10 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
                     piece = ch.get("text") if isinstance(ch.get("text"), str) else ""
                 if piece:
                     t_now = time.perf_counter()
+                    if live is not None:
+                        if live.get("a") is None:
+                            live["a"] = t_now           # フェーズ: 最初のトークン (待ち→デコードの境界)
+                        live["d"] = t_now               # フェーズ: 最後のトークン
                     if ttf is None:
                         ttf = t_now - t0
                     else:
@@ -338,6 +358,8 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
                             stalls += 1
                     last_piece_t = t_now
                     text_parts.append(piece)
+                    if live is not None:
+                        live["f"] += est_tokens(piece)   # 到着した分をその場で数える
             if not chunk:
                 break          # サーバーが閉じた (EOF)
     est = est_tokens("".join(text_parts))
@@ -463,7 +485,7 @@ class BenchManager:
             "params": params,
             "progress": {"stage": 0, "stages": list(params["concurrency"]), "phase": "queued",
                          "done": 0, "total": params["num_prompts"], "ok": 0, "fail": 0,
-                         "out_tokens": 0, "elapsed": 0},
+                         "out_tokens": 0, "dec_sum": 0.0, "dec_n": 0, "elapsed": 0},
             "stages": [],
         }
         try:
@@ -515,7 +537,8 @@ class BenchManager:
     async def _one_in_thread(base: str, path: str, body: dict[str, Any], stream: bool,
                              timeout: float, auth: dict[str, str] | None,
                              stop: threading.Event,
-                             cancelled: "Callable[[], bool] | None" = None) -> dict[str, Any]:
+                             cancelled: "Callable[[], bool] | None" = None,
+                             live: "dict[str, float] | None" = None) -> dict[str, Any]:
         """_one_request を 1 本のスレッドで実行して結果を返す。
 
         stop は中断シグナル (ソケット shutdown で読みを起こす)。cancelled は
@@ -528,7 +551,7 @@ class BenchManager:
 
         def run() -> None:
             try:
-                q.put(_one_request(base, path, body, stream, timeout, auth, stop))
+                q.put(_one_request(base, path, body, stream, timeout, auth, stop, live=live))
             except BaseException as e:  # noqa: BLE001
                 q.put(e)
 
@@ -588,18 +611,34 @@ class BenchManager:
 
     def _trim(self) -> None:
         def _t(lst: list) -> None:
-            if len(lst) <= MAX_RUNS:
-                return
-            keep = {r["id"] for r in sorted(lst, key=lambda r: r.get("created_at") or 0,
-                                            reverse=True)[:MAX_RUNS]}
-            keep |= {r["id"] for r in lst if r.get("status") in ("queued", "running")}
-            gone = [r["id"] for r in lst if r["id"] not in keep]
-            lst[:] = [r for r in lst if r["id"] in keep]
-            # 消えた run は以後の _save で書き戻さない (進行中の task がまだ
-            # その dict を持っていても、履歴に復活させない)
-            self._dead.update(gone)
-            for rid in gone:
+            if len(lst) > MAX_RUNS:
+                keep = {r["id"] for r in sorted(lst, key=lambda r: r.get("created_at") or 0,
+                                                reverse=True)[:MAX_RUNS]}
+                keep |= {r["id"] for r in lst if r.get("status") in ("queued", "running")}
+                gone = [r["id"] for r in lst if r["id"] not in keep]
+                lst[:] = [r for r in lst if r["id"] in keep]
+                # 消えた run は以後の _save で書き戻さない (進行中の task がまだ
+                # その dict を持っていても、履歴に復活させない)
+                self._dead.update(gone)
+                for rid in gone:
+                    self._last_save.pop(rid, None)
+            # 経時記録 (series) で 1 件あたりの大きさがぶれるため、件数に加えて
+            # 概算シリアライズサイズでも抑える (古い完了分から落とす)
+            total = len(json.dumps(lst, ensure_ascii=False))
+            old = [r for r in sorted(lst, key=lambda r: r.get("created_at") or 0)
+                   if r.get("status") not in ("queued", "running")
+                   and r.get("id") != self.active_id]
+            dead: set[str] = set()
+            for r in old:
+                if total <= MAX_STORE_BYTES:
+                    break
+                rid = r.get("id")
+                dead.add(rid)
+                total -= len(json.dumps(r, ensure_ascii=False)) + 6
+                self._dead.add(rid)
                 self._last_save.pop(rid, None)
+            if dead:
+                lst[:] = [r for r in lst if r.get("id") not in dead]
         self.store.mutate(_t)
 
     def _save(self, run: dict[str, Any], force: bool = False) -> None:
@@ -612,6 +651,29 @@ class BenchManager:
         self._last_save[rid] = t
         with contextlib.suppress(OSError):
             self.store.save()
+
+    def clear_all(self) -> int:
+        """完了 / 失敗 / 中断 / lost の履歴を一括削除して削除件数を返す。
+
+        実行中・待機中の run はメモリ上のタスクが保持し続けているので残す
+        (消すと _save で復活し、進捗の書き込み先も失われる)。"""
+        removed: list[str] = []
+
+        def _c(lst: list) -> None:
+            keep: list = []
+            for r in lst:
+                rid = r.get("id")
+                if r.get("status") in ("queued", "running") or rid == self.active_id:
+                    keep.append(r)
+                else:
+                    removed.append(rid)
+            lst[:] = keep
+            self._dead.update(removed)            # 生き返り (保存) 防止は delete と同じ
+            for rid in removed:
+                self._last_save.pop(rid, None)
+
+        self.store.mutate(_c)
+        return len(removed)
 
     def _progress(self, run: dict[str, Any], **kw: Any) -> None:
         run["progress"].update(kw)
@@ -780,7 +842,7 @@ class BenchManager:
         conc = max(1, min(int(conc), 64))
         progress = run["progress"]
         self._progress(run, stage=si, phase="warmup", done=0, total=n, ok=0, fail=0,
-                       out_tokens=0, elapsed=0)
+                       out_tokens=0, dec_sum=0.0, dec_n=0, elapsed=0)
         self._save(run, force=True)
 
         def make_body(i: int, warmup: bool = False) -> dict[str, Any]:
@@ -800,7 +862,7 @@ class BenchManager:
         aborted = {"v": False}
         t0 = time.perf_counter()
         self._progress(run, stage=si, phase="measure", done=0, total=n, ok=0, fail=0,
-                       out_tokens=0, elapsed=0)
+                       out_tokens=0, dec_sum=0.0, dec_n=0, elapsed=0)
         self._save(run, force=True)
         # 測定用の stop は必ず新しい Event にする。_parallel (warmup) が finally で
         # 自分の stop を立てるので、それを共有すると測定開始時点で「中断済み」になる。
@@ -809,6 +871,47 @@ class BenchManager:
         # stop は中断シグナル: ワーカーは待機中に、実行中のリクエストはソケットの
         # shutdown 監視スレッドがこれを見て、どちらも即座に抜ける。
         stop = threading.Event()
+
+        # 経時記録: measure 中 1 秒ごとにサンプル点を積み、完了時に stage へ写す。
+        # 各リクエストは自分のスロット (slots の 1 要素) をストリーム到着刻みに
+        # 増やし、サンプラーはその合計の 1 秒あたり増分 = agg (生成 tok/s 合算) を
+        # 記録する。従来の win (完了確定分の累積差分) は旧データ互換のため残す。
+        series: list[dict[str, Any]] = []
+        slots: list[dict[str, float]] = []   # リクエスト 1 本 = 1 スロット (単一書き手)
+        live = {"inf": 0}                    # インフライト数 (ワーカーが更新)
+        run["progress"]["series"] = series
+        iv = {"v": SAMPLE_EVERY, "dec": False}
+
+        def _snap(sl: dict[str, Any]) -> dict[str, Any]:
+            # フェーズ記録 (段開始からの秒)。未完成のキーは None のまま = ライブで伸びる行
+            z = lambda v: round(v - t0, 2) if isinstance(v, float) else None
+            return {"s": z(sl.get("s")), "a": z(sl.get("a")), "d": z(sl.get("d")),
+                    "e": z(sl.get("e")), "n": int(sl.get("f") or 0)}
+
+        async def _sampler() -> None:
+            last_t, last_tok, last_gen = 0.0, 0, 0.0
+            while True:
+                await asyncio.sleep(iv["v"])
+                p = run["progress"]
+                t = time.perf_counter() - t0
+                tok = int(p.get("out_tokens") or 0)
+                gen = sum(s["f"] for s in slots)   # 届いたトークンの総量 (ストリーム実測)
+                dt = max(t - last_t, 0.2)
+                dn = int(p.get("dec_n") or 0)
+                series.append({"t": round(t, 2), "done": int(p.get("done") or 0),
+                               "ok": int(p.get("ok") or 0), "fail": int(p.get("fail") or 0),
+                               "tok": tok, "inf": live["inf"],
+                               "win": round((tok - last_tok) / dt, 1),
+                               "agg": round((gen - last_gen) / dt, 1),
+                               "avg": round(tok / max(t, 0.2), 1),
+                               "dec": round(float(p.get("dec_sum") or 0.0) / dn, 1) if dn else None})
+                last_t, last_tok, last_gen = t, tok, gen
+                p["reqs"] = [_snap(sl) for sl in slots]   # ライブのフェーズタイムライン
+                if len(series) > MAX_SAMPLES:
+                    del series[1::2]         # 偶数番目を残して等間隔のまま半分に間引く
+                    iv["v"] *= 2.0
+                    iv["dec"] = True
+                self._save(run)              # throttle 越しに 2 秒刻みでディスクへ
 
         async def worker(k: threading.Event = stop) -> None:
             while True:
@@ -822,8 +925,18 @@ class BenchManager:
                     return
                 # リクエストは 1 本ずつ daemon スレッドで走らせる。中断は
                 # _one_in_thread 側が run のキャンセル集合も見て打ち切る。
-                r = await self._one_in_thread(base, path, make_body(i), stream, timeout, auth, k,
-                                              lambda: self._cancelled(run))
+                live["inf"] += 1
+                # フェーズ追跡スロット: s=送信 a=最初のトークン d=最後のトークン
+                # e=確定(ストリームクローズ/応答読み切り) f=届いたトークン推定。
+                # 1 スロットの各キーは単一の書き手だけが更新する (s/e=worker, a/d/f=読み手)。
+                slot: dict[str, Any] = {"f": 0.0, "s": time.perf_counter()}
+                slots.append(slot)
+                try:
+                    r = await self._one_in_thread(base, path, make_body(i), stream, timeout, auth, k,
+                                                  lambda: self._cancelled(run), live=slot)
+                finally:
+                    live["inf"] -= 1
+                    slot["e"] = time.perf_counter()
                 # 中断後に戻ってきた結果 (打ち切り or たまたま完了) は集計に入れない。
                 # ここを素通りさせると「中断したのに ok=N」が保存される。
                 if r.get("cancelled") or self._cancelled(run):
@@ -836,17 +949,31 @@ class BenchManager:
                 if r.get("ok"):
                     prog["ok"] += 1
                     prog["out_tokens"] += int(r.get("out_tokens") or 0)
+                    # decode tok/s のライブ値: 確定値と同じ「リクエスト毎の算術平均」を
+                    # 完了のつど積む (dec_sum/dec_n → stage 終了時の decode_tps.avg に収束)。
+                    # 出力 tok/s (累積) は prefill 待ち込みで過小になるため、
+                    # UI の主指標はこっち (生成中の実速度) を見せる
+                    dt = (r.get("secs") or 0.0) - (r.get("ttft") or 0.0)
+                    if r.get("ttft") is not None and dt > 0.05 and r.get("out_tokens"):
+                        prog["dec_sum"] = float(prog.get("dec_sum") or 0.0) + int(r["out_tokens"]) / dt
+                        prog["dec_n"] = int(prog.get("dec_n") or 0) + 1
                 else:
                     prog["fail"] += 1
                 prog["elapsed"] = time.perf_counter() - t0
                 self._save(run)
 
+        samp = asyncio.create_task(_sampler())
         try:
-            await asyncio.gather(*(worker() for _ in range(conc)))
-        except asyncio.CancelledError:
-            # shutdown からのキャンセル: インフライトも一緒に畳んでから抜ける
-            stop.set()
-            raise
+            try:
+                await asyncio.gather(*(worker() for _ in range(conc)))
+            except asyncio.CancelledError:
+                # shutdown からのキャンセル: インフライトも一緒に畳んでから抜ける
+                stop.set()
+                raise
+        finally:
+            samp.cancel()
+            run["progress"].pop("series", None)   # ライブ用の写しは stage 側に残す
+            run["progress"].pop("reqs", None)
         wall = time.perf_counter() - t0
 
         okres = [r for r in results if r.get("ok")]
@@ -892,4 +1019,11 @@ class BenchManager:
             "stall_count": stall_count,
             "stall_threshold_s": STALL_S,
             "errors": errors,
+            # 経時記録 (グラフ用)。samples 間隔は iv["v"] (上限で間引くと拡大)。
+            "series": series,
+            "series_decimated": iv["dec"],
+            # リクエスト単位のフェーズ記録 (スイムレーン用)。send→first→last→確定。
+            # 多すぎる場合は等間隔に間引く (reqs_truncated)
+            "reqs": [_snap(sl) for sl in slots[::max(1, -(-len(slots) // MAX_REQS))]],
+            "reqs_truncated": len(slots) > MAX_REQS,
         }

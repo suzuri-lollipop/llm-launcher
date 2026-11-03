@@ -48,7 +48,9 @@ const BM_INPUTS = ["bm-profile","bm-conc","bm-num","bm-warm","bm-inlen","bm-outl
 function bmInit() {
   let d = {};
   try { d = JSON.parse(localStorage.getItem(BM_KEY) || "{}") || {}; } catch { d = {}; }
-  S.bench = { runs: [], active: null, busy: false, open: "", _pSig: "", _bh: "", _recv: 0 };
+  // cmp: 比較に選んだ run id (選択順 = 比較表の基準順), cmpMetric / cmpConc: 比較パネルの選択
+  S.bench = { runs: [], active: null, busy: false, open: "", _pSig: "", _bh: "", _recv: 0,
+              cmp: [], cmpMetric: "decode", cmpConc: null, moreCols: false };
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") {
     if (el.type === "checkbox") el.checked = !!v; else el.value = v; } };
   set("#bm-profile", d.profile); set("#bm-conc", d.conc); set("#bm-num", d.num);
@@ -122,12 +124,13 @@ async function bmStart() {
   finally { d.busy = false; bmPoll(true); }
 }
 async function bmPoll(force) {
-  try {
-    const j = await api("/api/benchmarks");
-    S.bench.runs = j.runs || []; S.bench.active = j.active; S.bench._recv = Date.now() / 1000;
-    bmBadge();
-    if (S.tab === "bench" || force) renderBench();
-  } catch { /* ignore */ }
+  let j;
+  try { j = await api("/api/benchmarks"); }
+  catch { return; }                               // 取得失敗は次のポーリングで追いつく (静默)
+  S.bench.runs = j.runs || []; S.bench.active = j.active; S.bench._recv = Date.now() / 1000;
+  bmBadge();
+  try { if (S.tab === "bench" || force) renderBench(); }
+  catch (e) { console.error("render error:", e); }  // 描画例外を握り潰すと「ページが沈む」
 }
 function bmBadge() {
   const nb = $("#nb-bench"); if (!nb) return;
@@ -143,8 +146,23 @@ async function bmCancel(id) {
 }
 async function bmDelete(id) {
   if (!confirm("このベンチ履歴を削除しますか?")) return;
-  try { await api(`/api/benchmarks/${id}`, {method: "DELETE"}); toast("削除しました"); bmPoll(true); }
+  try {
+    await api(`/api/benchmarks/${id}`, {method: "DELETE"});
+    S.bench.cmp = (S.bench.cmp || []).filter(x => x !== id);   // 消えた id の残選択を掃除
+    toast("削除しました"); bmPoll(true);
+  }
   catch (e) { toast("失敗: " + e.message); }
+}
+async function bmClearAll() {
+  const done = (S.bench.runs || []).filter(r => r.id !== S.bench.active);
+  if (!done.length) return toast("消せる履歴がありません");
+  if (!confirm(`履歴 ${done.length} 件をまとめて消します。実行中のベンチは残ります。よろしいですか?`)) return;
+  try {
+    const j = await api("/api/benchmarks", {method: "DELETE"});
+    S.bench.cmp = [];
+    toast(`履歴を ${j.removed} 件消しました`);
+    bmPoll(true);
+  } catch (e) { toast("失敗: " + e.message); }
 }
 function bmExport(id) {
   const r = S.bench.runs.find(x => x.id === id);
@@ -189,6 +207,225 @@ function bmStallCell(st) {
   const color = w <= th ? "var(--ok)" : (w <= 2.0 ? "var(--warn)" : "var(--err)");
   return `<td><b style="color:${color}">${bmF2(w)}s</b></td>`;
 }
+/* ---------------- 比較 / チャート (追加依存なしの SVG だけ) ---------------- */
+const BM_COLORS = ["var(--acc)", "var(--warn)", "var(--ok)", "var(--err)",
+                   "var(--purple)", "var(--maya)", "var(--strata)", "var(--sub)"];
+const BM_CMP_MAX = 6;   // 重ね描きが多すぎると判読不能になるので上限
+const BM_METRICS = {    // 比較表の指標: up = 大きいほど良い (先頭 = 既定)
+  decode:{lab: "decode tok/s", get: s => s.decode_tps && s.decode_tps.avg, fmt: bmTps, up: true},
+  out:   {lab: "出力 tok/s", get: s => s.out_tps, fmt: bmTps, up: true},
+  tot:   {lab: "合計 tok/s", get: s => s.total_tps, fmt: bmTps, up: true},
+  rps:   {lab: "req/s", get: s => s.rps, fmt: bmF2, up: true},
+  ttft:  {lab: "TTFT avg", get: s => s.ttft && s.ttft.avg, fmt: v => bmF2(v) + "s", up: false},
+  latp:  {lab: "遅延 p99", get: s => s.latency && s.latency.p99, fmt: v => bmF2(v) + "s", up: false},
+  stall: {lab: "最大停止", get: s => s.stall_worst_s, fmt: v => bmF2(v) + "s", up: false},
+};
+function bmWhen(r) {
+  const t = r.finished_at || r.created_at;
+  if (!t) return "-";
+  const d = new Date(t * 1000), p = n => String(n).padStart(2, "0");
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function bmRunShort(r) { return `${(r.profile_name || "?").slice(0, 16)} ${bmWhen(r)}`; }
+function bmSeriesPts(st) {
+  // series → [[t, 生成 tok/s]]。新記録の agg は「その 1 秒に実際に生成されたトークン
+  // 合計」(ストリーム到着を刻み計測 → 1 秒差分)。記録更新前の古いデータは
+  // 完了確定ベースの win/inf (リクエスト当たり) にフォールバック
+  const s = st.series || [];
+  const step = Math.max(1, Math.ceil(s.length / 240));
+  const y = p => p.agg != null ? p.agg
+    : (p.inf > 0 && p.win != null ? p.win / p.inf
+       : p.dec != null ? p.dec : (p.win != null ? p.win : p.avg));
+  const pts = [];
+  for (let i = 0; i < s.length; i += step) pts.push([s[i].t, y(s[i])]);
+  const last = s[s.length - 1];
+  if (last && pts.length && (s.length - 1) % step) pts.push([last.t, y(last)]);
+  return pts;
+}
+/* 折れ線チャートを SVG 文字列で生成 (viewBox スケールで幅可変)。
+   ser = [{pts:[[x,y]...], color, label, wide?}] / opts = {ylab, h, xNum} */
+function bmSvgChart(ser, opts) {
+  opts = opts || {};
+  const W = 640, H = opts.h || 170, L = 46, R = 10, T = 12, B = 20;
+  const all = [];
+  ser.forEach(s => (s.pts || []).forEach(p => { if (p && isFinite(p[0]) && isFinite(p[1])) all.push(p); }));
+  if (all.length < 2) return "";
+  const x0 = opts.xNum ? Math.min(...all.map(p => p[0])) : 0;
+  const x1 = Math.max(x0 + 1, Math.max(...all.map(p => p[0])));
+  let y1 = Math.max(...all.map(p => p[1]));
+  if (!(y1 > 0)) y1 = 1;
+  const pw = Math.pow(10, Math.floor(Math.log10(y1)));
+  const nice = [1, 1.5, 2, 2.5, 5, 10].find(k => k * pw >= y1) * pw;   // 目盛りは 1/2/5 系に丸める
+  const X = x => L + (x - x0) / (x1 - x0) * (W - L - R);
+  const Y = y => H - B - Math.min(y / nice, 1) * (H - T - B);
+  const fmtV = v => v >= 100 ? String(Math.round(v)) : (+v).toFixed(v >= 10 ? 0 : 1);
+  const g = [];
+  [0, 0.25, 0.5, 0.75, 1].forEach(f => {
+    const y = +Y(nice * f).toFixed(1);
+    g.push(`<line x1="${L}" x2="${W - R}" y1="${y}" y2="${y}" style="stroke:var(--line)" stroke-width="1"${f ? ' stroke-dasharray="2 4"' : ""}/>`);
+    if (f !== 0.25 && f !== 0.75) g.push(`<text x="${L - 4}" y="${y + 3}" text-anchor="end" font-size="9" style="fill:var(--sub)">${fmtV(nice * f)}</text>`);
+  });
+  let xt;
+  if (opts.xNum) {
+    const u = [...new Set(all.map(p => p[0]))].sort((a, b) => a - b);
+    xt = u.filter((v, i) => u.length <= 8 || i % Math.ceil(u.length / 8) === 0 || i === u.length - 1);
+  } else xt = [0, (x0 + x1) / 2, x1];
+  xt.forEach(v => g.push(`<text x="${X(v).toFixed(1)}" y="${H - 6}" text-anchor="middle" font-size="9" style="fill:var(--sub)">${opts.xNum ? v + "p" : Math.round(v) + "s"}</text>`));
+  if (opts.ylab) g.push(`<text x="4" y="9" font-size="9" style="fill:var(--sub)">${esc(opts.ylab)}</text>`);
+  const paths = ser.map(s => {
+    const pts = (s.pts || []).filter(p => p && isFinite(p[0]) && isFinite(p[1]));
+    if (pts.length < 2) return "";
+    const d = pts.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+    const e = pts[pts.length - 1];
+    return `<path d="${d}" fill="none" style="stroke:${s.color}" stroke-width="${s.wide ? 2.3 : 1.6}" stroke-linejoin="round" stroke-linecap="round"><title>${esc(s.label || "")}</title></path>` +
+      `<circle cx="${X(e[0]).toFixed(1)}" cy="${Y(e[1]).toFixed(1)}" r="2.6" style="fill:${s.color}"/>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" role="img">${g.join("")}${paths}</svg>`;
+}
+function bmLegend(ser) {
+  return `<div class="bm-lgd">${ser.map(s => `<span><i style="background:${s.color}"></i>${esc(s.label || "")}</span>`).join("")}</div>`;
+}
+/* リクエスト単位のフェーズ・スイムレーン (ガント)。
+   reqs = [{s,a,d,e,n}] — s=送信 a=最初のトークン d=最後のトークン e=確定 n=トークン数
+   (段開始からの秒。None=未達)。行の重なりが同時実走、琥珀の長さが待ち (送信→最初の
+   トークン = サーバー側キュー+プレフィル込み)、緑がデコード、灰色は確定処理。
+   nowSec 指定 (ライブ) では未確定の行を現在まで延ばす。 */
+function bmPhaseSvg(reqs, nowSec) {
+  const rows = (reqs || []).filter(r => r && r.s != null).sort((x, y) => x.s - y.s).slice(0, 60);
+  if (!rows.length) return "";
+  const endOf = r => r.e != null ? r.e : (r.d != null ? r.d : (r.a != null ? r.a : r.s));
+  const maxT = Math.max(nowSec || 0, ...rows.map(endOf)) + 0.4;
+  const W = 640, L = 8, R = 8, T = 4, rowH = 12, gp = 3, B = 16;
+  const H = T + rows.length * (rowH + gp) + B;
+  const X = t => L + Math.max(0, Math.min(t, maxT)) / maxT * (W - L - R);
+  const f2 = v => (Math.round(v * 100) / 100).toFixed(2);
+  const body = rows.map((r, i) => {
+    const y = T + i * (rowH + gp);
+    const rect = (t0, t1, col, title, op) =>
+      t1 - t0 > 0.005 ? `<rect x="${X(t0).toFixed(1)}" y="${y}" width="${Math.max(0.6, X(t1) - X(t0)).toFixed(1)}" height="${rowH}" rx="2" style="fill:${col}"${op ? ` opacity="${op}"` : ""}><title>${esc(title)}</title></rect>` : "";
+    const live = r.e == null, till = live ? Math.max(nowSec || r.s, endOf(r)) : r.e;
+    let tip = "";
+    const segs = [];
+    if (r.a == null) {
+      if (!live) segs.push(rect(r.s, till, "#94a3b8", "一括応答 (stream なし / 最初のトークン不明)"));
+      else segs.push(rect(r.s, till, "var(--warn)", "最初のトークン待ち (プレフィル)…", ".8"));
+      tip = live ? "最初のトークン待ち…" : "一括応答";
+    } else {
+      segs.push(rect(r.s, r.a, "var(--warn)", `待ち/プレフィル ${f2(r.a - r.s)}s`));
+      if (r.d != null) {
+        const ds = Math.max(r.d - r.a, 0.05), rate = r.n / ds;
+        segs.push(rect(r.a, r.d, "var(--ok)", `デコード ${f2(ds)}s ${r.n}tok (${f2(rate)} tok/s)`));
+        if (r.e != null && r.e - r.d > 0.01) segs.push(rect(r.d, r.e, "#94a3b8", `確定 (クローズ) ${f2(r.e - r.d)}s`));
+        tip = `待ち ${f2(r.a - r.s)}s · デコード ${f2(ds)}s ${r.n}tok (${f2(rate)} tok/s)`;
+      } else {
+        segs.push(rect(r.a, till, "var(--ok)", "デコード中…", ".8"));
+        tip = `待ち ${f2(r.a - r.s)}s · デコード中 ${r.n}tok`;
+      }
+    }
+    return `<g><title>#${i + 1} ${esc(tip)}</title>` +
+      rect(0, maxT, "var(--line)", `#${i + 1} ${tip}`, ".25") + segs.join("") + `</g>`;
+  }).join("");
+  const axis = [0, maxT / 2, maxT].map(v =>
+    `<text x="${X(v).toFixed(1)}" y="${H - 4}" text-anchor="middle" font-size="9" style="fill:var(--sub)">${Math.round(v)}s</text>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" role="img">${body}${axis}</svg>`;
+}
+function bmPhaseBlock(title, reqs, nowSec, truncated) {
+  if (!(reqs || []).length) return "";
+  return `<div class="row" style="gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
+      <b style="font-size:13px">${esc(title)}</b>
+      <span class="bm-lgd"><span><i style="background:var(--warn)"></i>待ち / プレフィル</span>` +
+      `<span><i style="background:var(--ok)"></i>デコード</span><span><i style="background:#94a3b8"></i>確定</span></span></div>` +
+    `<div class="bm-chart" style="margin-top:4px">${bmPhaseSvg(reqs, nowSec)}</div>` +
+    `<div class="muted" style="font-size:11px">各行 = リクエスト 1 本 (上から送信順)。琥珀 = 送信 → 最初のトークン (サーバー側のキュー積み込み + プレフィル込みの待ち)、緑 = デコード、灰色 = 応答クローズ。行の重なり = 同時に走っていた区間。行にホバーで内訳${truncated ? " · 多いため等間隔に間引いて表示" : ""}</div>`;
+}
+/* 実行中カードのライブチャート: 完了段の series に実行中段を重ねる (強調描画) */
+function bmLiveChart(run) {
+  const pr = run.progress || {};
+  const act = run.status === "running" || run.status === "queued";
+  const done = (run.stages || []).filter(s => (s.series || []).length >= 2);
+  const ser = done.map((s, i) => ({color: BM_COLORS[i % BM_COLORS.length], label: `${s.concurrency}p 完了`, pts: bmSeriesPts(s)}));
+  if (act && (pr.series || []).length >= 2)
+    ser.push({color: BM_COLORS[(pr.stage || 0) % BM_COLORS.length],
+              label: `${(pr.stages || [])[pr.stage] || "?"}p 計測中`, pts: bmSeriesPts({series: pr.series}), wide: true});
+  if (!ser.length) {
+    return (run.stages || []).length && !act
+      ? `<div class="muted" style="font-size:11px;margin-top:6px">※ この履歴には経時記録がありません (記録機能の追加前の実行です)</div>` : "";
+  }
+  return `<div class="bm-chart">${bmSvgChart(ser, {ylab: "tok/s", h: 150})}${bmLegend(ser)}` +
+    `<div class="muted" style="font-size:11px">経過秒に対する生成トークン/s (全並列リクエスト合算。ストリーム到着を 1 秒刻みで実測)。強調 = 実行中の段 · 記録更新前の古い履歴はリクエスト当たり値</div></div>`;
+}
+function bmStageOf(r, conc) { return (r.stages || []).find(s => s.concurrency === conc) || null; }
+function bmDeltaCell(v, b, up) {
+  if (v == null || b == null || !b) return "";
+  const d = (v - b) / Math.abs(b) * 100;
+  if (!isFinite(d) || Math.abs(d) < 0.05) return "";
+  const good = d > 0 ? up : !up;
+  return ` <span style="color:var(--${good ? "ok" : "err"});font-size:10.5px">${d > 0 ? "+" : ""}${Math.abs(d) >= 10 ? Math.round(d) : d.toFixed(1)}%</span>`;
+}
+/* 比較パネル: 選択中の実行を重ねる。折れ線 (並列度 vs 出力) + 経時オーバーレイ + 指標表 */
+function bmCmpPanel(runs) {
+  const d = S.bench;
+  d.cmp = (d.cmp || []).filter(id => runs.some(r => r.id === id));   // 削除された id を掃除
+  if (!d.cmp.length) return "";
+  const sel = d.cmp.map(id => runs.find(r => r.id === id)).filter(r => r && (r.stages || []).length);
+  if (!sel.length) return "";
+  const col = i => BM_COLORS[i % BM_COLORS.length];
+  const concs = [...new Set(sel.flatMap(r => (r.stages || []).map(s => s.concurrency)))].sort((a, b) => a - b);
+  if (!concs.length) return "";
+  const conc = concs.includes(+d.cmpConc) ? +d.cmpConc : concs[concs.length - 1];   // 既定は最負荷段
+  const mk = BM_METRICS[d.cmpMetric] ? d.cmpMetric : "decode", M = BM_METRICS[mk];
+  const mSel = `<select onchange="bmCmpMetric(this.value)" style="width:130px">` +
+    Object.keys(BM_METRICS).map(k => `<option value="${k}"${k === mk ? " selected" : ""}>${BM_METRICS[k].lab}</option>`).join("") + `</select>`;
+  const base = sel[0];
+  const rows = concs.map(c => {
+    const bs = bmStageOf(base, c), bv = bs ? M.get(bs) : null;
+    const vals = sel.map(r => { const st = bmStageOf(r, c); return st ? M.get(st) : null; });
+    const nn = vals.filter(v => v != null);
+    const best = nn.length > 1 ? (M.up ? Math.max(...nn) : Math.min(...nn)) : null;
+    return `<tr><td>${c}p</td>` + vals.map((v, i) =>
+      `<td${v != null && v === best ? ' style="font-weight:700"' : ""}>${v == null ? "-" : M.fmt(v)}${i ? bmDeltaCell(v, bv, M.up) : ""}</td>`).join("") + `</tr>`;
+  }).join("");
+  const tbl = `<div class="bm-wrap" data-scrollkey="cmp:tbl"><table class="bm"><tr><th>並列度</th>` +
+    sel.map((r, i) => `<th style="text-align:center;color:${col(i)}">${esc(bmRunShort(r))}</th>`).join("") +
+    `</tr>${rows}</table></div>` +
+    `<div class="muted" style="font-size:11px;margin-top:4px">Δ = 基準 (${esc(bmRunShort(base))}) 比。太字 = その並列度で最良</div>`;
+  // 並列度特性カーブも decode 主指標 (その実行に decode が無い = 非 stream なら出力で代替)
+  const sweep = sel.map((r, i) => ({color: col(i), label: bmRunShort(r),
+    pts: (r.stages || []).map(s => { const d = s.decode_tps && s.decode_tps.avg; const v = d != null ? d : s.out_tps; return v != null ? [s.concurrency, +v] : null; })
+      .filter(Boolean).sort((a, b) => a[0] - b[0])}))
+    .filter(s => s.pts.length > 1);
+  const ts = sel.map((r, i) => { const st = bmStageOf(r, conc); return {color: col(i), label: `${bmRunShort(r)} (${conc}p)`, pts: st ? bmSeriesPts(st) : []}; })
+    .filter(s => s.pts.length >= 2);
+  const noSeries = sel.length - ts.length;
+  const cSel = `<div class="row" style="gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+      <b style="font-size:13px">時間経過</b>
+      <label style="font-size:12px">並列度 <select onchange="bmCmpConc(this.value)" style="width:90px">${concs.map(c => `<option value="${c}"${c === conc ? " selected" : ""}>${c}p</option>`).join("")}</select></label>
+      <span class="muted" style="font-size:11px">毎秒生成されたトークン/s (全並列合算・実測) · 各段の開始時刻に重ね描き · 記録更新前の古い実行はリクエスト当たり値</span></div>`;
+  return `<div class="card bm-cmp">
+    <div class="row"><b style="font-size:14px">結果比較 (${sel.length} 件)</b><span class="grow"></span>
+      <button class="ghost" onclick="bmCmpClear()">選択を解除</button></div>
+    ${sweep.length > 1 ? `<div class="bm-chart">${bmSvgChart(sweep, {ylab: "tok/s", xNum: true})}${bmLegend(sweep)}<div class="muted" style="font-size:11px">並列度に対する確定値の decode tok/s avg (非 stream の実行は出力 tok/s。段の区切りでガタつかない全体像)</div></div>` : ""}
+    ${cSel}
+    ${ts.length ? `<div class="bm-chart">${bmSvgChart(ts, {ylab: "tok/s"})}${bmLegend(ts)}</div>`
+                : `<div class="muted" style="font-size:12px;margin-top:4px">この並列度の経時記録がありません (記録機能追加前の履歴です)。数値比較は下の表でできます</div>`}
+    ${noSeries && ts.length ? `<div class="muted" style="font-size:11px">※ ${noSeries} 件はこの並列度の経時記録なし</div>` : ""}
+    <div class="row" style="gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
+      <b style="font-size:13px">比較指標</b>${mSel}
+      <span class="muted" style="font-size:11px">同じ並列度のステージを横並びで</span></div>
+    ${tbl}
+  </div>`;
+}
+function bmCmpToggle(id) {
+  const d = S.bench; d.cmp = d.cmp || [];
+  const i = d.cmp.indexOf(id);
+  if (i >= 0) d.cmp.splice(i, 1);
+  else { if (d.cmp.length >= BM_CMP_MAX) return toast(`比較は最大 ${BM_CMP_MAX} 件までです`); d.cmp.push(id); }
+  renderBench();
+}
+function bmCmpClear() { S.bench.cmp = []; renderBench(); }
+function bmCmpMetric(v) { S.bench.cmpMetric = v; renderBench(); }
+function bmCmpConc(v) { S.bench.cmpConc = +v; renderBench(); }
+function bmMoreCols() { S.bench.moreCols = !S.bench.moreCols; renderBench(); }
 /* key = 再描画後に横スクロール位置と details の開閉を復元するための安定キー
    (実行中は "a:<run id>"、履歴は "k:<run id>"。data-logkey とは別接頭辞にする)。
    .bm-wrap は overflow-x:auto の横スクロール欄なので、key を忘れると 2.5 秒ポーリング
@@ -198,18 +435,24 @@ function bmStageTable(stages, key) {
   const th = (stages.find(s => s && s.stall_threshold_s != null) || {}).stall_threshold_s || 0.5;
   // 全ステージで stall が測れていない = stream OFF 等 (古い履歴は 0 件扱いしない)
   const anyStall = stages.some(s => s && (s.stall_worst_s != null || s.stall_threshold_s != null));
-  return `<div class="bm-wrap" data-scrollkey="${esc(key)}"><table class="bm"><tr>` +
-    `<th>並列度</th><th>OK</th><th>req/s</th><th>出力 tok/s</th><th>合計 tok/s</th>` +
-    `<th>TTFT avg</th><th>TTFT p99</th><th>遅延 p50</th><th>遅延 p99</th><th>decode tok/s</th>` +
+  // 補助列 (req/s・合計・p50) は既定たたむ: 12 列を横スクロールさせないと
+  // 本体の数字が読めないほど詰まっていた対策。.bm-x + data-x で CSS が隠す。
+  // decode tok/s は利用者に直結する体感速度なので既定表示のまま (比較指標にも収録)
+  const X = !!S.bench.moreCols;
+  return `<div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap;align-items:center">
+      <button class="ghost" style="min-height:28px;font-size:12px" onclick="bmMoreCols()">${X ? "▾ 補助列を下げる" : "▸ 補助列 (req/s・合計 tok/s・遅延 p50)"}</button>
+      <span class="muted" style="font-size:11px">先頭列は固定 / 表は左右にスクロールできます</span></div>
+    <div class="bm-wrap" data-scrollkey="${esc(key)}"><table class="bm" data-x="${X ? 1 : 0}"><tr>` +
+    `<th>並列度</th><th>OK</th><th class="bm-x">req/s</th><th title="生成開始後のチャンク間隔から算出した生成速度 (stream ON のみ)。主指標">decode tok/s</th><th>出力 tok/s</th><th class="bm-x">合計 tok/s</th>` +
+    `<th>TTFT avg</th><th>TTFT p99</th><th class="bm-x">遅延 p50</th><th>遅延 p99</th>` +
     `<th title="生成開始後、チャンクが最も長く途切れた秒数 (ステージ中の全リクエストのワースト)">最大停止</th>` +
     `<th title="${th}s 以上の停止が発生した延べ回数 (全リクエスト合計)">停止数</th></tr>` +
     stages.map(st => `<tr>
       <td>${st.concurrency}p</td>
       <td>${st.ok}/${st.ok + st.fail}${st.aborted ? " <svg class=ic aria-hidden=true><use href=#i-stop /></svg>" : ""}</td>
-      <td>${bmF2(st.rps)}</td><td><b>${bmTps(st.out_tps)}</b></td><td>${bmTps(st.total_tps)}</td>
+      <td class="bm-x">${bmF2(st.rps)}</td><td><b>${bmTps(st.decode_tps && st.decode_tps.avg)}</b></td><td>${bmTps(st.out_tps)}</td><td class="bm-x">${bmTps(st.total_tps)}</td>
       <td>${bmF2(st.ttft && st.ttft.avg)}s</td><td>${bmF2(st.ttft && st.ttft.p99)}s</td>
-      <td>${bmF2(st.latency && st.latency.p50)}s</td><td>${bmF2(st.latency && st.latency.p99)}s</td>
-      <td>${bmTps(st.decode_tps && st.decode_tps.avg)}</td>` +
+      <td class="bm-x">${bmF2(st.latency && st.latency.p50)}s</td><td>${bmF2(st.latency && st.latency.p99)}s</td>` +
       bmStallCell(st) +
       `<td>${st.stall_count == null ? "-" : st.stall_count + "回"}</td></tr>`).join("") +
     `</table></div>` +
@@ -266,9 +509,16 @@ function renderBenchActive(run) {
   const pctw = pr.phase === "measure" ? Math.min(100, (pr.done || 0) / total * 100)
              : (pr.phase === "warmup" ? 4 : 0);
   const tps = pr.phase === "measure" && secs > 0.5 ? (pr.out_tokens || 0) / secs : null;
+  // 主指標は decode tok/s (確定値と同じ「リクエスト毎の算術平均」が最初の完了以降刻々と収束)。
+  // 完了 0 件のうちは出力累積を「計測中」明示で出し、欲しがられる数字を黙って消さない
+  const dec = (pr.dec_n || 0) > 0 ? (pr.dec_sum || 0) / pr.dec_n : null;
   const chips = (pr.stages || []).map((c, i) => {
     const st = (run.stages || [])[i];
-    if (st) return `<span class="badge ok" title="${st.ok} req / ${bmF1(st.wall_secs)}s">${c}p ✓ ${bmTps(st.out_tps)} t/s</span>`;
+    // st は「完了済み段」にしか存在しない (pr.stages は全予定並列度)。実行中・待機
+    // の段では undefined なので、参照は必ず st の存在を確認した後で行うこと
+    // (先に st.xxx と触ると TypeError → 画面全体が落ちる)。
+    if (st) { const d = st.decode_tps && st.decode_tps.avg;
+      return `<span class="badge ok" title="${st.ok} req / ${bmF1(st.wall_secs)}s · ${d != null ? "decode" : "出力"}">${c}p ✓ ${bmTps(d != null ? d : st.out_tps)} t/s</span>`; }
     if (i === pr.stage && (run.status === "running" || run.status === "queued"))
       return `<span class="badge warn"><span class="dot"></span>${c}p 実行中</span>`;
     return `<span class="badge">${c}p 待機</span>`;
@@ -278,7 +528,8 @@ function renderBenchActive(run) {
   const doneNote = pr.phase === "measure"
     ? `リクエスト ${pr.done || 0}/${pr.total} (OK ${pr.ok || 0}${pr.fail ? ` / NG ${pr.fail}` : ""})` : "";
   // tpsNote は HTML 断片。下位で esc しない (esc すると <svg> がそのまま文字列になる)
-  const tpsNote = tps != null ? ` · <svg class=ic aria-hidden=true><use href=#i-bolt /></svg> ${bmTps(tps)} tok/s 累積` : "";
+  const tpsNote = dec != null ? ` · <svg class=ic aria-hidden=true><use href=#i-bolt /></svg> decode <b>${bmTps(dec)}</b> tok/s (完了分平均)`
+    : tps != null ? ` · <svg class=ic aria-hidden=true><use href=#i-bolt /></svg> ${bmTps(tps)} tok/s 出力 (decode は最初の完了から)` : "";
   const modelNote = run.model ? `model: ${run.model}` : bmParamsSummary(run.params || {});
   el.innerHTML = `<div class="card" style="border-color:#c6dafc">
     <div class="row">
@@ -292,6 +543,8 @@ function renderBenchActive(run) {
     <div class="meter" style="margin:10px 0 4px"><div class="m-hd"><b>${esc(phase)}</b>
       <span class="r">${esc(doneNote)}${tpsNote} · ${bmF1(secs)}s</span></div>
       <div class="mbar"><i class="warn" style="width:${pctw}%"></i></div></div>
+    ${bmLiveChart(run)}
+    ${(pr.reqs || []).length ? bmPhaseBlock("フェーズ (ライブ)", pr.reqs, secs) : ""}
     ${(run.stages || []).length ? bmStageTable(run.stages, "a:" + run.id) : ""}
   </div>`;
   logScrollBack(el, _ls);
@@ -306,17 +559,30 @@ function renderBenchHistory() {
   }
   // スクロール中は組み直しを後回し (摘まみを離してしまう)。枠が空のときは必ず描く
   if (uiScrolling() && el.childElementCount) { deferRender("bm-hist", renderBenchHistory); return; }
-  const html = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
+  const nSel = (S.bench.cmp || []).length;
+  const html = `<div class="row" style="margin-top:18px;align-items:center;flex-wrap:wrap">
+      <h2 class="view-title" style="margin:0">履歴 (${runs.length})</h2><span class="grow"></span>
+      ${nSel ? `<button class="ghost" onclick="bmCmpClear()">比較解除 (${nSel})</button>` : ""}
+      <button class="ghost danger" title="完了済みの履歴をまとめて消します (実行中は残りません)" onclick="bmClearAll()"><svg class=ic aria-hidden=true><use href=#i-trash /></svg> 履歴をクリア</button>
+    </div>` +
+    bmCmpPanel(runs) +
+    runs.map(r => {
     const open = S.bench.open === r.id;
-    const best = Math.max(0, ...(r.stages || []).map(s => s.out_tps || 0));
-    return `<div class="card">
+    // 代表値も decode 優先 (無い = 非 stream なので出力 peak にフォールバック)
+    const hasDec = (r.stages || []).some(s => s.decode_tps && s.decode_tps.avg != null);
+    const best = Math.max(0, ...(r.stages || []).map(s => {
+      const v = hasDec ? (s.decode_tps && s.decode_tps.avg) : s.out_tps;
+      return v || 0;
+    }));
+    return `<div class="card bm-run" data-run="${esc(r.id)}">
       <div class="row">
+        <label class="bm-ck" title="比較に選択"><input type="checkbox"${S.bench.cmp.includes(r.id) ? " checked" : ""} onchange="bmCmpToggle('${r.id}')"></label>
         ${bmStatusBadge(r)}
         <b class="grow ellip" style="font-size:14.5px;cursor:pointer" onclick="bmToggle('${r.id}')">${esc(r.profile_name)}</b>
         <span class="chip ${esc(r.backend)}">${esc(r.backend_name)}</span>
       </div>
       <div class="muted" style="margin-top:5px;font-size:12px">${esc(bmParamsSummary(r.params || {}))}
-        ${(r.stages || []).length ? ` · peak 出力 <b style="color:var(--text)">${bmTps(best)}</b> tok/s` : ""}
+        ${(r.stages || []).length ? ` · peak ${hasDec ? "decode" : "出力"} <b style="color:var(--text)">${bmTps(best)}</b> tok/s` : ""}
         ${r.error ? ` · <span style="color:var(--err)">${esc(String(r.error).slice(0, 90))}</span>` : ""}
         · ${r.finished_at ? fmtAgo(r.finished_at) : "-"}</div>
       <div class="row" style="margin-top:8px">
@@ -327,6 +593,7 @@ function renderBenchHistory() {
         <button class="ghost danger" onclick="bmDelete('${r.id}')">削除</button>
       </div>
       ${open && (r.stages || []).length ? bmStageTable(r.stages, "k:" + r.id) : ""}
+      ${open ? (r.stages || []).map(st => bmPhaseBlock(`フェーズ (${st.concurrency}p)`, st.reqs, st.wall_secs, st.reqs_truncated)).join("") : ""}
       ${open ? `<div class="muted mono" style="margin-top:6px;font-size:11px;overflow-wrap:anywhere">
         model: ${esc(r.model || "-")} · session: ${esc(r.session_id || "-")}${r.auto_started ? " (自動起動)" : ""}${r.stopped_after ? " · 停止済み" : ""}${r.port ? ` · :${r.port}` : ""}</div>` : ""}
       ${open && r.stop_error ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--err)">サーバーの自動停止に失敗: ${esc(r.stop_error)}</div>` : ""}

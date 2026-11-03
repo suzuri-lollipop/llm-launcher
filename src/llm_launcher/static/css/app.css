@@ -284,6 +284,18 @@ table.bm{border-collapse:collapse;width:100%;font-size:12.5px;white-space:nowrap
 table.bm th,table.bm td{padding:6px 9px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums}
 table.bm th:first-child,table.bm td:first-child{text-align:left}
 table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
+/* 先頭列 (並列度) を固定: 横スクロール後も「どの行か」を見失わない (border-collapse 対策に box-shadow) */
+table.bm th:first-child,table.bm td:first-child{position:sticky;left:0;background:var(--card);z-index:1;box-shadow:inset -1px 0 0 var(--line)}
+/* 補助列 (req/s ほか) はボタンで開閉 (data-x=0 で CSS が隠す) */
+table.bm[data-x="0"] .bm-x{display:none}
+/* 経時チャート: SVG は viewBox スケールで親幅に追随 */
+.bm-chart{margin-top:8px}
+.bm-chart svg{display:block;width:100%;height:auto}
+.bm-lgd{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:11px;color:var(--sub);margin-top:2px}
+.bm-lgd i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.bm-cmp{border-color:#c6dafc}
+.bm-ck{display:flex;align-items:center}
+.bm-ck input{accent-color:var(--acc);width:15px;height:15px;cursor:pointer}
 .nbadge.run{background:var(--acc);color:#fff}
 /* ---------------- ロール権限で隠す要素 (キーは rbac.CAPS / can() と対応) ---------------- */
 body.no-edit .need-edit,body.no-bench .need-bench,body.no-cal .need-cal,body.no-oom .need-oom,
