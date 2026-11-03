@@ -10,24 +10,30 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import functools
 import hashlib
 import json
 import math
+import queue as _queue
 import random
 import re
+import socket
+import threading
 import time
 import urllib.error
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import Any, Callable
 
 from .backends import api_key_from_argv
+from .oom import MemoryGuardError
 from .process import VIA_BENCH
 from .store import JsonStore, new_id, now
 
 MAX_RUNS = 50        # 履歴として保持する最大件数 (完了分のみ整理)
 SAVE_THROTTLE = 2.0  # 進行状況の永続化間隔 (秒)
+CANCEL_JOIN_S = 5.0  # 中断がテスト/UI 上で「即座」とみなせる上限 (秒)
+PROMPT_SEED_GAP = 1_000_003     # ステージ間でプロンプト列をずらす幅
+WARMUP_SEED_OFFSET = 500_000    # warmup は測定本体と別のプロンプト列
+MAX_STAGES = 8                  # 並列度ステージの上限
 
 # 生成中の「人間の体感停止」の閾値: ストリームのチャンク間隔がこれを超えたら
 # 1 回と数える (stall_count)。最長停止 (stall_worst_s / gap_max) は閾値と無関係に
@@ -43,7 +49,41 @@ class _Cancelled(Exception):
     """キャンセル検出 (内部シグナル)。"""
 
 
-# ------------------------------------------------------------------ prompt
+# ------------------------------------------------------------------ 実走の排他
+
+
+class ExclusiveLock:
+    """同じマシンの実走 (ベンチ / キャリブレーション) を 1 本に制限するロック。
+
+    ベンチとキャリブレーションは同じ GPU を使い、しかもキャリブレーションは対象
+    プロファイルのサーバーを止めてエンジンを起動するため、重なると双方の結果が
+    壊れる (README の「同時実走は 1 件」はベンチ同士にしか効いていなかった)。
+    owner はロック自身が持つ — 各 manager が別々に owner を持つと、共有ロックの
+    取り合いで「自分が取った」と誤認するため。"""
+
+    __slots__ = ("_rl", "owner")
+
+    def __init__(self) -> None:
+        self._rl = threading.RLock()
+        self.owner: str = ""            # "" = 空き / "bench:<profile>" / "calibration"
+
+    def acquire(self, owner: str) -> bool:
+        if self.owner:
+            return False
+        if not self._rl.acquire(blocking=False):
+            return False
+        if self.owner:                  # 取るまでの間に誰かが入った
+            self._rl.release()
+            return False
+        self.owner = owner
+        return True
+
+    def release(self) -> None:
+        if not self.owner:
+            return
+        self.owner = ""
+        with contextlib.suppress(RuntimeError):
+            self._rl.release()
 
 _WORD_BANK = (
     "the quick brown fox jumps over lazy dogs while a quiet system measures token "
@@ -125,10 +165,13 @@ def _first_model(base: str, auth: dict[str, str] | None = None) -> str | None:
 
 def _one_request(base: str, path: str, payload: dict[str, Any],
                  stream: bool, timeout: float,
-                 auth: dict[str, str] | None = None) -> dict[str, Any]:
+                 auth: dict[str, str] | None = None,
+                 stop: threading.Event | None = None) -> dict[str, Any]:
     """OpenAI 互換リクエストを 1 本実行し、所要時間・TTFT・トークン数を返す。
 
-    例外は投げず ok/error で結果を返す (ワーカー側を集計しやすくするため)。"""
+    例外は投げず ok/error で結果を返す (ワーカー側を集計しやすくするため)。
+    stop は中断シグナル: SSE のイベント境界で見て、立っていれば接続を閉じて
+    `cancelled` を付けて返す (GPU 上に前の負荷を残さないため)。"""
     t0 = time.perf_counter()
     req = urllib.request.Request(
         base + path,
@@ -140,7 +183,47 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
     )
 
     def _fail(msg: str) -> dict[str, Any]:
+        _finish_timer()
         return {"ok": False, "error": msg[:300], "secs": time.perf_counter() - t0}
+
+    def _stopped() -> bool:
+        return stop is not None and stop.is_set()
+
+    timer = None
+    # 中断時に shutdown するソケットを監視スレッドへ渡す口。
+    # 接続前は socketpair のダミー、接続後は resp のソケットを [0] に入れる
+    # (urlopen の timeout は 1 回の recv にしか効かないため、shutdown しないと
+    #  サーバーがトークンを止めたまま request_timeout まで固まる)。
+    abort_sock: list[socket.socket] = list(socket.socketpair())
+    timer_stop: threading.Event | None = None     # 監視スレッド専用の停止シグナル
+
+    def _finish_timer() -> None:
+        """監視スレッドを畳む (呼び出し側の stop は立てない — 成功でも「中断」扱いになる)。"""
+        if timer is not None and timer_stop is not None:
+            timer_stop.set()
+            timer.join(timeout=0.2)
+        with contextlib.suppress(OSError):
+            abort_sock[0].close()
+            abort_sock[1].close()
+
+    if stop is not None and not stop.is_set():
+        timer_stop = threading.Event()
+
+        def _watch(stop: threading.Event = stop,
+                   done: threading.Event = timer_stop,
+                   sockbox: list = abort_sock) -> None:
+            # stop (中断要求) か done (このリクエストの終了) のどちらかまで待つ。
+            # どちらも既定引数で束縛する — 同じ関数が連続で呼ばれたときに、前の
+            # 監視スレッドが後の呼び出しの stop を見てしまう事故を避ける。
+            while not stop.is_set() and not done.wait(0.02):
+                pass
+            if stop.is_set():
+                # 監視スレッド自身は resp を知らない — 接続できた側が
+                # sockbox[0] に実ソケットを入れて渡す (接続前の中断に対応)。
+                with contextlib.suppress(Exception):
+                    sockbox[0].shutdown(socket.SHUT_RDWR)
+        timer = threading.Thread(target=_watch, name="bench-abort", daemon=True)
+        timer.start()
 
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)
@@ -151,6 +234,13 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
         return _fail(f"HTTP {e.code} {snippet}".strip())
     except OSError as e:
         return _fail(f"{type(e).__name__}: {e}")
+    with contextlib.suppress(Exception):
+        abort_sock[0].close()
+        abort_sock[0] = resp.fp.raw._sock    # 以後の中断はこのソケットを shutdown する
+    # 監視スレッドが abort しても urlopen は例外にならない (接続確立後)。
+    # ここで止まっていたら、以降の読みは必ず失敗するので待たずに戻る。
+    if stop is not None and stop.is_set():
+        return {**_fail("中断によりリクエストを打ち切りました"), "cancelled": True}
 
     ttf: float | None = None
     usage: dict[str, Any] = {}
@@ -161,6 +251,7 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
     last_piece_t: float | None = None
     gap_max: float | None = None
     stalls = 0
+    cancelled = False
     with resp:
         ctype = (resp.headers.get("Content-Type") or "").lower()
         if not stream or "text/event-stream" not in ctype:
@@ -176,53 +267,94 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
                    + (msg.get("reasoning_content") or msg.get("reasoning") or ""))
             est = est_tokens(txt)
             out = usage.get("completion_tokens")
+            # TTFT は取れない (一括応答なので最初のトークン時刻が存在しない)。
+            # ttft=None のまま decode 速度を割らないよう、呼び出し側が除外する。
+            _finish_timer()
             return {"ok": True, "secs": time.perf_counter() - t0, "ttft": None,
                     "out_tokens": int(out) if out is not None else est,
                     "in_tokens": usage.get("prompt_tokens"),
                     "gap_max": None, "stalls": 0,
                     "estimated": "completion_tokens" not in usage or "prompt_tokens" not in usage}
-        for raw in resp:  # SSE 行読み (タイムアウトはソケット読み取りに適用)
-            line = raw.strip()
-            if not line.startswith(b"data:"):
-                continue
-            data = line[5:].strip()
-            if data == b"[DONE]":
+        # SSE を「改行までのデータ」単位で読む。
+        # - `for line in resp` (io のバッファ経由) はサーバーが接続を閉じるまで返らない
+        # - resp.readline() は読み込みの途中で blocking に入ると、残りの行がバッファに
+        #   あってもソケットに何か届くまで返らない (大きなストリームで中断できない)
+        # ため、HTTPResponse にラップされる前の生ソケットから読み、行は自前で分割する。
+        # shutdown (中断) で recv は即座に EOF を返し、届いている行は処理してから抜ける。
+        sock = resp.fp.raw._sock
+        buf = b""
+        cancelled = False
+        done = False
+        while not done and not cancelled:
+            if _stopped():
+                cancelled = True
                 break
+            chunk = b""
             try:
-                evt = json.loads(data.decode("utf-8", "replace"))
-            except (json.JSONDecodeError, UnicodeDecodeError):
-                continue
-            if isinstance(evt.get("usage"), dict):
-                usage = evt["usage"]
-            ch = (evt.get("choices") or [{}])[0] if evt.get("choices") else {}
-            delta = ch.get("delta") if isinstance(ch.get("delta"), dict) else None
-            if delta is not None:
-                piece = (delta.get("content") or delta.get("reasoning_content")
-                         or delta.get("reasoning") or "")
-            else:
-                piece = ch.get("text") if isinstance(ch.get("text"), str) else ""
-            if piece:
-                t_now = time.perf_counter()
-                if ttf is None:
-                    ttf = t_now - t0
+                chunk = sock.recv(65536)
+            except OSError:
+                # タイムアウト (request_timeout 経過) や shutdown による中断
+                if _stopped():
+                    cancelled = True
+                    break
+                raise
+            if not chunk:
+                # EOF: サーバーが閉じた、または中断で shutdown した。中断なら
+                # 「完了」ではなく cancelled として扱う (統計に完了扱いで入らないよう)
+                cancelled = _stopped()
+                break
+            buf += chunk
+            *lines, buf = buf.split(b"\n")
+            for raw in lines:
+                line = raw.strip()
+                if not line.startswith(b"data:"):
+                    continue
+                data = line[5:].strip()
+                if data == b"[DONE]":
+                    done = True
+                    break
+                try:
+                    evt = json.loads(data.decode("utf-8", "replace"))
+                except (json.JSONDecodeError, UnicodeDecodeError):
+                    continue
+                if isinstance(evt.get("usage"), dict):
+                    usage = evt["usage"]
+                ch = (evt.get("choices") or [{}])[0] if evt.get("choices") else {}
+                delta = ch.get("delta") if isinstance(ch.get("delta"), dict) else None
+                if delta is not None:
+                    piece = (delta.get("content") or delta.get("reasoning_content")
+                             or delta.get("reasoning") or "")
                 else:
-                    gap = t_now - (last_piece_t if last_piece_t is not None else t_now)
-                    if gap_max is None or gap > gap_max:
-                        gap_max = gap
-                    if gap >= STALL_S:
-                        stalls += 1
-                last_piece_t = t_now
-                text_parts.append(piece)
+                    piece = ch.get("text") if isinstance(ch.get("text"), str) else ""
+                if piece:
+                    t_now = time.perf_counter()
+                    if ttf is None:
+                        ttf = t_now - t0
+                    else:
+                        gap = t_now - (last_piece_t if last_piece_t is not None else t_now)
+                        if gap_max is None or gap > gap_max:
+                            gap_max = gap
+                        if gap >= STALL_S:
+                            stalls += 1
+                    last_piece_t = t_now
+                    text_parts.append(piece)
+            if not chunk:
+                break          # サーバーが閉じた (EOF)
     est = est_tokens("".join(text_parts))
     out = usage.get("completion_tokens")
     out = int(out) if out is not None else est
     if not out and est:
         out = est
-    return {"ok": True, "secs": time.perf_counter() - t0, "ttft": ttf,
-            "out_tokens": out, "in_tokens": usage.get("prompt_tokens"),
-            "gap_max": round(gap_max, 4) if gap_max is not None else None,
-            "stalls": stalls,
-            "estimated": "completion_tokens" not in usage or "prompt_tokens" not in usage}
+    _finish_timer()
+    res = {"ok": True, "secs": time.perf_counter() - t0, "ttft": ttf,
+           "out_tokens": out, "in_tokens": usage.get("prompt_tokens"),
+           "gap_max": round(gap_max, 4) if gap_max is not None else None,
+           "stalls": stalls,
+           "estimated": "completion_tokens" not in usage or "prompt_tokens" not in usage}
+    if cancelled:
+        # 中断で途中終了したリクエストは統計 (tok/s) に混ぜない
+        res["cancelled"] = True
+    return res
 
 
 # ------------------------------------------------------------------ stats
@@ -261,17 +393,39 @@ class BenchManager:
         self._cancel: set[str] = set()
         self._tasks: dict[str, asyncio.Task] = {}
         self._last_save: dict[str, float] = {}
+        self._dead: set[str] = set()     # 履歴整理で消えた run の id (以後保存しない)
+        # 同じマシン (GPU) を独占する他の実走との排他。キャリブレーションは
+        # エンジンを起動して GPU を独占するので、ベンチと重なると互いの結果が壊れる。
+        # app.py が CalibrationManager へ同じロックを渡す。
+        self.exclusive = ExclusiveLock()
+
+    @property
+    def exclusive_owner(self) -> str:
+        return self.exclusive.owner
 
     # ------------------------------------------------------------ public
 
     def on_startup(self) -> None:
-        """launcher 再起動で実行中だったジョブは実体を失っているので印を付ける。"""
+        """launcher 再起動で実行中だったジョブは実体を失っているので印を付ける。
+
+        ベンチのために自動起動したサーバーが動きっぱなしで残ると、次に計測したときに
+        前の設定のサーバーを測ってしまう (自動停止の意思が失われる) ため、
+        auto_started のセッションがまだ生きていれば stopped_after の代わりに
+        「停止できなかった / 手動で止めてください」を理由に残す。停止そのものは
+        非同期処理なので on_startup では印だけ付ける。"""
         changed = False
         for r in self.store.load():
             if r.get("status") in ("running", "queued"):
                 r["status"] = "lost"
                 r["error"] = "llm-launcher の再起動中に実行が中断されました"
                 r["finished_at"] = r.get("finished_at") or now()
+                if r.get("auto_started") and not r.get("stopped_after"):
+                    sid = r.get("session_id")
+                    sess = self.manager.sessions.get(sid) if sid else None
+                    if sess and sess.get("status") in ("running", "starting", "stopping"):
+                        r["error"] += (" / 自動起動したサーバーが残っています "
+                                       "(必要ならサーバータブで停止してください)")
+                        r["server_left_running"] = True
                 changed = True
         if changed:
             self.store.save()
@@ -286,6 +440,9 @@ class BenchManager:
                     backend_name: str) -> dict[str, Any]:
         if self.active_id:
             raise BenchError("他のベンチマークが実行中です。完了を待つか取り消してください")
+        if not self.claim_exclusive(f"bench:{profile['id']}"):
+            raise BenchError("キャリブレーションが実行中です。完了を待つか中断してください"
+                             " (同じ GPU を使うため同時に実走できません)")
         run = {
             "id": new_id("b"),
             "created_at": now(),
@@ -302,17 +459,29 @@ class BenchManager:
             "port": None,
             "auto_started": False,
             "stopped_after": False,
+            "stop_error": "",
             "params": params,
             "progress": {"stage": 0, "stages": list(params["concurrency"]), "phase": "queued",
                          "done": 0, "total": params["num_prompts"], "ok": 0, "fail": 0,
                          "out_tokens": 0, "elapsed": 0},
             "stages": [],
         }
-        self.store.mutate(lambda lst: lst.append(run))
-        self._trim()
-        self.active_id = run["id"]
-        self._tasks[run["id"]] = asyncio.create_task(self._job(run, profile, params))
+        try:
+            self.store.mutate(lambda lst: lst.append(run))
+            self._trim()
+            self.active_id = run["id"]
+            self._tasks[run["id"]] = asyncio.create_task(self._job(run, profile, params))
+        except BaseException:
+            self.release_exclusive()
+            raise
         return run
+
+    def claim_exclusive(self, owner: str) -> bool:
+        """このマシンの実走 (ベンチ / キャリブレーション) を 1 本に制限する。"""
+        return self.exclusive.acquire(owner)
+
+    def release_exclusive(self) -> None:
+        self.exclusive.release()
 
     def cancel(self, rid: str) -> None:
         run = self.get(rid)
@@ -331,6 +500,8 @@ class BenchManager:
 
         def _d(lst: list) -> None:
             lst[:] = [r for r in lst if r["id"] != rid]
+        self._dead.add(rid)
+        self._last_save.pop(rid, None)
         self.store.mutate(_d)
 
     async def shutdown(self) -> None:
@@ -340,6 +511,81 @@ class BenchManager:
 
     # ------------------------------------------------------------- internals
 
+    @staticmethod
+    async def _one_in_thread(base: str, path: str, body: dict[str, Any], stream: bool,
+                             timeout: float, auth: dict[str, str] | None,
+                             stop: threading.Event,
+                             cancelled: "Callable[[], bool] | None" = None) -> dict[str, Any]:
+        """_one_request を 1 本のスレッドで実行して結果を返す。
+
+        stop は中断シグナル (ソケット shutdown で読みを起こす)。cancelled は
+        「この run がキャンセル済みか」を返す述語で、True になったら stop を立てて
+        ワーカー側の待ちを打ち切る (ワーカーは await 中でループ先頭に戻れないため)。
+        ThreadPoolExecutor を使わないのは、中断時に「まだ動いているリクエスト」を
+        待ち切る手段が必要だから。daemon スレッドなら stop で SSE の行境界から抜け、
+        待ち切れなくてもプログラム終了を妨げない。"""
+        q: "_queue.Queue[dict[str, Any] | BaseException]" = _queue.Queue(maxsize=1)
+
+        def run() -> None:
+            try:
+                q.put(_one_request(base, path, body, stream, timeout, auth, stop))
+            except BaseException as e:  # noqa: BLE001
+                q.put(e)
+
+        threading.Thread(target=run, name="bench-req", daemon=True).start()
+        while True:
+            try:
+                r = q.get_nowait()
+            except _queue.Empty:
+                # 中断: スレッドはソケット shutdown で抜けるが、応答が来ない/遅い
+                # サーバーでも「ワーカーは即座に止まる」必要があるため、ここでも
+                # stop を見て打ち切る (スレッドは daemon なので残らない)。
+                # cancelled() は run のキャンセル集合を直接見る述語で、_stage の
+                # ワーカーが await 中でも中断を検出できるようにする。
+                if stop.is_set() or (cancelled is not None and cancelled()):
+                    stop.set()
+                    return {"ok": False, "error": "中断", "secs": 0.0, "cancelled": True}
+                await asyncio.sleep(0.005)      # 数 ms 粒度で待つ (トークン間隔を歪めない)
+                continue
+            if isinstance(r, BaseException):
+                return {"ok": False, "error": f"{type(r).__name__}: {r}",
+                        "secs": 0.0, "cancelled": True}
+            return r
+
+    async def _parallel(self, body_of, run: dict[str, Any], indexes, base: str, path: str,
+                        conc: int, stream: bool, timeout: float,
+                        auth: dict[str, str] | None) -> None:
+        """warmup 用: 最大 conc 本の同時実行で全件を流す (結果は捨てる・統計外)。
+
+        stop はこの呼び出し専用に作る (呼び出し元の測定用 Event を立てると、
+        測定開始前に「中断済み」になる)。"""
+        stop = threading.Event()
+        idx = [0]
+        seq = list(indexes)
+        lock = threading.Lock()
+
+        def take() -> int | None:
+            with lock:
+                i = idx[0]
+                idx[0] += 1
+            return seq[i] if i < len(seq) else None
+
+        async def worker() -> None:
+            while True:
+                if run["id"] in self._cancel:
+                    stop.set()
+                    return
+                i = take()
+                if i is None:
+                    return
+                await self._one_in_thread(base, path, body_of(i), stream, timeout, auth, stop)
+
+        try:
+            await asyncio.gather(*(worker() for _ in range(max(1, conc))))
+        finally:
+            stop.set()
+        self._check_cancel(run)
+
     def _trim(self) -> None:
         def _t(lst: list) -> None:
             if len(lst) <= MAX_RUNS:
@@ -347,14 +593,23 @@ class BenchManager:
             keep = {r["id"] for r in sorted(lst, key=lambda r: r.get("created_at") or 0,
                                             reverse=True)[:MAX_RUNS]}
             keep |= {r["id"] for r in lst if r.get("status") in ("queued", "running")}
+            gone = [r["id"] for r in lst if r["id"] not in keep]
             lst[:] = [r for r in lst if r["id"] in keep]
+            # 消えた run は以後の _save で書き戻さない (進行中の task がまだ
+            # その dict を持っていても、履歴に復活させない)
+            self._dead.update(gone)
+            for rid in gone:
+                self._last_save.pop(rid, None)
         self.store.mutate(_t)
 
     def _save(self, run: dict[str, Any], force: bool = False) -> None:
+        rid = run["id"]
+        if rid in self._dead:
+            return                       # 削除/整理済みの run はディスクへ戻さない
         t = time.monotonic()
-        if not force and t - self._last_save.get(run["id"], 0.0) < SAVE_THROTTLE:
+        if not force and t - self._last_save.get(rid, 0.0) < SAVE_THROTTLE:
             return
-        self._last_save[run["id"]] = t
+        self._last_save[rid] = t
         with contextlib.suppress(OSError):
             self.store.save()
 
@@ -362,8 +617,13 @@ class BenchManager:
         run["progress"].update(kw)
 
     def _check_cancel(self, run: dict[str, Any]) -> None:
+        """中断要求があれば _Cancelled を投げる (ステージ遷移の各所で使う)。"""
         if run["id"] in self._cancel:
             raise _Cancelled()
+
+    def _cancelled(self, run: dict[str, Any]) -> bool:
+        """この run が取り消し済みか (ワーカーの await 中チェック / 集計の門番)。"""
+        return run["id"] in self._cancel
 
     async def _job(self, run: dict[str, Any], profile: dict[str, Any],
                    params: dict[str, Any]) -> None:
@@ -387,11 +647,22 @@ class BenchManager:
             self.active_id = None
             self._cancel.discard(run["id"])
             self._tasks.pop(run["id"], None)
-            if (params.get("stop_after") and run.get("auto_started")
-                    and run.get("session_id")):
-                with contextlib.suppress(Exception):
+            # 排他の解放は「停止処理より先」に行う。停止に時間がかかるバックエンド
+            # (Strata のエンジン解放待ち等) の間、次のベンチ/キャリブレーションを
+            # 待たせ続けないため (計測対象の GPU は停止で解放される前に空かない)。
+            self.release_exclusive()
+            # 自動起動したサーバーの停止: 完了時だけでなく中断/失敗時も、ユーザーが
+            # 「完了後停止」を選んでいたら止める (残すと次回の計測が別設定のまま走る)。
+            if ((params.get("stop_after") or run.get("status") in ("failed", "cancelled"))
+                    and run.get("auto_started") and run.get("session_id")
+                    and not run.get("stopped_after")):
+                try:
                     await self.manager.stop(run["session_id"])
                     run["stopped_after"] = True
+                except Exception as e:  # noqa: BLE001
+                    # 握り潰すと「停止したつもり」で次回の計測が別設定のまま走る。
+                    # 失敗理由を残して UI / JSON エクスポートに出す。
+                    run["stop_error"] = f"{type(e).__name__}: {e}"
                 self._save(run, force=True)
 
     async def _run(self, run: dict[str, Any], profile: dict[str, Any],
@@ -415,10 +686,11 @@ class BenchManager:
         for si, conc in enumerate(params["concurrency"]):
             self._check_cancel(run)
             stage = await self._stage(run, si, base, path, model, params, conc,
-                                      seed0 + si * 1_000_003, auth)
+                                      seed0 + si * PROMPT_SEED_GAP, auth)
             run["stages"].append(stage)
             self._save(run, force=True)
-            if stage["ok"] == 0:
+            if stage["ok"] == 0 and not stage.get("aborted"):
+                # 中断 (キャンセル) による 0 件は失敗ではない (stage に aborted が立つ)
                 errs = "; ".join(stage["errors"][:2])
                 raise BenchError(f"並列度 {conc} で成功リクエストが 0 件です。"
                                  f"{(' ' + errs) if errs else ''}")
@@ -444,8 +716,13 @@ class BenchManager:
             try:
                 live = await self.manager.start(profile, via=VIA_BENCH)
                 run["auto_started"] = True
+                # 起動直後から stopping の窓 (エンジン解放待ち等) があるので記録する
+                run["session_id"] = live["id"]
+            except MemoryGuardError as e:
+                # メモリガード / 解放待ちの拒否はユーザーが対処できるよう理由をそのまま出す
+                raise BenchError(f"サーバーの起動に失敗しました: {e}") from e
             except RuntimeError as e:
-                raise BenchError(f"サーバーの起動に失敗しました: {e}")
+                raise BenchError(f"サーバーの起動に失敗しました: {e}") from e
         run["session_id"] = live["id"]
         return live
 
@@ -497,48 +774,62 @@ class BenchManager:
         warm = int(params["warmup"])
         stream = bool(params["stream"])
         timeout = float(params["request_timeout"])
-        loop = asyncio.get_running_loop()
+        # 同時に張りすぎるとサーバー側の backlog や GIL 争奪で計測自体が歪む
+        # (128 並列で偽サーバーが Connection reset を返した)。実運用の GPU サーバーも
+        # これ以上は捌けないので、同時接続を 64 で頭打ちにする。
+        conc = max(1, min(int(conc), 64))
+        progress = run["progress"]
         self._progress(run, stage=si, phase="warmup", done=0, total=n, ok=0, fail=0,
                        out_tokens=0, elapsed=0)
         self._save(run, force=True)
 
-        def make_body(i: int) -> dict[str, Any]:
-            prompt = make_prompt(int(params["input_len"]), seed + i)
+        def make_body(i: int, warmup: bool = False) -> dict[str, Any]:
+            # warmup は測定本体と別のプロンプト列にする (同じだと 1 件目だけが
+            # prefix cache に載って有利になり、README の「重複なし」と矛盾する)。
+            base_seed = seed + (WARMUP_SEED_OFFSET if warmup else 0)
+            prompt = make_prompt(int(params["input_len"]), base_seed + i)
             return self._payload(params, model, prompt)
 
         if warm:
-            ex = ThreadPoolExecutor(max_workers=min(warm, 4), thread_name_prefix="bench-w")
-            try:
-                for i in range(warm):
-                    self._check_cancel(run)
-                    await loop.run_in_executor(
-                        ex, functools.partial(_one_request, base, path, make_body(i),
-                                              stream, timeout, auth))
-            finally:
-                ex.shutdown(wait=False)
+            await self._parallel(lambda i: make_body(i, True), run, range(warm), base, path,
+                                 min(warm, 4), stream, timeout, auth)
 
         self._check_cancel(run)
         idx = [0]
         results: list[dict[str, Any]] = []
         aborted = {"v": False}
-        ex = ThreadPoolExecutor(max_workers=min(conc, 64), thread_name_prefix="bench")
         t0 = time.perf_counter()
         self._progress(run, stage=si, phase="measure", done=0, total=n, ok=0, fail=0,
                        out_tokens=0, elapsed=0)
         self._save(run, force=True)
+        # 測定用の stop は必ず新しい Event にする。_parallel (warmup) が finally で
+        # 自分の stop を立てるので、それを共有すると測定開始時点で「中断済み」になる。
+        # 束縛済みの既定引数 (k) で受けるのは、ワーカー/監視スレッドが閉包変数
+        # `stop` の再束縛を読むタイミングで取り違えないようにするため。
+        # stop は中断シグナル: ワーカーは待機中に、実行中のリクエストはソケットの
+        # shutdown 監視スレッドがこれを見て、どちらも即座に抜ける。
+        stop = threading.Event()
 
-        async def worker() -> None:
+        async def worker(k: threading.Event = stop) -> None:
             while True:
-                if run["id"] in self._cancel:
+                if aborted["v"] or self._cancelled(run):
+                    k.set()
                     aborted["v"] = True
                     return
                 i = idx[0]
                 idx[0] += 1
                 if i >= n:
                     return
-                r = await loop.run_in_executor(
-                    ex, functools.partial(_one_request, base, path, make_body(i),
-                                          stream, timeout, auth))
+                # リクエストは 1 本ずつ daemon スレッドで走らせる。中断は
+                # _one_in_thread 側が run のキャンセル集合も見て打ち切る。
+                r = await self._one_in_thread(base, path, make_body(i), stream, timeout, auth, k,
+                                              lambda: self._cancelled(run))
+                # 中断後に戻ってきた結果 (打ち切り or たまたま完了) は集計に入れない。
+                # ここを素通りさせると「中断したのに ok=N」が保存される。
+                if r.get("cancelled") or self._cancelled(run):
+                    k.set()
+                    aborted["v"] = True
+                    return
                 results.append(r)
                 prog = run["progress"]
                 prog["done"] += 1
@@ -552,8 +843,10 @@ class BenchManager:
 
         try:
             await asyncio.gather(*(worker() for _ in range(conc)))
-        finally:
-            ex.shutdown(wait=False)
+        except asyncio.CancelledError:
+            # shutdown からのキャンセル: インフライトも一緒に畳んでから抜ける
+            stop.set()
+            raise
         wall = time.perf_counter() - t0
 
         okres = [r for r in results if r.get("ok")]
@@ -575,17 +868,24 @@ class BenchManager:
         gaps = [float(r["gap_max"]) for r in okres if r.get("gap_max") is not None]
         stall_count = sum(int(r.get("stalls") or 0) for r in okres)
         out_tok = sum(int(r.get("out_tokens") or 0) for r in okres)
-        in_tok = sum(int(r.get("in_tokens") or 0) for r in okres)
+        # 入力トークン: usage を返さないサーバーでは prompt_tokens が None になる。
+        # 一部だけ 0 で埋めて合計すると total tok/s が過小に出るため、全件揃ったときだけ
+        # 合計する (欠けていれば total_tps は None = 「測れない」)。
+        ins = [r.get("in_tokens") for r in okres]
+        in_tok = (sum(int(v) for v in ins)
+                  if ins and all(isinstance(v, int) and v > 0 for v in ins) else None)
         return {
             "concurrency": conc, "num_prompts": n, "warmup": warm,
             "ok": len(okres), "fail": len(results) - len(okres), "aborted": aborted["v"],
             "wall_secs": round(wall, 2),
             "rps": _div(len(okres), wall),
             "out_tps": _div(out_tok, wall),
-            "total_tps": _div(out_tok + in_tok, wall),
+            "total_tps": _div(out_tok + in_tok, wall) if in_tok is not None else None,
             "out_tokens": out_tok, "in_tokens": in_tok,
             "tokens_estimated": any(r.get("estimated") for r in okres),
             "latency": _stats(lat), "ttft": _stats(ttfts),
+            # decode tok/s は「TTFT 後 ~ 終了」の実測区間で割る。非ストリーム
+            # (ttft=None) は区間が無いので測れない (表では "-" になる)。
             "decode_tps": _stats(decodes), "e2e_tps": _stats(e2e),
             "gaps": _stats(gaps),
             "stall_worst_s": round(max(gaps), 3) if gaps else None,

@@ -31,7 +31,7 @@ from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv
                        supported_models)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
-from .bench import BenchError, BenchManager
+from .bench import MAX_STAGES, BenchError, BenchManager
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         clone_exists, current_ref, install_tool)
@@ -160,9 +160,22 @@ class BenchBody(BaseModel):
     def _normalize(self) -> "BenchBody":
         if self.endpoint not in ("chat", "completions"):
             raise ValueError("endpoint は chat または completions を指定してください")
-        self.concurrency = sorted({max(1, min(256, int(c))) for c in self.concurrency})[:8]
-        if not self.concurrency:
-            self.concurrency = [8]
+        # 段数上限は MAX_STAGES。以前はソート後の先頭 8 件で切っていたため
+        # 「1..32」を 10 段指定すると大きい並列度 (9..32) が静かに消えていた。
+        # 上限を超えたら、最小と最大を必ず含めた等間隔に間引く (グラフの両端を保つ)。
+        conc = sorted({max(1, min(256, int(c))) for c in self.concurrency})
+        if not conc:
+            conc = [8]
+        elif len(conc) > MAX_STAGES:
+            n = len(conc)
+            pick = sorted({conc[round(i * (n - 1) / (MAX_STAGES - 1))] for i in range(MAX_STAGES)})
+            conc = pick
+        self.concurrency = conc
+        # 同時実行数よりリクエスト数が少ないと待ち時間の無いワーカーが出る
+        # (計測値そのものは壊れないが、条件として明らかに意図と違う)
+        if self.num_prompts < max(self.concurrency):
+            raise ValueError("num_prompts は並列度の最大値以上にしてください "
+                             f"(num_prompts={self.num_prompts} < concurrency max={max(self.concurrency)})")
         return self
 
     def to_params(self) -> dict[str, Any]:
@@ -506,6 +519,10 @@ def create_app(root: Path) -> FastAPI:
     bench = BenchManager(bench_store, profiles_store, manager)
     calibrations_store = JsonStore(data_dir / "calibrations.json", [])
     calibrate = CalibrationManager(root, profiles_store, calibrations_store, manager)
+    # 同じ GPU を使う実走 (ベンチ / キャリブレーション) を 1 本に制限する。
+    # キャリブレーションは同じプロファイルのサーバーを止めてエンジンを起動するので、
+    # ベンチと重なると双方の結果が壊れる (ロックは bench 側が持つ)。
+    calibrate.attach_exclusive(bench.exclusive)
     installs_store = JsonStore(data_dir / "installs.json", [])
     installs = InstallManager(root, installs_store, manager)
     auth = AuthManager(users_store, sessions_store)
@@ -1396,7 +1413,8 @@ def create_app(root: Path) -> FastAPI:
 
     @app.get("/api/benchmarks")
     async def list_benchmarks() -> dict[str, Any]:
-        return {"runs": bench.list_runs(), "active": bench.active_id}
+        return {"runs": bench.list_runs(), "active": bench.active_id,
+                "exclusive_owner": bench.exclusive_owner}
 
     @app.post("/api/benchmarks", status_code=201)
     async def start_benchmark(body: BenchBody) -> dict[str, Any]:
@@ -1411,6 +1429,11 @@ def create_app(root: Path) -> FastAPI:
                 for s in manager.sessions.values()):
             raise HTTPException(409, "プロファイルが起動していません。"
                                      "起動タブでスタートするか、auto_start を ON にしてください")
+        if body.num_prompts < max(body.concurrency):
+            # ステージ数よりリクエストが少ないと計測条件として意味が薄く、UI からも
+            # 黙って通ってしまうため、開始前に 422 で理由を返す
+            raise HTTPException(422, f"リクエスト数/段 ({body.num_prompts}) は並列度の最大値 "
+                                     f"({max(body.concurrency)}) 以上にしてください")
         try:
             run = await bench.start(profile, body.to_params(), BACKENDS[bid]["name"])
         except BenchError as e:

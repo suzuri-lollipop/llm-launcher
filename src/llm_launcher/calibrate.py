@@ -403,6 +403,25 @@ class CalibrationManager:
         self._procs: dict[str, asyncio.subprocess.Process] = {}
         self._cancel: set[str] = set()
         self._extra: set[asyncio.Task] = set()    # キャンセル猶予後の SIGKILL など短命 task
+        # ベンチと同じ排他ロックを共有する (app.py の startup が接続する)。同じ GPU を
+        # 使う実走 (ベンチ / キャリブレーション) を 1 本に制限するため。
+        self.exclusive: bench.ExclusiveLock | None = None
+
+    # ------------------------------------------------------------ 実走の排他
+
+    def attach_exclusive(self, lock: bench.ExclusiveLock) -> None:
+        """ベンチと同じロックを共有する (app.py が起動時に呼ぶ)。"""
+        self.exclusive = lock
+
+    def claim_exclusive(self) -> bool:
+        """GPU を独占する実走の権利を取る (ベンチ実行中なら False)。"""
+        if self.exclusive is None:
+            return True
+        return self.exclusive.acquire("calibration")
+
+    def release_exclusive(self) -> None:
+        if self.exclusive is not None:
+            self.exclusive.release()
 
     # ------------------------------------------------------------ 再起動時の回復
 
@@ -490,6 +509,21 @@ class CalibrationManager:
         共通プローブで決勝トーナメントして勝者を起動構成に書き戻す。"""
         if self.active_id:
             raise CalibrateError("別のキャリブレーションが実行中です。完了を待つか中断してください")
+        # GPU を独占する実走は 1 本だけ (ベンチと同じロックを取り合う)
+        if not self.claim_exclusive():
+            raise CalibrateError("ベンチマークが実行中です。完了を待つか中断してから再実行してください"
+                                 " (同じ GPU を使うため同時に実走できません)")
+        try:
+            return await self._start_locked(profile, backend_id, restart_after=restart_after,
+                                            actor=actor, cal_mode=cal_mode)
+        except BaseException:
+            self.release_exclusive()
+            raise
+
+    async def _start_locked(self, profile: dict[str, Any], backend_id: str,
+                            *, restart_after: bool = False,
+                            actor: dict[str, Any] | None = None,
+                            cal_mode: str = "current") -> dict[str, Any]:
         kind = CAL_BACKENDS.get(backend_id)
         if not kind:
             raise CalibrateError(f"{BACKENDS.get(backend_id, {}).get('name', backend_id)} は"
@@ -1561,6 +1595,8 @@ class CalibrationManager:
             if self.active_id == job["id"]:
                 self.active_id = None
             self._save()
+            # 実走の排他を解放する (再起動処理の前に解放し、待っているベンチを妨げない)
+            self.release_exclusive()
 
         # 調整後にサーバーを起動し直す (任意・失敗してもジョブ記録は残す)
         if job.get("restart_after") and job["status"] == "done":
