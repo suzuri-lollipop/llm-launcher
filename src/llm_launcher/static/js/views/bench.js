@@ -308,18 +308,30 @@ function bmPhaseSvg(reqs, nowSec) {
     const segs = [];
     if (r.a == null) {
       if (!live) segs.push(rect(r.s, till, "#94a3b8", "一括応答 (stream なし / 最初のトークン不明)"));
-      else segs.push(rect(r.s, till, "var(--warn)", "最初のトークン待ち (プレフィル)…", ".8"));
-      tip = live ? "最初のトークン待ち…" : "一括応答";
+      else segs.push(rect(r.s, till, "var(--warn)", "待ち (送信→最初のトークン)…", ".8"));
+      tip = live ? "待ち (送信→最初のトークン)…" : "一括応答";
     } else {
-      segs.push(rect(r.s, r.a, "var(--warn)", `待ち/プレフィル ${f2(r.a - r.s)}s`));
+      if (r.arr != null && (r.q != null || r.p != null)) {
+        // サーバーが内訳を公開 (strata 系 /metrics): 送信→受付 / キュー待ち / プレフィル / 配信
+        const a0 = Math.max(r.arr, r.s), q1 = a0 + (r.q || 0), p1 = q1 + (r.p || 0);
+        if (a0 - r.s > 0.005) segs.push(rect(r.s, a0, "var(--acc)", `送信 → サーバー受付 ${f2(a0 - r.s)}s`));
+        if ((r.q || 0) > 0.01) segs.push(rect(a0, q1, "var(--purple)", `キュー待ち ${f2(r.q)}s (サーバー報告: 他の生成に押されて待った時間)`));
+        segs.push(rect(q1, Math.min(p1, r.a), "var(--warn)", `プレフィル ${f2(r.p)}s (サーバー報告: プロンプト読込・初期計算)`));
+        if (r.a - p1 > 0.05) segs.push(rect(p1, r.a, "#b9c6d4", `最初のトークン配信 ${f2(r.a - p1)}s`));
+        tip = `キュー ${f2(r.q || 0)}s · プレフィル ${f2(r.p)}s`;
+      } else {
+        // 内訳非公開のサーバー: 実測できる TTFT 区間を正直に「待ち」として一枚で出す
+        segs.push(rect(r.s, r.a, "var(--warn)", "待ち = 送信→最初のトークン (サーバーのキュー積み込み + プレフィル + 配送込み)"));
+        tip = `待ち ${f2(r.a - r.s)}s`;
+      }
       if (r.d != null) {
         const ds = Math.max(r.d - r.a, 0.05), rate = r.n / ds;
         segs.push(rect(r.a, r.d, "var(--ok)", `デコード ${f2(ds)}s ${r.n}tok (${f2(rate)} tok/s)`));
         if (r.e != null && r.e - r.d > 0.01) segs.push(rect(r.d, r.e, "#94a3b8", `確定 (クローズ) ${f2(r.e - r.d)}s`));
-        tip = `待ち ${f2(r.a - r.s)}s · デコード ${f2(ds)}s ${r.n}tok (${f2(rate)} tok/s)`;
+        tip += ` · デコード ${f2(ds)}s ${r.n}tok (${f2(rate)} tok/s)`;
       } else {
         segs.push(rect(r.a, till, "var(--ok)", "デコード中…", ".8"));
-        tip = `待ち ${f2(r.a - r.s)}s · デコード中 ${r.n}tok`;
+        tip += ` · デコード中 ${r.n}tok`;
       }
     }
     return `<g><title>#${i + 1} ${esc(tip)}</title>` +
@@ -331,12 +343,23 @@ function bmPhaseSvg(reqs, nowSec) {
 }
 function bmPhaseBlock(title, reqs, nowSec, truncated) {
   if (!(reqs || []).length) return "";
+  const pm = reqs.some(r => r && r.arr != null);   // サーバー内訳が付き始めたか
+  const legend = pm
+    ? `<span class="bm-lgd"><span><i style="background:var(--acc)"></i>送信</span>` +
+      `<span><i style="background:var(--purple)"></i>キュー待ち</span>` +
+      `<span><i style="background:var(--warn)"></i>プレフィル</span>` +
+      `<span><i style="background:var(--ok)"></i>デコード</span>` +
+      `<span><i style="background:#94a3b8"></i>確定</span></span>`
+    : `<span class="bm-lgd"><span><i style="background:var(--warn)"></i>待ち</span>` +
+      `<span><i style="background:var(--ok)"></i>デコード</span>` +
+      `<span><i style="background:#94a3b8"></i>確定</span></span>`;
   return `<div class="row" style="gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
-      <b style="font-size:13px">${esc(title)}</b>
-      <span class="bm-lgd"><span><i style="background:var(--warn)"></i>待ち / プレフィル</span>` +
-      `<span><i style="background:var(--ok)"></i>デコード</span><span><i style="background:#94a3b8"></i>確定</span></span></div>` +
+      <b style="font-size:13px">${esc(title)}</b>${legend}</div>` +
     `<div class="bm-chart" style="margin-top:4px">${bmPhaseSvg(reqs, nowSec)}</div>` +
-    `<div class="muted" style="font-size:11px">各行 = リクエスト 1 本 (上から送信順)。琥珀 = 送信 → 最初のトークン (サーバー側のキュー積み込み + プレフィル込みの待ち)、緑 = デコード、灰色 = 応答クローズ。行の重なり = 同時に走っていた区間。行にホバーで内訳${truncated ? " · 多いため等間隔に間引いて表示" : ""}</div>`;
+    `<div class="muted" style="font-size:11px">各行 = リクエスト 1 本 (上から送信順)。行の重なり = 同時に走っていた区間。行にホバーで内訳${truncated ? " · 多いため等間隔に間引いて表示" : ""}。<br>` +
+    (pm
+      ? `<b>キュー待ち</b> = サーバーが他の生成を捌いている間待たされた時間 (サーバー側 TTFT − プレフィル)。<b>プレフィル</b> = プロンプトの読み込み・初期計算 (サーバー報告の prompt_ms)。薄い灰の残り幅は最初のトークンの配信。いずれもサーバー (/metrics) が報告した値で、実測の「送信→最初のトークン」枠の中に配置しています`
+      : `<b>待ち</b> = 送信 → 最初のトークン (サーバーのキュー積み込み + プレフィル + 配送をまとめた実測値。このサーバーは内訳を公開しないため分割できません。strata 系では完了後に自動で分割表示へ変わります)`) + `</div>`;
 }
 /* 実行中カードのライブチャート: 完了段の series に実行中段を重ねる (強調描画) */
 function bmLiveChart(run) {

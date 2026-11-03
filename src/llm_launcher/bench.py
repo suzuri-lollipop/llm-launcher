@@ -387,6 +387,67 @@ def _pct(vals: list[float], q: float) -> float:
     return vals[k]
 
 
+def _fetch_phase_pool(base: str) -> "list[dict[str, Any]] | None":
+    """サーバー側のリクエスト内訳 (到着時刻 / プレフィル秒 / サーバー側TTFT) を取りに行く。
+
+    対応形式は strata 系の JSON /metrics ({"requests":[{time, prompt_ms,
+    first_engine_token_s, prompt_tokens, ...}]})。非対応サーバー (Prometheus 生テキスト
+    や 404) やタイムアウトは None = 「このサーバーは内訳を出さない」として扱う。
+    ベンチの本体計測 (HTTP 200 の SSE) とは独立の補助情報なので、失敗しても何もしない。"""
+    try:
+        req = urllib.request.Request(base.rstrip("/") + "/metrics")
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+    except Exception:  # noqa: BLE001 — 補助情報の取得失敗は常に「無し」に倒す
+        return None
+    ents = data.get("requests") if isinstance(data, dict) else None
+    if not isinstance(ents, list):
+        return None
+    out = [e for e in ents
+           if isinstance(e, dict) and isinstance(e.get("time"), (int, float))
+           and isinstance(e.get("prompt_ms"), (int, float))]
+    return out or None
+
+
+def _attach_phase_metrics(snaps: "list[dict[str, Any]]", slots: "list[dict[str, Any]]",
+                          pool: "list[dict[str, Any]]", t0_wall: float) -> int:
+    """サーバー内訳エントリを各リクエスト行に突合して arr(到着)/q(キュー待ち)/p(プレフィル) を付与。
+
+    snaps[i] と slots[i] は同一順。突合は送信実時刻 (slot["w"]) に近く、入力トークンが
+    一致する未使用エントリを貪欲に (近い順)。キュー待ち = サーバー側TTFT − プレフィル。
+    戻り値はマッチ件数 (0 = このサーバーでは内訳を描けない)。"""
+    used: set[int] = set()
+    hit = 0
+    for i, sl in enumerate(slots):
+        w = sl.get("w")
+        if not isinstance(w, float) or snaps[i].get("a") is None:
+            continue
+        tin = sl.get("in")
+        best: "tuple[int, float] | None" = None
+        for j, e in enumerate(pool):
+            if j in used:
+                continue
+            dt = float(e["time"]) - w
+            if not (-1.0 <= dt <= 30.0):
+                continue
+            if tin is not None and e.get("prompt_tokens") not in (None, tin):
+                continue
+            if best is None or abs(dt) < best[1]:
+                best = (j, abs(dt))
+        if best is None:
+            continue
+        used.add(best[0])
+        e = pool[best[0]]
+        pm = max(0.0, float(e.get("prompt_ms") or 0.0) / 1000.0)
+        ft = float(e.get("first_engine_token_s") or 0.0)
+        snaps[i]["arr"] = round(float(e["time"]) - t0_wall, 2)
+        snaps[i]["p"] = round(pm, 2)
+        if ft > 0:
+            snaps[i]["q"] = round(max(0.0, ft - pm), 2)
+        hit += 1
+    return hit
+
+
 def _stats(vals: list[float]) -> dict[str, float | None]:
     if not vals:
         return {"avg": None, "p50": None, "p90": None, "p99": None, "min": None, "max": None}
@@ -861,6 +922,7 @@ class BenchManager:
         results: list[dict[str, Any]] = []
         aborted = {"v": False}
         t0 = time.perf_counter()
+        t0_wall = time.time()   # サーバー側の時刻 (epoch) と突き合わせる基準時計
         self._progress(run, stage=si, phase="measure", done=0, total=n, ok=0, fail=0,
                        out_tokens=0, dec_sum=0.0, dec_n=0, elapsed=0)
         self._save(run, force=True)
@@ -929,7 +991,7 @@ class BenchManager:
                 # フェーズ追跡スロット: s=送信 a=最初のトークン d=最後のトークン
                 # e=確定(ストリームクローズ/応答読み切り) f=届いたトークン推定。
                 # 1 スロットの各キーは単一の書き手だけが更新する (s/e=worker, a/d/f=読み手)。
-                slot: dict[str, Any] = {"f": 0.0, "s": time.perf_counter()}
+                slot: dict[str, Any] = {"f": 0.0, "s": time.perf_counter(), "w": time.time()}
                 slots.append(slot)
                 try:
                     r = await self._one_in_thread(base, path, make_body(i), stream, timeout, auth, k,
@@ -937,6 +999,8 @@ class BenchManager:
                 finally:
                     live["inf"] -= 1
                     slot["e"] = time.perf_counter()
+                if r.get("ok") and r.get("in_tokens") is not None:
+                    slot["in"] = int(r["in_tokens"])   # サーバー内訳との突合キー
                 # 中断後に戻ってきた結果 (打ち切り or たまたま完了) は集計に入れない。
                 # ここを素通りさせると「中断したのに ok=N」が保存される。
                 if r.get("cancelled") or self._cancelled(run):
@@ -975,6 +1039,17 @@ class BenchManager:
             run["progress"].pop("series", None)   # ライブ用の写しは stage 側に残す
             run["progress"].pop("reqs", None)
         wall = time.perf_counter() - t0
+
+        # サーバー側の内訳 (キュー待ち / プレフィル) を突合して各行に付与する。
+        # 対応サーバー (/metrics JSON) だけ。非対応は None のままで、待ちブロックは
+        # 従来どおり琥珀の単一区間 (実測 TTFT) として正直に表示される。
+        allsnaps = [_snap(sl) for sl in slots]
+        pm_kind: str | None = None
+        if stream:
+            pool = await asyncio.to_thread(_fetch_phase_pool, base)
+            if pool is not None:
+                pm_kind = "strata"
+                _attach_phase_metrics(allsnaps, slots, pool, t0_wall)
 
         okres = [r for r in results if r.get("ok")]
         errors: list[str] = []
@@ -1023,7 +1098,9 @@ class BenchManager:
             "series": series,
             "series_decimated": iv["dec"],
             # リクエスト単位のフェーズ記録 (スイムレーン用)。send→first→last→確定。
+            # 対応サーバーでは arr/q/p (到着・キュー待ち・プレフィル秒) が付く。
             # 多すぎる場合は等間隔に間引く (reqs_truncated)
-            "reqs": [_snap(sl) for sl in slots[::max(1, -(-len(slots) // MAX_REQS))]],
+            "reqs": allsnaps[::max(1, -(-len(allsnaps) // MAX_REQS))],
             "reqs_truncated": len(slots) > MAX_REQS,
+            "phase_metrics": pm_kind,
         }

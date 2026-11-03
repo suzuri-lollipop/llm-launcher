@@ -176,6 +176,32 @@ def test_reqs_phases_recorded(tmp_path, server):
     assert peak <= 2, f"並列度 2 に対し {peak} 本重なっている"
     # ライブ用の写しは段終了後に掃除される (series と同じ扱い)
     assert "reqs" not in run["progress"]
+    # モックサーバーに /metrics は無い = 内訳なし (待ちブロックは従来どおり一枚)
+    assert stage["phase_metrics"] is None
+    assert all("arr" not in r for r in reqs)
+
+
+def test_attach_phase_metrics_matches_by_time_and_tokens():
+    """サーバー内訳 (strata 系 /metrics) の突合: 送信実時刻に近く入力トークン一致の
+    未使用エントリを貪欲に。キュー待ち = サーバー側TTFT − prompt_ms/1000。"""
+    t0_wall = 1000.0
+    slots = [{"w": 1001.0, "in": 77}, {"w": 1003.0, "in": 77}, {"w": 1099.0, "in": 77}]
+    snaps = [{"s": 1.0, "a": 4.0}, {"s": 3.0, "a": 6.0}, {"s": 99.0, "a": 101.0}]
+    pool = [
+        {"time": 500.0, "prompt_ms": 900.0, "first_engine_token_s": 2.0, "prompt_tokens": 77},   # 時刻窓外
+        {"time": 1001.2, "prompt_ms": 700.0, "first_engine_token_s": 2.7, "prompt_tokens": 77},
+        {"time": 1003.1, "prompt_ms": 800.0, "first_engine_token_s": 1.3, "prompt_tokens": 77},
+    ]
+    hit = bench_mod._attach_phase_metrics(snaps, slots, pool, t0_wall)
+    assert hit == 2
+    assert snaps[0]["arr"] == 1.2 and snaps[0]["p"] == 0.7 and snaps[0]["q"] == 2.0
+    assert snaps[1]["arr"] == 3.1 and snaps[1]["p"] == 0.8 and snaps[1]["q"] == 0.5
+    assert "arr" not in snaps[2] and "q" not in snaps[2]      # 窓外は付けない
+    # ft < prompt_ms の暴値でも q は負にしない
+    s2 = [{"s": 0.0, "a": 1.0}]
+    bench_mod._attach_phase_metrics(s2, [{"w": 1001.0, "in": None}],
+                                    [{"time": 1001.0, "prompt_ms": 5000.0, "first_engine_token_s": 1.0}], t0_wall)
+    assert s2[0]["q"] == 0.0 and s2[0]["p"] == 5.0
 
 
 def test_phase_ui_renders_swimlanes():
@@ -185,6 +211,10 @@ def test_phase_ui_renders_swimlanes():
     assert "フェーズ (${st.concurrency}p)" in js           # 履歴の詳細展開に段ごと
     assert "var(--warn)" in js and "var(--ok)" in js       # 待ち=琥珀 / デコード=緑
     assert "プレフィル" in js and "確定" in js
+    # サーバー内訳が公開されている場合は 送信(青)/キュー待ち(紫)/プレフィル(琥珀) に分割、
+    # 非公開のサーバーでは「待ち」一枚のまま意味を明記して正直に表示する
+    assert "キュー待ち" in js and "var(--purple)" in js
+    assert "このサーバーは内訳を公開しないため分割できません" in js
 
 
 def test_series_decimation_bounds_samples(tmp_path, server, monkeypatch):
