@@ -454,7 +454,8 @@ def test_simple_page_delegates_login_to_root(tmp_path, auth_on, fast_kdf):
         assert b"/api/auth/login" not in body
         assert b'location.replace("/")' in body           # 未ログイン / ログアウトは / へ
         st, root = await client.get("/")                  # 共通のログイン画面側
-        assert st == 200 and b"login-note" in root and b"/simple" in root
+        st2, authjs = await client.get("/static/js/auth.js")  # /simple への委譲は auth.js 側
+        assert st == 200 and b"login-note" in root and st2 == 200 and b"/simple" in authjs
     asyncio.run(go())
 
 

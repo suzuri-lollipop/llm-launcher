@@ -24,7 +24,10 @@ from llm_launcher.installer import INSTALL_SPECS, InstallManager, install_tool
 from llm_launcher.store import JsonStore
 
 FORK = INSTALL_SPECS["freetoken-fork"]
-HTML = (Path(llm_launcher.__file__).parent / "static" / "index.html").read_text("utf-8")
+_ST = Path(llm_launcher.__file__).parent / "static"
+HTML = "\n".join([( _ST / "index.html").read_text("utf-8")]
+                 + [p.read_text("utf-8") for p in sorted((_ST / "css").glob("*.css"))]
+                 + [p.read_text("utf-8") for p in sorted((_ST / "js").rglob("*.js"))])
 SETUP = "".join((Path(llm_launcher.__file__).parent / "static" / n).read_text("utf-8")
                 for n in ("setup.html", "setup.js"))
 

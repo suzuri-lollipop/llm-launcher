@@ -14,8 +14,15 @@ place would silently expose engine- and user-supplied text to markup injection.
 import re
 from pathlib import Path
 
-STATIC = Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static" / "index.html"
-SRC = STATIC.read_text(encoding="utf-8")
+def _frontend_src() -> str:
+    """index.html は分割された (css/ + js/**)。アサーションは全体を結合した文字列に対して行う。"""
+    base = Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static"
+    parts = [(base / "index.html").read_text(encoding="utf-8")]
+    parts += [p.read_text(encoding="utf-8") for p in sorted((base / "css").glob("*.css"))]
+    parts += [p.read_text(encoding="utf-8") for p in sorted((base / "js").rglob("*.js"))]
+    return "\n".join(parts)
+
+SRC = _frontend_src()
 
 
 def test_playground_meta_is_not_escaped():

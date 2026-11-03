@@ -15,7 +15,14 @@ from pathlib import Path
 
 from llm_launcher.bench import STALL_S, _one_request
 
-STATIC = Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static" / "index.html"
+def _frontend_src() -> str:
+    """index.html は分割された (css/ + js/**)。アサーションは全体を結合した文字列に対して行う。"""
+    base = Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static"
+    parts = [(base / "index.html").read_text(encoding="utf-8")]
+    parts += [p.read_text(encoding="utf-8") for p in sorted((base / "css").glob("*.css"))]
+    parts += [p.read_text(encoding="utf-8") for p in sorted((base / "js").rglob("*.js"))]
+    return "\n".join(parts)
+
 
 
 class _SSEHandler(BaseHTTPRequestHandler):
@@ -117,7 +124,7 @@ def test_non_stream_reports_null_gap():
 
 
 def test_frontend_renders_stall_columns():
-    html = STATIC.read_text(encoding="utf-8")
+    html = _frontend_src()
     assert "最大停止" in html
     assert "停止数" in html
     assert "bmStallCell" in html
