@@ -2931,7 +2931,13 @@ function bmFormBody() {
   const v = id => ($(id).value || "").trim();
   const num = (id, d) => { const x = parseInt(v(id), 10); return isNaN(x) ? d : x; };
   const conc = [...new Set(v("#bm-conc").split(/[,，\s]+/)
-    .map(x => parseInt(x, 10)).filter(x => x >= 1 && x <= 256))].sort((a, b) => a - b).slice(0, 8);
+    .map(x => parseInt(x, 10)).filter(x => x >= 1 && x <= 256))].sort((a, b) => a - b);
+  // 段数上限 8: 超えたら最小と最大を保ったまま等間隔に間引く (サーバー側と同じ規則)
+  if (conc.length > 8) {
+    const n = conc.length;
+    const keep = new Set([...Array(8).keys()].map(i => conc[Math.round(i * (n - 1) / 7)]));
+    conc.length = 0; conc.push(...[...keep].sort((a, b) => a - b));
+  }
   const temp = parseFloat(v("#bm-temp"));
   const body = {
     profile_id: v("#bm-profile"),
@@ -3032,11 +3038,15 @@ function bmStallCell(st) {
   return `<td><b style="color:${color}">${bmF2(w)}s</b></td>`;
 }
 function bmStageTable(stages) {
+  // 凡例の閾値はステージに保存された値を使う (STALL_S を変えても表示が追随する)
+  const th = (stages.find(s => s && s.stall_threshold_s != null) || {}).stall_threshold_s || 0.5;
+  // 全ステージで stall が測れていない = stream OFF 等 (古い履歴は 0 件扱いしない)
+  const anyStall = stages.some(s => s && (s.stall_worst_s != null || s.stall_threshold_s != null));
   return `<div class="bm-wrap"><table class="bm"><tr>` +
     `<th>並列度</th><th>OK</th><th>req/s</th><th>出力 tok/s</th><th>合計 tok/s</th>` +
     `<th>TTFT avg</th><th>TTFT p99</th><th>遅延 p50</th><th>遅延 p99</th><th>decode tok/s</th>` +
     `<th title="生成開始後、チャンクが最も長く途切れた秒数 (ステージ中の全リクエストのワースト)">最大停止</th>` +
-    `<th title="0.5s 以上の停止が発生した延べ回数 (全リクエスト合計)">停止数</th></tr>` +
+    `<th title="${th}s 以上の停止が発生した延べ回数 (全リクエスト合計)">停止数</th></tr>` +
     stages.map(st => `<tr>
       <td>${st.concurrency}p</td>
       <td>${st.ok}/${st.ok + st.fail}${st.aborted ? " <svg class=ic aria-hidden=true><use href=#i-stop /></svg>" : ""}</td>
@@ -3047,7 +3057,11 @@ function bmStageTable(stages) {
       bmStallCell(st) +
       `<td>${st.stall_count == null ? "-" : st.stall_count + "回"}</td></tr>`).join("") +
     `</table></div>` +
-    `<div class="muted" style="font-size:11px;margin-top:4px">最大停止: 緑 = 人間の体感閾値 (0.5s) 以下 / 黄 = 2s 以下 / 赤 = それ以上。最初のトークンまでの待ちは TTFT 列を参照</div>` +
+    `<div class="muted" style="font-size:11px;margin-top:4px">最大停止: 緑 = 人間の体感閾値 (${th}s) 以下 / 黄 = 2s 以下 / 赤 = それ以上。最初のトークンまでの待ちは TTFT 列を参照</div>` +
+    (anyStall ? "" :
+      `<div class="muted" style="font-size:11px;margin-top:4px">※ stream が OFF (または SSE でない応答) のため TTFT / 最大停止 / decode tok/s は測れません (遅延と出力 tok/s のみ)</div>`) +
+    (stages.some(s => s.total_tps == null)
+      ? `<div class="muted" style="font-size:11px;margin-top:4px">※ 入力トークン数 (usage.prompt_tokens) が一部の応答に無いため合計 tok/s は算出していません</div>` : "") +
     (stages.some(s => s.tokens_estimated)
       ? `<div class="muted" style="font-size:11px;margin-top:4px">※ usage を返さない応答があるためトークン数に文字数推定を含みます</div>` : "") +
     (stages.some(s => (s.errors || []).length)
@@ -3152,6 +3166,8 @@ function renderBenchHistory() {
       ${open && (r.stages || []).length ? bmStageTable(r.stages) : ""}
       ${open ? `<div class="muted mono" style="margin-top:6px;font-size:11px;overflow-wrap:anywhere">
         model: ${esc(r.model || "-")} · session: ${esc(r.session_id || "-")}${r.auto_started ? " (自動起動)" : ""}${r.stopped_after ? " · 停止済み" : ""}${r.port ? ` · :${r.port}` : ""}</div>` : ""}
+      ${open && r.stop_error ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--err)">サーバーの自動停止に失敗: ${esc(r.stop_error)}</div>` : ""}
+      ${open && r.server_left_running ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--warn)">※ launcher 再起動時に自動起動したサーバーが残っています。サーバータブで停止してください</div>` : ""}
     </div>`;
   }).join("");
 }
