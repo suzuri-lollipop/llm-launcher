@@ -31,7 +31,14 @@ from llm_launcher import calibrate as calibrate_mod
 from llm_launcher.bench import BenchError, BenchManager
 from llm_launcher.store import JsonStore
 
-STATIC = Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static" / "index.html"
+def _frontend_src() -> str:
+    """index.html は分割された (css/ + js/**)。アサーションは全体を結合した文字列に対して行う。"""
+    base = Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static"
+    parts = [(base / "index.html").read_text(encoding="utf-8")]
+    parts += [p.read_text(encoding="utf-8") for p in sorted((base / "css").glob("*.css"))]
+    parts += [p.read_text(encoding="utf-8") for p in sorted((base / "js").rglob("*.js"))]
+    return "\n".join(parts)
+
 
 
 # ------------------------------------------------------------------ 偽サーバー
@@ -416,7 +423,7 @@ def test_bench_body_rejects_num_prompts_below_max_concurrency():
 
 
 def test_frontend_legend_uses_recorded_threshold_and_explains_non_stream():
-    html = STATIC.read_text(encoding="utf-8")
+    html = _frontend_src()
     # 凡例は固定文字列ではなくステージに保存された閾値を使う
     assert re.search(r"const th = [\s\S]{0,200}stall_threshold_s", html)
     assert "TTFT / 最大停止 / decode tok/s は測れません" in html
