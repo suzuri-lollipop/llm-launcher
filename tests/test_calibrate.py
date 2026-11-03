@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import stat
 from pathlib import Path
 
@@ -1451,7 +1452,11 @@ def test_launch_json_endpoints(tmp_path, monkeypatch):
         st, r = await _asgi(app, "POST", "/api/profiles/p_x/launch-json")
         assert st == 200 and r["ok"], r
         path = r["path"]
-        assert path.endswith("freetoken-p_x.json")
+        # freetoken-fork の起動 JSON は Strata 方式 (5e5c542 以降): プロジェクト直下の
+        # module/fork/freetoken に「モデル名 slug + uuid8」で置く。同名 .sh が並ぶので
+        # プロファイル id 固定名 (旧 data/launch/freetoken-<id>.json) ではない。
+        assert Path(path).parent.resolve() == (tmp_path / "module" / "fork" / "freetoken").resolve()
+        assert re.fullmatch(r"ft-x-[0-9a-f]{8}\.json", Path(path).name), path
         doc = json.loads(Path(path).read_text())
         assert doc["argv"][:2] == ["-m", "freetoken"] and doc["env"] == {"E": "1"}
         assert doc["python"] == "/fake/py" and doc["port"] == 1919
