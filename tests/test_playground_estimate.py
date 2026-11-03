@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-STATIC = Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static" / "index.html"
+STATIC = Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static" / "js" / "views" / "playground.js"
 CHUNKS_FIXTURE = Path(__file__).resolve().parent / "data" / "playground_jp_token_chunks.txt"
 
 # Kanji-dense Japanese; tokenized by the serving model to 594 tokens (0.53 tok/char).

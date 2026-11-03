@@ -184,7 +184,9 @@ def test_index_served_without_login(tmp_path, auth_on, fast_kdf):
 
     async def go() -> None:
         st, body = await client.get("/")
-        assert st == 200 and b'id="login"' in body and b"function boot()" in body
+        st2, authjs = await client.get("/static/js/auth.js")
+        assert st == 200 and b'id="login"' in body
+        assert st2 == 200 and b"function boot()" in authjs   # 起動処理は分割された auth.js に移動
     asyncio.run(go())
 
 
