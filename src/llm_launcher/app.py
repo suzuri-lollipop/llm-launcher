@@ -138,6 +138,8 @@ class BenchBody(BaseModel):
     model: str = ""
     endpoint: str = "chat"            # chat | completions
     stream: bool = True               # ON で TTFT も計測
+    mode: str = "loop"                # loop=クローズドループ / stagger=デコード中に定間隔で次の送信
+    gap_s: float = Field(default=2.0, ge=0.1, le=60.0)   # stagger の送信間隔秒
     concurrency: list[int] = Field(default_factory=lambda: [1, 8])
     num_prompts: int = Field(default=24, ge=1, le=10000)
     input_len: int = Field(default=128, ge=8, le=16384)    # プロンプト語数(≈語=token)
@@ -160,6 +162,15 @@ class BenchBody(BaseModel):
     def _normalize(self) -> "BenchBody":
         if self.endpoint not in ("chat", "completions"):
             raise ValueError("endpoint は chat または completions を指定してください")
+        if self.mode not in ("loop", "stagger"):
+            raise ValueError("mode は loop または stagger を指定してください")
+        if self.mode == "stagger":
+            # インタリーブは「先行するストリームがデコード中に次のプロンプトを届ける」
+            # 干渉計測。1 段 = num_prompts 本の同時ストリーム (並列度リストは使わず
+            # 間隔は gap_s)。本数は GPU でも現実的な範囲に抑える
+            self.num_prompts = max(2, min(self.num_prompts, 32))
+            self.concurrency = [self.num_prompts]
+            return self
         # 段数上限は MAX_STAGES。以前はソート後の先頭 8 件で切っていたため
         # 「1..32」を 10 段指定すると大きい並列度 (9..32) が静かに消えていた。
         # 上限を超えたら、最小と最大を必ず含めた等間隔に間引く (グラフの両端を保つ)。

@@ -19,7 +19,9 @@ VIEWS.bench = `
       </div>
       <div class="muted" id="bm-prof-note" style="margin-top:6px"></div>
       <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:4px">
-        <div><label class="f" for="bm-conc">並列度 (カンマ区切り)</label><input type="text" id="bm-conc" value="1,8" style="width:110px"></div>
+        <div><label class="f" for="bm-mode">送信方式</label><select id="bm-mode" onchange="bmModeUI()" style="width:240px"><option value="loop">ループ (N 並列・空いた分を即送信)</option><option value="stagger">インタリーブ (デコード中に次を送信)</option></select></div>
+        <div id="bm-gap-wrap" class="hidden"><label class="f" for="bm-gap">送信間隔 (秒)</label><input type="number" id="bm-gap" min="0.1" step="0.1" value="2" style="width:90px"></div>
+        <div id="bm-conc-wrap"><label class="f" for="bm-conc">並列度 (カンマ区切り)</label><input type="text" id="bm-conc" value="1,8" style="width:110px"></div>
         <div><label class="f" for="bm-num">リクエスト数/段</label><input type="number" id="bm-num" min="1" value="24" style="width:96px"></div>
         <div><label class="f" for="bm-warm">warmup</label><input type="number" id="bm-warm" min="0" value="1" style="width:76px"></div>
         <div><label class="f" for="bm-inlen">prompt 語数≈</label><input type="number" id="bm-inlen" min="8" value="128" style="width:90px"></div>
@@ -35,6 +37,7 @@ VIEWS.bench = `
       <label class="f" for="bm-model">モデル名 <span class="muted">(空 = /v1/models の先頭 id を自動使用)</span></label>
       <input type="text" id="bm-model" class="mono" placeholder="(自動)">
       <div class="muted" style="font-size:11.5px;margin-top:6px">プロンプトは launcher が生成するランダム文章 (≈語数。リクエスト毎に重複なしで prefix cache を抑制)。トークン数は API の usage 優先、未取得時は文字数推定 (≈)。同一機上で複数実行すると結果が相互に狂うため同時実走は 1 件です。</div>
+      <div class="muted" id="bm-mode-note" style="font-size:11.5px;margin-top:4px"></div>
       <div class="row" style="margin-top:10px">
         <button class="primary need-bench" id="bm-start" onclick="bmStart()"><svg class=ic aria-hidden=true><use href=#i-play /></svg> ベンチ開始</button>
         <span class="grow"></span>
@@ -57,7 +60,8 @@ VIEWS.bench = `
 const BM_KEY = "llm-laun…h.v1";
 const BM_TABS = ["run", "history", "compare"];
 const BM_INPUTS = ["bm-profile","bm-conc","bm-num","bm-warm","bm-inlen","bm-outlen",
-                   "bm-temp","bm-endpoint","bm-stream","bm-autostart","bm-stopafter","bm-model"];
+                   "bm-temp","bm-endpoint","bm-stream","bm-autostart","bm-stopafter","bm-model",
+                   "bm-mode","bm-gap"];
 function bmInit() {
   let d = {};
   try { d = JSON.parse(localStorage.getItem(BM_KEY) || "{}") || {}; } catch { d = {}; }
@@ -71,11 +75,23 @@ function bmInit() {
   set("#bm-profile", d.profile); set("#bm-conc", d.conc); set("#bm-num", d.num);
   set("#bm-warm", d.warm); set("#bm-inlen", d.inlen); set("#bm-outlen", d.outlen);
   set("#bm-temp", d.temp); set("#bm-endpoint", d.endpoint);
-  set("#bm-model", d.model);
+  set("#bm-model", d.model); set("#bm-mode", d.mode); set("#bm-gap", d.gap);
   if (d.stream === false) $("#bm-stream").checked = false;
   if (d.autostart === false) $("#bm-autostart").checked = false;
   if (d.stopafter === true) $("#bm-stopafter").checked = true;
   BM_INPUTS.forEach(id => $(`#${id}`).addEventListener("change", bmPersist));
+  bmModeUI();
+}
+/* インタリーブ模式的な UI 切り替え: 間隔入力を出し、並列度入力は意味を失うので隠す
+   (バックエンドは mode=stagger で concurrency=[本数] に正規化する) */
+function bmModeUI() {
+  const el = $("#bm-mode"); if (!el) return;
+  const st = el.value === "stagger";
+  $("#bm-gap-wrap").classList.toggle("hidden", !st);
+  $("#bm-conc-wrap").classList.toggle("hidden", st);
+  $("#bm-mode-note").textContent = st
+    ? "インタリーブ: リクエスト数 = 同時ストリーム数。前の本がデコード中でも送信間隔秒ごとに次のプロンプトを送り、干渉 (後着の待ち・走行中の停止) を段として測ります。スイムレーンに停止区間 (赤)、比較バーに停止セグメントが出ます。"
+    : "";
 }
 function bmPersist() {
   if (!S.bench) return;
@@ -87,6 +103,7 @@ function bmPersist() {
       endpoint: v("#bm-endpoint"), model: v("#bm-model"),
       stream: $("#bm-stream").checked, autostart: $("#bm-autostart").checked,
       stopafter: $("#bm-stopafter").checked, tab: S.bench.tab,
+      mode: v("#bm-mode"), gap: v("#bm-gap"),
     }));
   } catch { /* 容量超過等は無視 */ }
 }
@@ -120,6 +137,8 @@ function bmFormBody() {
     model: v("#bm-model"),
     endpoint: v("#bm-endpoint"),
     stream: $("#bm-stream").checked,
+    mode: v("#bm-mode") || "loop",
+    gap_s: parseFloat(v("#bm-gap")) || 2,
     concurrency: conc.length ? conc : [8],
     num_prompts: num("#bm-num", 24),
     input_len: num("#bm-inlen", 128),
@@ -199,8 +218,9 @@ function bmRerun(id) {
   set("#bm-num", p.num_prompts); set("#bm-warm", p.warmup); set("#bm-inlen", p.input_len);
   set("#bm-outlen", p.output_len); set("#bm-temp", p.temperature); set("#bm-endpoint", p.endpoint);
   set("#bm-stream", p.stream); set("#bm-autostart", p.auto_start); set("#bm-stopafter", p.stop_after);
-  set("#bm-model", p.model || "");
+  set("#bm-model", p.model || ""); set("#bm-mode", p.mode || "loop"); set("#bm-gap", p.gap_s);
   S.bench.tab = "run";                      // フォームは実行タブ: そのまま見せる
+  bmModeUI();
   bmPersist(); renderBench();
   toast("設定を実行タブに読み込みました (<svg class=ic aria-hidden=true><use href=#i-play /></svg> ベンチ開始で実行)");
 }
@@ -219,10 +239,13 @@ function bmStatusBadge(r) {
   return `<span class="badge ${cls}"><span class="dot"></span>${label}</span>`;
 }
 function bmParamsSummary(p) {
-  const c = (p.concurrency || []).join("/") || "-";
-  return `${p.num_prompts}req × ${c}並列 · in≈${p.input_len}語 · out≤${p.output_len}t · ` +
-    `${p.endpoint === "chat" ? "chat" : "completions"}${p.stream ? "+stream" : ""}` +
+  const ep = `${p.endpoint === "chat" ? "chat" : "completions"}${p.stream ? "+stream" : ""}` +
     (p.temperature ? ` · temp${p.temperature}` : " · greedy");
+  if (p.mode === "stagger") {
+    return `インタリーブ ${p.num_prompts} 本 · ${(p.gap_s || 2)}s 間隔で送信 · in≈${p.input_len}語 · out≤${p.output_len}t · ${ep}`;
+  }
+  const c = (p.concurrency || []).join("/") || "-";
+  return `${p.num_prompts}req × ${c}並列 · in≈${p.input_len}語 · out≤${p.output_len}t · ${ep}`;
 }
 /* 代表値 (履歴行・比較ピッカー共通): decode 優先、無い = 非 stream なので出力 peak */
 function bmPeakOf(r) {
@@ -321,6 +344,19 @@ function bmSvgChart(ser, opts) {
 function bmLegend(ser) {
   return `<div class="bm-lgd">${ser.map(s => `<span><i style="background:${s.color}"></i>${esc(s.label || "")}</span>`).join("")}</div>`;
 }
+/* 停止区間 (r.g = [開始, 終了] の組、段開始からの秒。チャンク間が検出閾値以上だった
+   区間をバックエンドが最大 100 個記録) をデコード行に赤で重畳する。ライブでは
+   まだ伸びるので until 時刻でクリップ。行ホバーのツールチップにも合計 (r.st) を出す */
+function bmStallRects(r, rect, until) {
+  const out = [];
+  for (const g of (Array.isArray(r.g) ? r.g : [])) {
+    if (!Array.isArray(g)) continue;
+    const g0 = Math.max(typeof g[0] === "number" ? g[0] : -1, r.a ?? -1);
+    const g1 = Math.min(typeof g[1] === "number" ? g[1] : until, until);
+    if (g1 - g0 > 0.005) out.push(rect(g0, g1, "var(--err)", `停止 ${(g1 - g0).toFixed(2)}s (チャンクの空白・検出閾値以上)`, ".9"));
+  }
+  return out;
+}
 /* リクエスト単位のフェーズ・スイムレーン (ガント)。
    reqs = [{s,a,d,e,n}] — s=送信 a=最初のトークン d=最後のトークン e=確定 n=トークン数
    (段開始からの秒。None=未達)。行の重なりが同時実走、琥珀の長さが待ち (送信→最初の
@@ -363,11 +399,13 @@ function bmPhaseSvg(reqs, nowSec) {
       if (r.d != null) {
         const ds = Math.max(r.d - r.a, 0.05), rate = r.n / ds;
         segs.push(rect(r.a, r.d, "var(--ok)", `デコード ${f2(ds)}s ${r.n}tok (${f2(rate)} tok/s)`));
+        segs.push(...bmStallRects(r, rect, r.d));
         if (r.e != null && r.e - r.d > 0.01) segs.push(rect(r.d, r.e, "#94a3b8", `確定 (クローズ) ${f2(r.e - r.d)}s`));
-        tip += ` · デコード ${f2(ds)}s ${r.n}tok (${f2(rate)} tok/s)`;
+        tip += ` · デコード ${f2(ds)}s ${r.n}tok (${f2(rate)} tok/s)` + (r.st ? ` · 停止計 ${f2(r.st)}s` : "");
       } else {
         segs.push(rect(r.a, till, "var(--ok)", "デコード中…", ".8"));
-        tip += ` · デコード中 ${r.n}tok`;
+        segs.push(...bmStallRects(r, rect, till));
+        tip += ` · デコード中 ${r.n}tok` + (r.st ? ` · 停止計 ${f2(r.st)}s` : "");
       }
     }
     return `<g><title>#${i + 1} ${esc(tip)}</title>` +
@@ -380,19 +418,22 @@ function bmPhaseSvg(reqs, nowSec) {
 function bmPhaseBlock(title, reqs, nowSec, truncated) {
   if (!(reqs || []).length) return "";
   const pm = reqs.some(r => r && r.arr != null);   // サーバー内訳が付き始めたか
-  const legend = pm
+  const anyStall = reqs.some(r => r && ((Array.isArray(r.g) && r.g.length) || r.st));
+  let legend = pm
     ? `<span class="bm-lgd"><span><i style="background:var(--acc)"></i>送信</span>` +
       `<span><i style="background:var(--purple)"></i>キュー待ち</span>` +
       `<span><i style="background:var(--warn)"></i>プレフィル</span>` +
       `<span><i style="background:var(--ok)"></i>デコード</span>` +
-      `<span><i style="background:#94a3b8"></i>確定</span></span>`
+      `<span><i style="background:#94a3b8"></i>確定</span>`
     : `<span class="bm-lgd"><span><i style="background:var(--warn)"></i>待ち</span>` +
       `<span><i style="background:var(--ok)"></i>デコード</span>` +
-      `<span><i style="background:#94a3b8"></i>確定</span></span>`;
+      `<span><i style="background:#94a3b8"></i>確定</span>`;
+  if (anyStall) legend += `<span><i style="background:var(--err)"></i>停止</span>`;
+  legend += `</span>`;
   return `<div class="row" style="gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
       <b style="font-size:13px">${esc(title)}</b>${legend}</div>` +
     `<div class="bm-chart" style="margin-top:4px">${bmPhaseSvg(reqs, nowSec)}</div>` +
-    `<div class="muted" style="font-size:11px">各行 = リクエスト 1 本 (上から送信順)。行の重なり = 同時に走っていた区間。行にホバーで内訳${truncated ? " · 多いため等間隔に間引いて表示" : ""}。<br>` +
+    `<div class="muted" style="font-size:11px">各行 = リクエスト 1 本 (上から送信順)。行の重なり = 同時に走っていた区間。行にホバーで内訳${truncated ? " · 多いため等間隔に間引いて表示" : ""}。デコード行の赤 = 停止区間 (チャンクが届かなかった空白)。<br>` +
     (pm
       ? `<b>キュー待ち</b> = サーバーが他の生成を捌いている間待たされた時間 (サーバー側 TTFT − プレフィル)。<b>プレフィル</b> = プロンプトの読み込み・初期計算 (サーバー報告の prompt_ms)。薄い灰の残り幅は最初のトークンの配信。いずれもサーバー (/metrics) が報告した値で、実測の「送信→最初のトークン」枠の中に配置しています`
       : `<b>待ち</b> = 送信 → 最初のトークン (サーバーのキュー積み込み + プレフィル + 配送をまとめた実測値。このサーバーは内訳を公開しないため分割できません。strata 系では完了後に自動で分割表示へ変わります)`) + `</div>`;
@@ -432,6 +473,7 @@ const BM_PHASE_SEGS = [
   ["res",  "#b9c6d4", "トークン配信"],
   ["wait", "var(--warn)", "待ち (キュー+プレフィル+配送)"],
   ["dec",  "var(--ok)", "デコード"],
+  ["stall", "var(--err)", "停止 (デコード内)"],
   ["cl",   "#94a3b8", "確定"],
 ];
 /* 1 段のリクエスト平均フェーズ秒。サーバー内訳あり (strata 系) は 送信/キュー/プレフィル/配信
@@ -440,8 +482,9 @@ function bmPhaseAgg(st) {
   const rows = (st.reqs || []).filter(r => r && r.s != null);
   if (!rows.length) return null;
   const avg = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
-  const g = {send: [], q: [], p: [], res: [], wait: [], dec: [], cl: [], tok: []};
+  const g = {send: [], q: [], p: [], res: [], wait: [], dec: [], cl: [], tok: [], st: []};
   for (const r of rows) {
+    if (typeof r.st === "number") g.st.push(r.st);   // リクエスト単位の停止合計秒 (閾値以上)
     if (r.arr != null && (r.q != null || r.p != null)) {
       const a0 = Math.max(r.arr, r.s);
       if (a0 - r.s > 0.005) g.send.push(a0 - r.s);
@@ -458,7 +501,7 @@ function bmPhaseAgg(st) {
   }
   return {pm: rows.some(r => r.arr != null), send: avg(g.send), q: avg(g.q), p: avg(g.p),
           res: avg(g.res), wait: avg(g.wait), dec: avg(g.dec), cl: avg(g.cl),
-          tok: avg(g.tok), n: rows.length};
+          stall: avg(g.st), tok: avg(g.tok), n: rows.length};
 }
 /* フェーズ比較バー: 同じ並列度段のリクエスト平均を実行ごとに積み上げ、共通の時間スケールで
    比較する横棒 (スイムレーンは実行ごとに別々で比較できなかった対策)。行末に decode tok/s と
@@ -467,10 +510,19 @@ function bmPhaseCmpBlock(entries) {
   const has = entries.filter(e => e && e.agg);
   if (!has.length) return "";
   const allPm = has.every(e => e.agg.pm), allFb = has.every(e => !e.agg.pm);
-  const defs = allPm ? BM_PHASE_SEGS.filter(s => s[0] !== "wait")
-             : allFb ? BM_PHASE_SEGS.filter(s => ["wait", "dec", "cl"].includes(s[0]))
-             : BM_PHASE_SEGS;                        // 混在: 全定義を維持 (各行は存在する枠だけ描画)
-  const tot = e => BM_PHASE_SEGS.reduce((s, d) => s + (e.agg[d[0]] || 0), 0);
+  const hasStall = has.some(e => e.agg.stall != null);
+  // セグメント順: 待ち系 → デコード (停止があれば切り出して直後に赤) → 確定。
+  // 混在 (内訳あり/なしの実行) は全枠を出し、各行は値のある枠だけ描画する
+  let keys = allPm ? ["send", "q", "p", "res"] : allFb ? ["wait"] : ["send", "q", "p", "res", "wait"];
+  keys.push("dec");
+  if (hasStall) keys.push("stall");
+  keys.push("cl");
+  const segMap = Object.fromEntries(BM_PHASE_SEGS.map(s => [s[0], s]));
+  const defs = keys.map(k => segMap[k]);
+  // 停止はデコード区間のサブセット。切り出すときは緑を純生成分に寄せて棒の合計は不変
+  const segVal = (e, k) => k === "dec" && e.agg.stall != null
+    ? Math.max(0, (e.agg.dec || 0) - (e.agg.stall || 0)) : e.agg[k];
+  const tot = e => keys.reduce((s, k) => s + (segVal(e, k) || 0), 0);
   const maxT = Math.max(0.05, ...has.map(tot));
   const W = 640, L = 160, R = 128, T = 2, rowH = 20, gp = 8, B = 14;
   const H = T + has.length * (rowH + gp) + B;
@@ -480,13 +532,13 @@ function bmPhaseCmpBlock(entries) {
     const y = T + i * (rowH + gp);
     let t0 = 0;
     const segHtml = defs.map(([k, c, lab]) => {
-      const v = e.agg[k];
+      const v = segVal(e, k);
       if (!v || v <= 0.004) return "";
       const x0 = X(t0); t0 += v; const w = X(t0) - x0;
       const tx = w > 44 ? `<text x="${(x0 + w / 2).toFixed(1)}" y="${y + rowH - 6}" text-anchor="middle" font-size="9" fill="#fff" style="paint-order:stroke;stroke:rgba(0,0,0,.35);stroke-width:2px">${f2(v)}</text>` : "";
       return `<rect x="${x0.toFixed(1)}" y="${y}" width="${Math.max(1, w).toFixed(1)}" height="${rowH}" rx="3" style="fill:${c}"><title>${esc(lab)} 平均 ${f2(v)} (${e.agg.n} リクエスト平均)</title></rect>` + tx;
     }).join("");
-    const end = `<text x="${(X(tot(e)) + 6).toFixed(1)}" y="${y + rowH - 6}" font-size="9.5" style="fill:var(--sub)">${e.decTps != null ? "decode " + bmTps(e.decTps) + " t/s · " : ""}計 ${f2(tot(e))}</text>`;
+    const end = `<text x="${(X(tot(e)) + 6).toFixed(1)}" y="${y + rowH - 6}" font-size="9.5" style="fill:var(--sub)">${e.decTps != null ? "decode " + bmTps(e.decTps) + " t/s · " : ""}計 ${f2(tot(e))}${e.agg.stall ? ` (停止 ${f2(e.agg.stall)})` : ""}</text>`;
     return `<text x="2" y="${y + rowH - 6}" font-size="10" style="fill:var(--text)">${esc(String(e.label).slice(0, 22))}</text>` + segHtml + end;
   }).join("");
   const axis = [0, maxT / 2, maxT].map(v =>
@@ -509,15 +561,17 @@ function bmCmpPanel(runs) {
   const mSel = `<select onchange="bmCmpMetric(this.value)" style="width:130px">` +
     Object.keys(BM_METRICS).map(k => `<option value="${k}"${k === mk ? " selected" : ""}>${BM_METRICS[k].lab}</option>`).join("") + `</select>`;
   const base = sel[0];
+  // インタリーブ実行が混ざっていたら「並列度」は「本数」の意味になる (単位の切り替え)
+  const unit = sel.some(r => r.params && r.params.mode === "stagger") ? " 本" : "p";
   const rows = concs.map(c => {
     const bs = bmStageOf(base, c), bv = bs ? M.get(bs) : null;
     const vals = sel.map(r => { const st = bmStageOf(r, c); return st ? M.get(st) : null; });
     const nn = vals.filter(v => v != null);
     const best = nn.length > 1 ? (M.up ? Math.max(...nn) : Math.min(...nn)) : null;
-    return `<tr><td>${c}p</td>` + vals.map((v, i) =>
+    return `<tr><td>${c}${unit}</td>` + vals.map((v, i) =>
       `<td${v != null && v === best ? ' style="font-weight:700"' : ""}>${v == null ? "-" : M.fmt(v)}${i ? bmDeltaCell(v, bv, M.up) : ""}</td>`).join("") + `</tr>`;
   }).join("");
-  const tbl = `<div class="bm-wrap" data-scrollkey="cmp:tbl"><table class="bm"><tr><th>並列度</th>` +
+  const tbl = `<div class="bm-wrap" data-scrollkey="cmp:tbl"><table class="bm"><tr><th>${unit === "p" ? "並列度" : "本数"}</th>` +
     sel.map((r, i) => `<th style="text-align:center;color:${col(i)}">${esc(bmRunShort(r))}</th>`).join("") +
     `</tr>${rows}</table></div>` +
     `<div class="muted" style="font-size:11px;margin-top:4px">Δ = 基準 (${esc(bmRunShort(base))}) 比。太字 = その並列度で最良</div>`;
@@ -526,7 +580,7 @@ function bmCmpPanel(runs) {
     pts: (r.stages || []).map(s => { const d = s.decode_tps && s.decode_tps.avg; const v = d != null ? d : s.out_tps; return v != null ? [s.concurrency, +v] : null; })
       .filter(Boolean).sort((a, b) => a[0] - b[0])}))
     .filter(s => s.pts.length > 1);
-  const ts = sel.map((r, i) => { const st = bmStageOf(r, conc); return {color: col(i), label: `${bmRunShort(r)} (${conc}p)`, pts: st ? bmSeriesPts(st) : []}; })
+  const ts = sel.map((r, i) => { const st = bmStageOf(r, conc); return {color: col(i), label: `${bmRunShort(r)} (${conc}${unit})`, pts: st ? bmSeriesPts(st) : []}; })
     .filter(s => s.pts.length >= 2);
   const noSeries = sel.length - ts.length;
   const cSel = `<div class="row" style="gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
@@ -541,8 +595,8 @@ function bmCmpPanel(runs) {
   const phOk = phs.filter(e => e.agg).length, phMiss = sel.length - phOk;
   const phBlock = phOk ? `<div class="row" style="gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
       <b style="font-size:13px">フェーズ比較</b>
-      <span class="muted" style="font-size:11px">リクエスト 1 本あたりの平均秒 (同じ時間スケール・積み上げ) · 時間経過と同じ ${conc}p 段</span></div>` +
-      `<div class="bm-chart">${bmPhaseCmpBlock(phs)}<div class="muted" style="font-size:11px">「待ち」の中身分割はサーバーが内訳を報告する実行のみ (strata 系 /metrics: キュー待ち=紫・プレフィル=琥珀)。非公開のサーバーは「待ち」にまとまった実測値です。行末 = その段の decode tok/s と合計平均秒 · 棒にホバーで内訳${phMiss ? ` · フェーズ記録なし ${phMiss} 件 (記録機能追加前の履歴)` : ""}</div></div>`
+      <span class="muted" style="font-size:11px">リクエスト 1 本あたりの平均秒 (同じ時間スケール・積み上げ) · 時間経過と同じ ${conc}${unit} 段</span></div>` +
+      `<div class="bm-chart">${bmPhaseCmpBlock(phs)}<div class="muted" style="font-size:11px">「待ち」の中身分割はサーバーが内訳を報告する実行のみ (strata 系 /metrics: キュー待ち=紫・プレフィル=琥珀)。非公開のサーバーは「待ち」にまとまった実測値です。<b>停止 (赤)</b> はデコード区間から切り出した空白時間 (チャンク間が検出閾値以上) — デコードの緑と足すと丸ごとのデコード秒に戻ります。行末 = その段の decode tok/s と合計平均秒 · 棒にホバーで内訳${phMiss ? ` · フェーズ記録なし ${phMiss} 件 (記録機能追加前の履歴)` : ""}</div></div>`
     : `<div class="muted" style="font-size:12px;margin-top:8px">選択した実行にフェーズ記録がありません (記録機能追加前の履歴です)。数値比較は下の表でできます</div>`;
   return `<div class="card bm-cmp">
     <div class="row"><b style="font-size:14px">結果比較 (${sel.length} 件)</b><span class="grow"></span>
@@ -587,12 +641,12 @@ function bmStageTable(stages, key) {
       <button class="ghost" style="min-height:28px;font-size:12px" onclick="bmMoreCols()">${X ? "▾ 補助列を下げる" : "▸ 補助列 (req/s・合計 tok/s・遅延 p50)"}</button>
       <span class="muted" style="font-size:11px">先頭列は固定 / 表は左右にスクロールできます</span></div>
     <div class="bm-wrap" data-scrollkey="${esc(key)}"><table class="bm" data-x="${X ? 1 : 0}"><tr>` +
-    `<th>並列度</th><th>OK</th><th class="bm-x">req/s</th><th title="生成開始後のチャンク間隔から算出した生成速度 (stream ON のみ)。主指標">decode tok/s</th><th>出力 tok/s</th><th class="bm-x">合計 tok/s</th>` +
+    `<th>${stages.some(s => s && s.mode === "stagger") ? "本数" : "並列度"}</th><th>OK</th><th class="bm-x">req/s</th><th title="生成開始後のチャンク間隔から算出した生成速度 (stream ON のみ)。主指標">decode tok/s</th><th>出力 tok/s</th><th class="bm-x">合計 tok/s</th>` +
     `<th>TTFT avg</th><th>TTFT p99</th><th class="bm-x">遅延 p50</th><th>遅延 p99</th>` +
     `<th title="生成開始後、チャンクが最も長く途切れた秒数 (ステージ中の全リクエストのワースト)">最大停止</th>` +
     `<th title="${th}s 以上の停止が発生した延べ回数 (全リクエスト合計)">停止数</th></tr>` +
     stages.map(st => `<tr>
-      <td>${st.concurrency}p</td>
+      <td>${st.concurrency}${st.mode === "stagger" ? " 本" : "p"}</td>
       <td>${st.ok}/${st.ok + st.fail}${st.aborted ? " <svg class=ic aria-hidden=true><use href=#i-stop /></svg>" : ""}</td>
       <td class="bm-x">${bmF2(st.rps)}</td><td><b>${bmTps(st.decode_tps && st.decode_tps.avg)}</b></td><td>${bmTps(st.out_tps)}</td><td class="bm-x">${bmTps(st.total_tps)}</td>
       <td>${bmF2(st.ttft && st.ttft.avg)}s</td><td>${bmF2(st.ttft && st.ttft.p99)}s</td>
@@ -679,16 +733,17 @@ function renderBenchActive(run) {
   // 主指標は decode tok/s (確定値と同じ「リクエスト毎の算術平均」が最初の完了以降刻々と収束)。
   // 完了 0 件のうちは出力累積を「計測中」明示で出し、欲しがられる数字を黙って消さない
   const dec = (pr.dec_n || 0) > 0 ? (pr.dec_sum || 0) / pr.dec_n : null;
+  const ulab = (run.params || {}).mode === "stagger" ? " 本" : "p";   // インタリーブは本数表示
   const chips = (pr.stages || []).map((c, i) => {
     const st = (run.stages || [])[i];
     // st は「完了済み段」にしか存在しない (pr.stages は全予定並列度)。実行中・待機
     // の段では undefined なので、参照は必ず st の存在を確認した後で行うこと
     // (先に st.xxx と触ると TypeError → 画面全体が落ちる)。
     if (st) { const d = st.decode_tps && st.decode_tps.avg;
-      return `<span class="badge ok" title="${st.ok} req / ${bmF1(st.wall_secs)}s · ${d != null ? "decode" : "出力"}">${c}p ✓ ${bmTps(d != null ? d : st.out_tps)} t/s</span>`; }
+      return `<span class="badge ok" title="${st.ok} req / ${bmF1(st.wall_secs)}s · ${d != null ? "decode" : "出力"}">${c}${ulab} ✓ ${bmTps(d != null ? d : st.out_tps)} t/s</span>`; }
     if (i === pr.stage && (run.status === "running" || run.status === "queued"))
-      return `<span class="badge warn"><span class="dot"></span>${c}p 実行中</span>`;
-    return `<span class="badge">${c}p 待機</span>`;
+      return `<span class="badge warn"><span class="dot"></span>${c}${ulab} 実行中</span>`;
+    return `<span class="badge">${c}${ulab} 待機</span>`;
   }).join(" ");
   const phase = {queued: "待機中…", launching: "サーバー起動中… (数分かかります)", waiting: "サーバーの API 応答を待っています…",
                  warmup: "ウォームアップ中 (統計外)", measure: "計測中", done: "完了"}[pr.phase] || pr.phase || "";
@@ -793,7 +848,7 @@ function renderBenchCompare() {
       <div class="muted" style="margin-top:4px;font-size:12px">${esc(bmParamsSummary(r.params || {}))}${r.error ? ` · <span style="color:var(--err)">${esc(String(r.error).slice(0, 120))}</span>` : ""}</div>
       ${bmLiveChart(r)}
       ${(r.stages || []).length ? bmStageTable(r.stages, "c:" + r.id) : ""}
-      ${(r.stages || []).map(st => bmPhaseBlock(`フェーズ (${st.concurrency}p)`, st.reqs, st.wall_secs, st.reqs_truncated)).join("")}
+      ${(r.stages || []).map(st => bmPhaseBlock(`フェーズ (${st.concurrency}${st.mode === "stagger" ? " 本" : "p"})`, st.reqs, st.wall_secs, st.reqs_truncated)).join("")}
       <div class="muted mono" style="margin-top:6px;font-size:11px;overflow-wrap:anywhere">model: ${esc(r.model || "-")} · session: ${esc(r.session_id || "-")}${r.auto_started ? " (自動起動)" : ""}${r.stopped_after ? " · 停止済み" : ""}${r.port ? ` · :${r.port}` : ""}</div>
       ${r.stop_error ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--err)">サーバーの自動停止に失敗: ${esc(r.stop_error)}</div>` : ""}
       ${r.server_left_running ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--warn)">※ launcher 再起動時に自動起動したサーバーが残っています。サーバータブで停止してください</div>` : ""}

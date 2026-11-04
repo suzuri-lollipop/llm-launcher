@@ -209,7 +209,7 @@ def test_phase_ui_renders_swimlanes():
     js = _bench_js()
     assert "function bmPhaseSvg" in js and "function bmPhaseBlock" in js
     assert "フェーズ (ライブ)" in js                       # 実行中カードにライブ版
-    assert "フェーズ (${st.concurrency}p)" in js           # 結果・比較タブの詳細に段ごと
+    assert 'フェーズ (${st.concurrency}${st.mode === "stagger" ? " 本" : "p"})' in js   # 結果詳細に段ごと
     assert "var(--warn)" in js and "var(--ok)" in js       # 待ち=琥珀 / デコード=緑
     assert "プレフィル" in js and "確定" in js
     # サーバー内訳が公開されている場合は 送信(青)/キュー待ち(紫)/プレフィル(琥珀) に分割、
