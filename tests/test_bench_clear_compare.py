@@ -362,6 +362,24 @@ def test_bench_page_tabs_split_functions():
     assert ".bm-tabs{" in css and ".bm-tab.on{" in css
 
 
+def test_phase_compare_bars():
+    """フェーズ記録 (待ち/プレフィル/デコード) は実行ごとのスイムレーンだけで、
+    「どちらの実行で待いが長いか」が比較できなかった。比較パネルに同じ段のリクエスト平均を
+    共通スケールで積み上げる比較バーを置く (ユーザー指摘)。"""
+    js = _bench_js()
+    assert "function bmPhaseAgg" in js and "function bmPhaseCmpBlock" in js
+    panel = js[js.index("function bmCmpPanel"):js.index("function bmCmpToggle")]
+    assert "bmPhaseCmpBlock(" in panel and "フェーズ比較" in panel and "bmPhaseAgg(" in panel
+    # 色はスイムレーンと同一系 (キュー待ち=紫 / プレフィル=琥珀 / デコード=緑 / 確定=灰)
+    segs = js[js.index("const BM_PHASE_SEGS"):js.index("function bmPhaseAgg")]
+    assert "var(--purple)" in segs and "var(--warn)" in segs and "var(--ok)" in segs and "#94a3b8" in segs
+    # 内訳非公開サーバーは「待ち」一枚 / 旧履歴は正直に記録なしと明示 (黙って消さない)
+    assert '"wait"' in segs and "フェーズ記録がありません" in js
+    # 平均は reqs のセカンダリ算出 (バックエンド変更不要): q/p/待ち/デコード/確定を avg
+    agg = js[js.index("function bmPhaseAgg"):js.index("function bmPhaseCmpBlock")]
+    assert "g.q.push" in agg and "g.wait.push" in agg and "g.dec.push" in agg
+
+
 def test_api_route_declared():
     src = (Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "app.py").read_text(encoding="utf-8")
     assert '@app.delete("/api/benchmarks")' in src

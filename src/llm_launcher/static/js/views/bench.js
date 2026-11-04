@@ -421,7 +421,80 @@ function bmDeltaCell(v, b, up) {
   const good = d > 0 ? up : !up;
   return ` <span style="color:var(--${good ? "ok" : "err"});font-size:10.5px">${d > 0 ? "+" : ""}${Math.abs(d) >= 10 ? Math.round(d) : d.toFixed(1)}%</span>`;
 }
-/* 比較パネル: 選択中の実行を重ねる。折れ線 (並列度 vs 出力) + 経時オーバーレイ + 指標表 */
+/* 比較パネル: 選択中の実行を重ねる。折れ線 (並列度 vs 出力) + 経時オーバーレイ +
+   フェーズ比較バー + 指標表 */
+/* フェーズ比較バーのセグメント定義 (色はスイムレーンと同一。内訳非公開のサーバーは
+   wait が q/p/res の枠をまとめて担う) */
+const BM_PHASE_SEGS = [
+  ["send", "var(--acc)", "送信"],
+  ["q",    "var(--purple)", "キュー待ち"],
+  ["p",    "var(--warn)", "プレフィル"],
+  ["res",  "#b9c6d4", "トークン配信"],
+  ["wait", "var(--warn)", "待ち (キュー+プレフィル+配送)"],
+  ["dec",  "var(--ok)", "デコード"],
+  ["cl",   "#94a3b8", "確定"],
+];
+/* 1 段のリクエスト平均フェーズ秒。サーバー内訳あり (strata 系) は 送信/キュー/プレフィル/配信
+   に分け、なしは「待ち」にまとめる。無い項目は null のまま (0 と区別する) */
+function bmPhaseAgg(st) {
+  const rows = (st.reqs || []).filter(r => r && r.s != null);
+  if (!rows.length) return null;
+  const avg = a => a.length ? a.reduce((x, y) => x + y, 0) / a.length : null;
+  const g = {send: [], q: [], p: [], res: [], wait: [], dec: [], cl: [], tok: []};
+  for (const r of rows) {
+    if (r.arr != null && (r.q != null || r.p != null)) {
+      const a0 = Math.max(r.arr, r.s);
+      if (a0 - r.s > 0.005) g.send.push(a0 - r.s);
+      if (r.q != null) g.q.push(Math.max(r.q, 0));
+      if (r.p != null) g.p.push(Math.max(r.p, 0));
+      const res = r.a != null ? r.a - a0 - (r.q || 0) - (r.p || 0) : null;
+      if (res != null && res > 0.005) g.res.push(res);
+    } else if (r.a != null && r.arr == null) {
+      g.wait.push(Math.max(r.a - r.s, 0));
+    }
+    if (r.a != null && r.d != null) g.dec.push(Math.max(r.d - r.a, 0));
+    if (r.d != null && r.e != null) g.cl.push(Math.max(r.e - r.d, 0));
+    if (r.n) g.tok.push(r.n);
+  }
+  return {pm: rows.some(r => r.arr != null), send: avg(g.send), q: avg(g.q), p: avg(g.p),
+          res: avg(g.res), wait: avg(g.wait), dec: avg(g.dec), cl: avg(g.cl),
+          tok: avg(g.tok), n: rows.length};
+}
+/* フェーズ比較バー: 同じ並列度段のリクエスト平均を実行ごとに積み上げ、共通の時間スケールで
+   比較する横棒 (スイムレーンは実行ごとに別々で比較できなかった対策)。行末に decode tok/s と
+   合計平均秒、凡例はそのデータに実際に存在するセグメントだけを出す */
+function bmPhaseCmpBlock(entries) {
+  const has = entries.filter(e => e && e.agg);
+  if (!has.length) return "";
+  const allPm = has.every(e => e.agg.pm), allFb = has.every(e => !e.agg.pm);
+  const defs = allPm ? BM_PHASE_SEGS.filter(s => s[0] !== "wait")
+             : allFb ? BM_PHASE_SEGS.filter(s => ["wait", "dec", "cl"].includes(s[0]))
+             : BM_PHASE_SEGS;                        // 混在: 全定義を維持 (各行は存在する枠だけ描画)
+  const tot = e => BM_PHASE_SEGS.reduce((s, d) => s + (e.agg[d[0]] || 0), 0);
+  const maxT = Math.max(0.05, ...has.map(tot));
+  const W = 640, L = 160, R = 128, T = 2, rowH = 20, gp = 8, B = 14;
+  const H = T + has.length * (rowH + gp) + B;
+  const X = t => L + t / maxT * (W - L - R);
+  const f2 = v => (Math.round(v * 100) / 100).toFixed(2) + "s";
+  const rowsHtml = has.map((e, i) => {
+    const y = T + i * (rowH + gp);
+    let t0 = 0;
+    const segHtml = defs.map(([k, c, lab]) => {
+      const v = e.agg[k];
+      if (!v || v <= 0.004) return "";
+      const x0 = X(t0); t0 += v; const w = X(t0) - x0;
+      const tx = w > 44 ? `<text x="${(x0 + w / 2).toFixed(1)}" y="${y + rowH - 6}" text-anchor="middle" font-size="9" fill="#fff" style="paint-order:stroke;stroke:rgba(0,0,0,.35);stroke-width:2px">${f2(v)}</text>` : "";
+      return `<rect x="${x0.toFixed(1)}" y="${y}" width="${Math.max(1, w).toFixed(1)}" height="${rowH}" rx="3" style="fill:${c}"><title>${esc(lab)} 平均 ${f2(v)} (${e.agg.n} リクエスト平均)</title></rect>` + tx;
+    }).join("");
+    const end = `<text x="${(X(tot(e)) + 6).toFixed(1)}" y="${y + rowH - 6}" font-size="9.5" style="fill:var(--sub)">${e.decTps != null ? "decode " + bmTps(e.decTps) + " t/s · " : ""}計 ${f2(tot(e))}</text>`;
+    return `<text x="2" y="${y + rowH - 6}" font-size="10" style="fill:var(--text)">${esc(String(e.label).slice(0, 22))}</text>` + segHtml + end;
+  }).join("");
+  const axis = [0, maxT / 2, maxT].map(v =>
+    `<text x="${X(v).toFixed(1)}" y="${H - 3}" text-anchor="middle" font-size="9" style="fill:var(--sub)">${Math.round(v * 100) / 100}s</text>`).join("") +
+    `<line x1="${L}" x2="${W - R}" y1="${H - B + 3}" y2="${H - B + 3}" style="stroke:var(--line)"/>`;
+  return `<svg viewBox="0 0 ${W} ${H}" role="img">${rowsHtml}${axis}</svg>` +
+    `<div class="bm-lgd">${defs.map(s => `<span><i style="background:${s[1]}"></i>${s[2]}</span>`).join("")}</div>`;
+}
 function bmCmpPanel(runs) {
   const d = S.bench;
   d.cmp = (d.cmp || []).filter(id => runs.some(r => r.id === id));   // 削除された id を掃除
@@ -460,6 +533,17 @@ function bmCmpPanel(runs) {
       <b style="font-size:13px">時間経過</b>
       <label style="font-size:12px">並列度 <select onchange="bmCmpConc(this.value)" style="width:90px">${concs.map(c => `<option value="${c}"${c === conc ? " selected" : ""}>${c}p</option>`).join("")}</select></label>
       <span class="muted" style="font-size:11px">毎秒生成されたトークン/s (全並列合算・実測) · 各段の開始時刻に重ね描き · 記録更新前の古い実行はリクエスト当たり値</span></div>`;
+  // フェーズ比較: 待ち (送信→最初のトークン) / デコード / 確定の平均秒を同じ段で実行ごとに
+  // 積み上げて比較 (スイムレーンは 1 実行ずつの表示で「待ちがどちらの実行で長いか」が
+  // 読めなかった対策)。内訳を公開するサーバーは キュー待ち/プレフィル まで分けて積む
+  const phs = sel.map(r => { const st = bmStageOf(r, conc);
+    return {label: bmRunShort(r), agg: st ? bmPhaseAgg(st) : null, decTps: st && st.decode_tps && st.decode_tps.avg}; });
+  const phOk = phs.filter(e => e.agg).length, phMiss = sel.length - phOk;
+  const phBlock = phOk ? `<div class="row" style="gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+      <b style="font-size:13px">フェーズ比較</b>
+      <span class="muted" style="font-size:11px">リクエスト 1 本あたりの平均秒 (同じ時間スケール・積み上げ) · 時間経過と同じ ${conc}p 段</span></div>` +
+      `<div class="bm-chart">${bmPhaseCmpBlock(phs)}<div class="muted" style="font-size:11px">「待ち」の中身分割はサーバーが内訳を報告する実行のみ (strata 系 /metrics: キュー待ち=紫・プレフィル=琥珀)。非公開のサーバーは「待ち」にまとまった実測値です。行末 = その段の decode tok/s と合計平均秒 · 棒にホバーで内訳${phMiss ? ` · フェーズ記録なし ${phMiss} 件 (記録機能追加前の履歴)` : ""}</div></div>`
+    : `<div class="muted" style="font-size:12px;margin-top:8px">選択した実行にフェーズ記録がありません (記録機能追加前の履歴です)。数値比較は下の表でできます</div>`;
   return `<div class="card bm-cmp">
     <div class="row"><b style="font-size:14px">結果比較 (${sel.length} 件)</b><span class="grow"></span>
       <button class="ghost" onclick="bmCmpClear()">選択を解除</button></div>
@@ -468,6 +552,7 @@ function bmCmpPanel(runs) {
     ${ts.length ? `<div class="bm-chart">${bmSvgChart(ts, {ylab: "tok/s"})}${bmLegend(ts)}</div>`
                 : `<div class="muted" style="font-size:12px;margin-top:4px">この並列度の経時記録がありません (記録機能追加前の履歴です)。数値比較は下の表でできます</div>`}
     ${noSeries && ts.length ? `<div class="muted" style="font-size:11px">※ ${noSeries} 件はこの並列度の経時記録なし</div>` : ""}
+    ${phBlock}
     <div class="row" style="gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
       <b style="font-size:13px">比較指標</b>${mSel}
       <span class="muted" style="font-size:11px">同じ並列度のステージを横並びで</span></div>
