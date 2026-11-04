@@ -1629,11 +1629,13 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, f"{BACKENDS[bid]['name']} はキャリブレーションに対応していません"
                                      " (Maya / Strata / FreeToken のプロファイルで実行できます)")
         mode = (body.mode or "").strip().lower()
-        if mode not in ("", "current", "auto"):
-            raise HTTPException(400, "mode は current / auto のどちらかです")
+        if mode not in ("", "current", "auto", "parallel"):
+            raise HTTPException(400, "mode は current / auto / parallel のどちらかです")
         is_ft = CAL_BACKENDS[bid] == "freetoken"
         if mode == "auto" and not is_ft:
             raise HTTPException(400, "自動選定 (auto) は FreeToken 系プロファイル専用です")
+        if mode == "parallel" and CAL_BACKENDS[bid] != "strata":
+            raise HTTPException(400, "並列校正 (parallel) は Strata / Strata (fork) プロファイル専用です")
         # FreeToken の既定は「全部測りの 1 発」(校正は 1 回だけ行う運用想定のため)
         cal_mode = mode or ("auto" if is_ft else "current")
         try:

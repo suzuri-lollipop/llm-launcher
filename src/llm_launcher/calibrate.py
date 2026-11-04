@@ -314,7 +314,27 @@ def build_strata_commands(root: Path, profile: dict[str, Any], python: str,
                    "--review-result", report, "--output", "json"],
         "apply": [python, script, "engine", "calibrate", "--profile", profile_name,
                   "--apply-result", report, "--exclusive", "--output", "json"],
+        # 並列特化: 4 本同時 / stagger を実測して env を選ぶ。engine calibrate は 1 本ずつなので別ツール。
+        "parallel": _strata_parallel_command(root, profile, python, report),
     }
+
+
+def _strata_parallel_command(root: Path, profile: dict[str, Any], python: str, report: str) -> list[str]:
+    """The parallel calibration command for a Strata profile (main or fork).
+
+    The tool lives in the main Strata clone; `--root` points it at the fork clone when the profile is
+    `strata-fork`, so the same tool starts the fork's serve/server.py.  It writes the winner to the run
+    config's env itself (`--apply`), with a backup."""
+    tool = root / "module" / "strata" / "tools" / "parallel_calibrate.py"
+    cfg = strata_config_path(root, profile)
+    argv = [python, str(tool), "--config", cfg or "", "--out", report, "--apply"]
+    values = profile.get("values") or {}
+    n = str(values.get("parallel") or "").strip()
+    if n.isdecimal():
+        argv += ["--parallel", n]
+    if profile.get("backend") == "strata-fork":
+        argv += ["--root", str(root / "module" / "fork" / "strata")]
+    return argv
 
 
 # ----------------------------------------------------------------- メモリガード
@@ -583,19 +603,23 @@ class CalibrationManager:
                 existing = []
             report = str((report_dir / f"calibration-{job_id}.json").resolve())
             cmds = build_strata_commands(self.root, profile, python, report, name)
-            # 既に保存済みで同じ config なら create は不要 (Strata は同名の保存に失敗する)
-            have = next((p for p in existing if p.get("id") == name), None)
-            if have is None:
-                steps = [{"name": "create", "argv": cmds["create"], "cwd": str(module_dir)}]
-            elif str(Path(have.get("source_config") or cfg).resolve()) != str(Path(cfg).resolve()):
-                raise CalibrateError(
-                    f"Strata の保存 profile {name} が別の config を指しています "
-                    f"({have.get('source_config')}) — このプロファイル用の config を揃えるか、"
-                    f"Strata 側で profile use-config {name} を実行してください")
+            if cal_mode == "parallel":
+                job_mode = "parallel"
+                steps = [{"name": "parallel", "argv": cmds["parallel"], "cwd": str(module_dir)}]
             else:
-                steps = []
-            steps += [{"name": k, "argv": cmds[k], "cwd": str(module_dir)}
-                      for k in ("plan", "measure", "review", "apply")]
+                # 既に保存済みで同じ config なら create は不要 (Strata は同名の保存に失敗する)
+                have = next((p for p in existing if p.get("id") == name), None)
+                if have is None:
+                    steps = [{"name": "create", "argv": cmds["create"], "cwd": str(module_dir)}]
+                elif str(Path(have.get("source_config") or cfg).resolve()) != str(Path(cfg).resolve()):
+                    raise CalibrateError(
+                        f"Strata の保存 profile {name} が別の config を指しています "
+                        f"({have.get('source_config')}) — このプロファイル用の config を揃えるか、"
+                        f"Strata 側で profile use-config {name} を実行してください")
+                else:
+                    steps = []
+                steps += [{"name": k, "argv": cmds[k], "cwd": str(module_dir)}
+                          for k in ("plan", "measure", "review", "apply")]
 
         # GPU 独占: 同じプロファイルで稼働中のサーバーは全部止めてから実行する。
         # (キャリブレーションはエンジンを起動して GPU を独占するので、同居は絶対に不可)

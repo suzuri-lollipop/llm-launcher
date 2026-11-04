@@ -120,7 +120,7 @@ def test_strata_commands_are_profile_based_measure_review_apply(tmp_path):
     (tmp_path / "module" / "strata" / "strata-x.json").write_text("{}")
     cmds = calibrate.build_strata_commands(tmp_path, _profile(), "py", str(tmp_path / "r.json"),
                                            "p_deadbeef1234")
-    assert set(cmds) == {"create", "plan", "measure", "review", "apply"}
+    assert set(cmds) == {"create", "plan", "measure", "review", "apply", "parallel"}
     # plan は読み取り専用の事前検査 (エンジン起動なし) → measure より前に走らせて欠損を見つける
     assert "--plan" in cmds["plan"] and "--exclusive" not in cmds["plan"]
     create = cmds["create"]
@@ -132,7 +132,22 @@ def test_strata_commands_are_profile_based_measure_review_apply(tmp_path):
     assert "--exclusive" in cmds["measure"] and "--out" in cmds["measure"]
     assert "--review-result" in cmds["review"] and str(tmp_path / "r.json") in cmds["review"]
     assert "--apply-result" in cmds["apply"] and "--exclusive" in cmds["apply"]
-    assert all("--output" in c and "json" in c for c in cmds.values())
+    assert all("--output" in c and "json" in c for c in cmds.values() if c is not cmds["parallel"])
+    # 並列校正は engine calibrate ではなく launcher の tool を直接叩く (config の env に --apply)
+    par = cmds["parallel"]
+    assert par[1].endswith("module/strata/tools/parallel_calibrate.py")
+    assert "--config" in par and "--apply" in par and str(tmp_path / "r.json") in par
+    assert "--root" not in par
+
+
+def test_strata_fork_parallel_command_starts_the_fork_clone(tmp_path):
+    (tmp_path / "module" / "strata").mkdir(parents=True)
+    (tmp_path / "module" / "strata" / "strata-x.json").write_text("{}")
+    prof = {"id": "p_deadbeef1234", "name": "fork", "backend": "strata-fork",
+            "values": {"config": str(tmp_path / "module" / "strata" / "strata-x.json")}}
+    cmds = calibrate.build_strata_commands(tmp_path, prof, "py", str(tmp_path / "r.json"), "p_deadbeef1234")
+    par = cmds["parallel"]
+    assert par[par.index("--root") + 1] == str(tmp_path / "module" / "fork" / "strata")
 
 
 def test_strata_profile_name_is_saved_profile_safe_and_stable():
