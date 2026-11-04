@@ -142,6 +142,12 @@ def test_series_agg_counts_streaming_tokens_per_second(tmp_path, server, monkeyp
     # 窓 0.05s × 1tok 粒度で個別サンプルは 0 に量子化されうるため、平均で見る
     # (想定 ~2×16 tok/s。ドリフトでも平均は 10 を大きく割らない)
     assert sum(mid2) / len(mid2) > 8, f"2 並列の合算レートが載らない (avg={sum(mid2)/len(mid2):.1f})"
+    # decode tok/s Σ (段サマリ): 全並列合算 = トークン合計 ÷ 最初→最後のトークン到着窓。
+    # 2 並列同時走行では「1 本あたり平均 (decode_tps.avg)」の約 2 倍になるのが定義
+    assert stage["decode_tps_sum"] and stage["decode_tps_sum"] > 0
+    assert stage2["decode_tps_sum"] > 1.5 * stage2["decode_tps"]["avg"], \
+        (f"2 並列の decode Σ が合算になっていない "
+         f"(Σ={stage2['decode_tps_sum']}, avg={stage2['decode_tps']['avg']})")
 
 
 def test_reqs_phases_recorded(tmp_path, server):
@@ -319,12 +325,14 @@ def test_ui_has_clear_compare_and_charts():
     assert "経過秒" in js or "経過" in js
     # 補助列トグル: data-x と .bm-x クラスが対になっている
     assert 'data-x="${X ? 1 : 0}"' in js and 'class="bm-x"' in js
-    # decode tok/s は主指標: 既定表示 (補助列でない) + 太字 + 比較指標 + ライブ行 (tpNote) も decode
+    # decode tok/s Σ は主指標: 既定表示 (補助列でない) + 太字 + 比較指標 + ライブ行 (tpNote) も decode Σ。
+    # 「1 本分だけ出して合算が見えない」デグレード戻し禁止 (ユーザー指摘: 合計を表示する)
     assert '<th class="bm-x">decode' not in js and '<td class="bm-x">${bmTps(st.decode_tps' not in js
-    assert "<td><b>${bmTps(st.decode_tps" in js          # 表の太字は decode
+    assert 'decode tok/s Σ</th>' in js and "${bmTps(bmDecSum(st))}</b></td>" in js   # 表は合算 + avg は title
     assert "<td>${bmTps(st.out_tps)}</td>" in js          # 出力は補助扱い (太字ではない)
-    assert 'decode:{lab: "decode tok/s"' in js
-    assert "pr.dec_n" in js and "decode は最初の完了から" in js
+    assert 'decode:{lab: "decode tok/s Σ"' in js
+    assert "function bmDecSum" in js
+    assert "pr.dec_n" in js and "decode Σ は最初のトークンから" in js
     # 古い履歴 (series 無し) を「説明する導線
     assert "経時記録" in js
     # 経時グラフの値は「毎秒生成トークン合計」(agg) 優先。旧データのみ win/inf 代替

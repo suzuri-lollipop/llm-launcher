@@ -1109,6 +1109,17 @@ class BenchManager:
         decodes = [r["out_tokens"] / (r["secs"] - r["ttft"]) for r in okres
                    if r.get("ttft") is not None and (r["secs"] - r["ttft"]) > 0.05
                    and r.get("out_tokens")]
+        # decode tok/s Σ (全並列合算): decode_tps.avg が「1 ストリームの速さ」なのに対し、
+        # これは「ストリームが動いていた区間全体で合算何 tok/s 出ていたか」。
+        # Σトークン ÷ (最初のトークン到着 → 最後のトークン到着) で、毎秒チャート
+        # (全並列合算) と同じ軸の数字になる。avg × N は後続待ちのアイドルを無視した
+        # 概算なので使わない (非 stream = a/d 無しは None)。
+        ad = [(float(sl["a"]), float(sl["d"])) for sl in slots
+              if isinstance(sl.get("a"), float) and isinstance(sl.get("d"), float)
+              and sl["d"] > sl["a"]]
+        dec_tok = sum(int(r.get("out_tokens") or 0) for r in okres if r.get("ttft") is not None)
+        dec_span = (max(d for _, d in ad) - min(a for a, _ in ad)) if ad else None
+        dec_sum_tps = round(dec_tok / dec_span, 3) if dec_span and dec_span > 0.05 and dec_tok else None
         e2e = [r["out_tokens"] / r["secs"] for r in okres
                if r.get("out_tokens") and r["secs"] > 0]
         gaps = [float(r["gap_max"]) for r in okres if r.get("gap_max") is not None]
@@ -1134,7 +1145,7 @@ class BenchManager:
             "latency": _stats(lat), "ttft": _stats(ttfts),
             # decode tok/s は「TTFT 後 ~ 終了」の実測区間で割る。非ストリーム
             # (ttft=None) は区間が無いので測れない (表では "-" になる)。
-            "decode_tps": _stats(decodes), "e2e_tps": _stats(e2e),
+            "decode_tps": _stats(decodes), "decode_tps_sum": dec_sum_tps, "e2e_tps": _stats(e2e),
             "gaps": _stats(gaps),
             "stall_worst_s": round(max(gaps), 3) if gaps else None,
             "stall_count": stall_count,

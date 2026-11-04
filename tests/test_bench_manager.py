@@ -265,6 +265,10 @@ def test_total_tps_is_none_when_prompt_tokens_missing(tmp_path, server, monkeypa
     assert stage["in_tokens"] is None
     assert stage["total_tps"] is None   # 0 で埋めた過小値を出さない
     assert stage["out_tps"] is not None
+    # このモックは全ピースを一息で出す (デコード窓 ≈ 0) ので decode も avg も出ない =
+    # 正直に None。窓が測れるケースの decode Σ は test_series_agg_counts_streaming で検証
+    if stage["decode_tps"]["avg"] is not None:
+        assert stage["decode_tps_sum"] is not None
 
 
 def test_non_stream_has_no_ttft_or_decode(tmp_path, server):
@@ -277,6 +281,7 @@ def test_non_stream_has_no_ttft_or_decode(tmp_path, server):
     assert stage["ok"] == 1
     assert stage["ttft"]["avg"] is None
     assert stage["decode_tps"]["avg"] is None
+    assert stage["decode_tps_sum"] is None         # 非 stream はデコード区間そのものが無い
     assert stage["stall_worst_s"] is None
     assert stage["total_tps"] is not None       # 入力トークンは usage から取れる
 
