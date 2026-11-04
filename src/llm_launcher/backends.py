@@ -533,8 +533,10 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
     strata-<model>.json の "args" 配列に入る。よって GUI から出すのはサーバープロセスの
     起動フラグ (--config / --host / --port と並列チューニング系) だけ。
 
-    bid="strata-fork": フォーク (module/fork/strata-fork worktree) 用。フィールド定義は共通で、
-    型・help の正表だけ fields/strata-fork.json (フォークの server.py から生成) を参照する。
+    bid="strata-fork": フォーク (module/fork/strata worktree) 用。並列チューニングのうち
+    --batch-mtp / --adapt-async / --adapt-every / --piped-concurrent / --yield-chunks は
+    フォークの serve/server.py だけが持つ CLI なので、その 5 つはフォークの表にある時だけ出す
+    (本家 main の server.py には無い。config の args/env には本家でも一部がある)。
     """
     b = bid
     F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
@@ -558,21 +560,6 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
           help="1 = 全スロットを 1 ウィンドウで直列デコード (適応エキスパート tier と Batch MTP が有効)。"
                "auto/N = layer split のステージ毎 N 群でパイプライン (4+ 並列の総スループットは最速だが MTP/tier 無し)。"
                "config の \"batch_groups\" と同等"),
-        F("--batch-mtp", "Batch MTP ドラフト", section="parallel",
-          help="各バッチスロットでも MTP 提案を検証 (config の --mtp と直列ウィンドウが必要)。"
-               "1-2 並列主体で有効、CPU エキスパート負荷が高い機種では不利。\"batch_mtp\": true と同等"),
-        F("--adapt-async", "適応エキスパート tier の非ブロック化", section="parallel",
-          help="適応 VRAM tier のラウンドでウィンドウを止めない (resident RAM / expert arena 構成向け)。"
-               "実測: ソロ +5-10%、直列 4 並列 89.3→95.9 tok/s。\"adapt_async\": true と同等"),
-        F("--adapt-every", "適応 tier ラウンド間隔 (ウィンドウ数)", section="parallel", placeholder="空=4"),
-        F("--piped-concurrent", "プロンプト読み込み中もデコード継続", section="parallel",
-          help="パイプライン群で長いプロンプトを別スレッド読み込みし、スロットはデコード継続 "
-               "(実測: 読み込み中のストリーム最大停止 39.5s→1.4s、joiner の TTFT は +24% 程度の代償)。"
-               "エンジン env STRATA_PIPED_CONCURRENT=1"),
-        F("--yield-chunks", "長い読みの譲り合い単位 (チャンク数)", section="parallel", placeholder="空=8",
-          help="デコード無しのプロンプト読み込みを N チャンク単位で区切り、短いリクエストの割り込みを許可 "
-               "(1 = 毎チャンク: 実測 割り込み TTFT 30s→6.5s、長い読みは +33%)。"
-               "エンジン env STRATA_BATCH_YIELD_CHUNKS"),
         F("--lazy", "遅延ロード (初回リクエストで起動)", section="sched",
           help="API は未ロードで待ち受け、最初のリクエストでエンジンとビジョンエンコーダを起動"),
         F("--idle-unload", "アイドル自動アンロード秒", section="sched", ftype="float",
@@ -598,6 +585,30 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
         F("--script", "mock エンジンの回答", section="server",
           help="--engine mock のときだけ有効。複数回指定可 (GUI は 1 つまで)"),
     ]
+    # Fork-only server flags (suzuri/parallel-perf's serve/server.py).  The main Strata server has
+    # no such CLI: showing them there sent an unknown option.  The fork's table (generated from its
+    # serve/server.py) decides whether they exist, so a fork clone left on main hides them too.
+    fork_only = [
+        ("--batch-mtp", "Batch MTP ドラフト", dict(section="parallel", default_on=False,
+          help="各バッチスロットでも MTP 提案を検証 (config の --mtp と直列ウィンドウが必要)。"
+               "1-2 並列主体で有効、CPU エキスパート負荷が高い機種では不利。\"batch_mtp\": true と同等")),
+        ("--adapt-async", "適応エキスパート tier の非ブロック化", dict(section="parallel", default_on=False,
+          help="適応 VRAM tier のラウンドでウィンドウを止めない (resident RAM / expert arena 構成向け)。"
+               "実測: ソロ +5-10%、直列 4 並列 89.3→95.9 tok/s。\"adapt_async\": true と同等")),
+        ("--adapt-every", "適応 tier ラウンド間隔 (ウィンドウ数)", dict(section="parallel", default_on=False, placeholder="空=4")),
+        ("--piped-concurrent", "プロンプト読み込み中もデコード継続", dict(section="parallel", default_on=False,
+          help="パイプライン群で長いプロンプトを別スレッド読み込みし、スロットはデコード継続 "
+               "(実測: 読み込み中のストリーム最大停止 39.5s→1.4s、joiner の TTFT は +24% 程度の代償)。"
+               "エンジン env STRATA_PIPED_CONCURRENT=1")),
+        ("--yield-chunks", "長い読みの譲り合い単位 (チャンク数)", dict(section="parallel", default_on=False, placeholder="空=8",
+          help="デコード無しのプロンプト読み込みを N チャンク単位で区切り、短いリクエストの割り込みを許可 "
+               "(1 = 毎チャンク: 実測 割り込み TTFT 30s→6.5s、長い読みは +33%)。"
+               "エンジン env STRATA_BATCH_YIELD_CHUNKS")),
+    ]
+    table = load_table(bid)
+    if all(flag in table for flag, _label, _kw in fork_only):
+        at = next((i for i, f in enumerate(fields) if f["key"] == "lazy"), len(fields))
+        fields[at:at] = [F(flag, label, **kw) for flag, label, kw in fork_only]
     return _backend_meta(b, fields)
 
 
@@ -677,9 +688,8 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     # Strata: 正解を strata-<model>.json (config) が既に持っている項目は既定 OFF
     "strata": {"tokenizer", "gpu", "replicas", "idle_unload", "min_free_vram_mib",
                "slot_save_path", "before_load", "mcp_config", "script",
-               # 並列チューニング系 (2026-10): config キー / env が正解を持つので既定 OFF (ON にすると CLI が優先)
-               "parallel", "batch_groups", "batch_mtp", "adapt_async", "adapt_every",
-               "piped_concurrent", "yield_chunks"},
+               # 本家 main の server.py が持つ並列系。config キーが正解を持つので既定 OFF
+               "parallel", "batch_groups"},
     # Project Maya: 同様に maya-<model>.json (config) が正解を持つ項目 / 起動のたびに不要な項目は既定 OFF
     "maya": {"config", "gpu", "gpus", "parallel", "vram_reserve_mib", "calibrate",
              "backend", "env"},
@@ -698,7 +708,9 @@ REQUIRED_KEYS: dict[str, set[str]] = {
 # fork バックエンドは基底 (freetoken) と同じ送信ポリシー (コピーして派生 = 個別追加可)
 DEFAULT_OFF_KEYS["freetoken-fork"] = set(DEFAULT_OFF_KEYS["freetoken"])
 REQUIRED_KEYS["freetoken-fork"] = set(REQUIRED_KEYS["freetoken"])
-DEFAULT_OFF_KEYS["strata-fork"] = set(DEFAULT_OFF_KEYS["strata"])
+# フォークの server.py だけが持つ並列 CLI。フォークの表にある時だけ build_strata が項目を出す
+STRATA_FORK_ONLY = {"batch_mtp", "adapt_async", "adapt_every", "piped_concurrent", "yield_chunks"}
+DEFAULT_OFF_KEYS["strata-fork"] = set(DEFAULT_OFF_KEYS["strata"]) | STRATA_FORK_ONLY
 REQUIRED_KEYS["strata-fork"] = set(REQUIRED_KEYS["strata"])
 
 

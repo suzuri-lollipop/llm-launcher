@@ -116,3 +116,40 @@ def test_detection_imports_serve_from_module_cwd():
     assert b["check_module"] == "serve.server"
     assert b.get("check_cwd") is True
     assert b["module_path"] == "module/strata"
+
+
+# The five batch flags below are suzuri/parallel-perf's serve/server.py only; main's server has
+# no such CLI.  They must not appear on the main Strata profile editor, or checking one sends an
+# unknown option to serve/server.py.
+STRATA_FORK_ONLY = ("batch_mtp", "adapt_async", "adapt_every", "piped_concurrent", "yield_chunks")
+
+
+def test_main_strata_does_not_offer_the_fork_only_flags():
+    keys = {f["key"] for f in backends.BACKENDS["strata"]["fields"]}
+    assert {"parallel", "batch_groups"} <= keys
+    assert not (set(STRATA_FORK_ONLY) & keys)
+
+
+def test_fork_strata_offers_the_fork_only_flags_when_its_table_has_them():
+    table = backends.load_table("strata-fork")
+    if not all("--" + k.replace("_", "-") in table for k in STRATA_FORK_ONLY):
+        pytest.skip("strata-fork table was generated from a clone without the fork flags")
+    keys = {f["key"] for f in backends.BACKENDS["strata-fork"]["fields"]}
+    assert set(STRATA_FORK_ONLY) <= keys
+    assert all(f["default_on"] is False for f in backends.BACKENDS["strata-fork"]["fields"]
+               if f["key"] in STRATA_FORK_ONLY)
+
+
+def test_fork_only_flags_render_only_for_the_fork_backend():
+    table = backends.load_table("strata-fork")
+    if not all("--" + k.replace("_", "-") in table for k in STRATA_FORK_ONLY):
+        pytest.skip("strata-fork table was generated from a clone without the fork flags")
+    b = backends.BACKENDS["strata-fork"]
+    prof = {"command": "", "values": {"config": "/x.json", "engine": "strata", "host": "0.0.0.0",
+                                      "port": "8080", "batch_mtp": "1", "adapt_async": "1",
+                                      "adapt_every": "4", "piped_concurrent": "1", "yield_chunks": "2"},
+            "on": {f["key"]: True for f in b["fields"]}, "extra_args": ""}
+    argv = backends.render_argv(b, prof, python="py", binary="", root=ROOT)
+    assert "--batch-mtp" in argv and "--adapt-async" in argv and "--piped-concurrent" in argv
+    assert argv[argv.index("--adapt-every") + 1] == "4"
+    assert argv[argv.index("--yield-chunks") + 1] == "2"
