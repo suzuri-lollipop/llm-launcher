@@ -296,6 +296,16 @@ table.bm[data-x="0"] .bm-x{display:none}
 .bm-cmp{border-color:#c6dafc}
 .bm-ck{display:flex;align-items:center}
 .bm-ck input{accent-color:var(--acc);width:15px;height:15px;cursor:pointer}
+/* ページ内タブ: 実行 / 履歴・管理 / 結果・比較 (メニューを増やさない機能分離) */
+.bm-tabs{display:flex;gap:4px;margin-top:12px;border-bottom:2px solid var(--line);flex-wrap:wrap}
+.bm-tab{appearance:none;border:0;background:none;font:inherit;font-size:13.5px;font-weight:700;color:var(--sub);cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:8px 14px;margin-bottom:-2px;border-bottom:2px solid transparent;border-radius:8px 8px 0 0}
+.bm-tab:hover{color:var(--text);background:var(--card2)}
+.bm-tab.on{color:var(--acc);border-bottom-color:var(--acc)}
+.bm-tab .n{font-size:11px;font-weight:700;background:var(--bg2);border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--sub);font-variant-numeric:tabular-nums}
+.bm-tab.on .n{background:#e8f0fe;border-color:#c6dafc;color:var(--acc)}
+.bm-tab .run-dot{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:bmpulse 1.2s ease-in-out infinite}
+@keyframes bmpulse{50%{opacity:.3}}
+.bm-pick + .bm-pick{margin-top:2px}
 .nbadge.run{background:var(--acc);color:#fff}
 /* ---------------- ロール権限で隠す要素 (キーは rbac.CAPS / can() と対応) ---------------- */
 body.no-edit .need-edit,body.no-bench .need-bench,body.no-cal .need-cal,body.no-oom .need-oom,

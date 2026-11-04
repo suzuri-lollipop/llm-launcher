@@ -12,6 +12,7 @@
      キャッシュで「反映されない」事故を防ぐ)
   5. フロント契約: 一括クリアボタン、比較チェックボックス / パネル、
      SVG チャート (bmSvgChart) と補助列トグル、decode 主指標表示がソースに存在する
+  6. ページ内 3 タブ (実行 / 履歴・管理 / 結果・比較) の機能分離
 """
 from __future__ import annotations
 
@@ -208,7 +209,7 @@ def test_phase_ui_renders_swimlanes():
     js = _bench_js()
     assert "function bmPhaseSvg" in js and "function bmPhaseBlock" in js
     assert "フェーズ (ライブ)" in js                       # 実行中カードにライブ版
-    assert "フェーズ (${st.concurrency}p)" in js           # 履歴の詳細展開に段ごと
+    assert "フェーズ (${st.concurrency}p)" in js           # 結果・比較タブの詳細に段ごと
     assert "var(--warn)" in js and "var(--ok)" in js       # 待ち=琥珀 / デコード=緑
     assert "プレフィル" in js and "確定" in js
     # サーバー内訳が公開されている場合は 送信(青)/キュー待ち(紫)/プレフィル(琥珀) に分割、
@@ -331,6 +332,34 @@ def test_ui_has_clear_compare_and_charts():
     css = (Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static" / "css" / "app.css").read_text(encoding="utf-8")
     assert 'table.bm[data-x="0"] .bm-x{display:none}' in css
     assert "position:sticky" in css                           # 先頭列固定
+
+
+def test_bench_page_tabs_split_functions():
+    """ユーザー要望: ベンチ画面をページ内 3 タブに機能分離する (メニューは「ベンチマーク」
+    1 項目のまま)。実行=フォーム+ライブ / 履歴・管理=一覧と削除等 / 結果・比較=選択して
+    表示・比較。役目の混線 (履歴に比較パネル、比較に削除ボタン) を戻さないための契約。"""
+    js = _bench_js()
+    # 3 タブのボタンとペイン
+    for t in ("run", "history", "compare"):
+        assert f"bmSetTab('{t}')" in js
+    for p in ("bmt-p-run", "bmt-p-history", "bmt-p-compare"):
+        assert f'id="{p}"' in js
+    # 実行フォーム (ベンチ開始ボタン) は実行ペインの中、履歴ペインより前
+    assert js.index('id="bmt-p-run"') < js.index('id="bm-start"') < js.index('id="bmt-p-history"')
+    # 履歴・管理 = 管理操作のみ (比較のチェックボックス / 比較パネルを戻さない)
+    hist = js[js.index("function renderBenchHistory"):js.index("function renderBenchCompare")]
+    assert "bmClearAll" in hist and "bmViewRun" in hist
+    assert "bmCmpPanel" not in hist and "bmCmpToggle" not in hist
+    # 結果・比較 = 選択と表示のみ (管理操作ボタンを置かない)
+    cmp_ = js[js.index("function renderBenchCompare"):]
+    assert "bmCmpToggle" in cmp_ and "bmCmpPanel" in cmp_ and "bmPhaseBlock" in cmp_
+    assert "bmDelete" not in cmp_ and "bmClearAll" not in cmp_ and "bmRerun" not in cmp_
+    # タブ状態の永続化とバー描画 (件数バッジ / 実行中ドット)
+    assert "function bmSetTab" in js and "function bmTabBar" in js
+    assert "tab: S.bench.tab" in js
+    assert 'id="bmt-run-dot"' in js and 'id="bmt-hn"' in js and 'id="bmt-cn"' in js
+    css = (Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "static" / "css" / "app.css").read_text(encoding="utf-8")
+    assert ".bm-tabs{" in css and ".bm-tab.on{" in css
 
 
 def test_api_route_declared():

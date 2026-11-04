@@ -5,6 +5,12 @@
 VIEWS.bench = `
   <section id="view-bench" class="view hidden">
     <h2 class="view-title">ベンチマーク <span class="muted">作成済みプロファイルのサーバー (OpenAI 互換 API) を直接計測</span></h2>
+    <div class="bm-tabs" role="tablist">
+      <button class="bm-tab" id="bmt-run" role="tab" aria-selected="false" onclick="bmSetTab('run')"><svg class=ic aria-hidden=true><use href=#i-play /></svg> 実行<span class="run-dot hidden" id="bmt-run-dot" title="ベンチマーク実行中"></span></button>
+      <button class="bm-tab" id="bmt-history" role="tab" aria-selected="false" onclick="bmSetTab('history')"><svg class=ic aria-hidden=true><use href=#i-history /></svg> 履歴・管理 <span class="n" id="bmt-hn">0</span></button>
+      <button class="bm-tab" id="bmt-compare" role="tab" aria-selected="false" onclick="bmSetTab('compare')"><svg class=ic aria-hidden=true><use href=#i-chart /></svg> 結果・比較 <span class="n hidden" id="bmt-cn">0</span></button>
+    </div>
+    <div id="bmt-p-run">
     <div id="bm-active"></div>
     <div class="card">
       <div class="row" style="gap:8px">
@@ -35,22 +41,31 @@ VIEWS.bench = `
         <span class="muted" id="bm-note"></span>
       </div>
     </div>
-    <div id="bm-history"></div>
+    </div>
+    <div id="bmt-p-history" class="hidden"><div id="bm-history"></div></div>
+    <div id="bmt-p-compare" class="hidden"><div id="bm-compare"></div></div>
   </section>
 `;
 /* ============================================================= benchmarks */
 /* 作成済みプロファイルのサーバーを launcher 内蔵ランナーで計測する。
    実行はバックエンド (POST /api/benchmarks) が裏で走らせ、ここでは 2.5 秒ポーリングで
-   progress / 履歴を描画する。並列度リスト (例 "1,8,32") の各値が 1 ステージ。 */
+   progress / 履歴を描画する。並列度リスト (例 "1,8,32") の各値が 1 ステージ。
+   ページ内は 3 タブに機能分離する (ハンバーガーメニューをこれ以上増やさない):
+     実行 (run)      … 実行フォーム + ライブカード
+     履歴・管理 (…)  … 結果の一覧 / 再実行 / 保存 / 削除 / クリア
+     結果・比較 (…) … 実行を選んでの詳細表示 + 複数件のグラフ・表比較 */
 const BM_KEY = "llm-laun…h.v1";
+const BM_TABS = ["run", "history", "compare"];
 const BM_INPUTS = ["bm-profile","bm-conc","bm-num","bm-warm","bm-inlen","bm-outlen",
                    "bm-temp","bm-endpoint","bm-stream","bm-autostart","bm-stopafter","bm-model"];
 function bmInit() {
   let d = {};
   try { d = JSON.parse(localStorage.getItem(BM_KEY) || "{}") || {}; } catch { d = {}; }
   // cmp: 比較に選んだ run id (選択順 = 比較表の基準順), cmpMetric / cmpConc: 比較パネルの選択
-  S.bench = { runs: [], active: null, busy: false, open: "", _pSig: "", _bh: "", _recv: 0,
-              cmp: [], cmpMetric: "decode", cmpConc: null, moreCols: false };
+  // tab: ページ内タブ (実行 / 履歴・管理 / 結果・比較) — 選択を localStorage で保つ
+  S.bench = { runs: [], active: null, busy: false, _pSig: "", _bh: "", _bc: "", _recv: 0,
+              cmp: [], cmpMetric: "decode", cmpConc: null, moreCols: false,
+              tab: BM_TABS.includes(d.tab) ? d.tab : "run" };
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") {
     if (el.type === "checkbox") el.checked = !!v; else el.value = v; } };
   set("#bm-profile", d.profile); set("#bm-conc", d.conc); set("#bm-num", d.num);
@@ -71,12 +86,19 @@ function bmPersist() {
       inlen: v("#bm-inlen"), outlen: v("#bm-outlen"), temp: v("#bm-temp"),
       endpoint: v("#bm-endpoint"), model: v("#bm-model"),
       stream: $("#bm-stream").checked, autostart: $("#bm-autostart").checked,
-      stopafter: $("#bm-stopafter").checked,
+      stopafter: $("#bm-stopafter").checked, tab: S.bench.tab,
     }));
   } catch { /* 容量超過等は無視 */ }
 }
+/* ページ内タブの切替 (実行 / 履歴・管理 / 結果・比較)。ハンバーガーメニューの
+   「ベンチマーク」1 項目のまま、ページ内で機能を分ける */
+function bmSetTab(t) {
+  if (!BM_TABS.includes(t)) return;
+  S.bench.tab = t; bmPersist(); renderBench();
+}
 function openBench(pid) {
   if (!S.bench) bmInit();
+  S.bench.tab = "run";                        // 各所の「ベンチ」ボタンは実行の意図で飛ぶ
   if (pid) { $("#bm-profile").value = pid; bmPersist(); }
   switchTab("bench");
   bmPoll(true);
@@ -178,10 +200,15 @@ function bmRerun(id) {
   set("#bm-outlen", p.output_len); set("#bm-temp", p.temperature); set("#bm-endpoint", p.endpoint);
   set("#bm-stream", p.stream); set("#bm-autostart", p.auto_start); set("#bm-stopafter", p.stop_after);
   set("#bm-model", p.model || "");
+  S.bench.tab = "run";                      // フォームは実行タブ: そのまま見せる
   bmPersist(); renderBench();
-  toast("パラメータを読み込みました (<svg class=ic aria-hidden=true><use href=#i-play /></svg> ベンチ開始で実行)");
+  toast("設定を実行タブに読み込みました (<svg class=ic aria-hidden=true><use href=#i-play /></svg> ベンチ開始で実行)");
 }
-function bmToggle(id) { S.bench.open = S.bench.open === id ? "" : id; renderBench(); }
+/* 履歴行の「結果」: 比較・表示タブへ飛び、その実行だけ選択して詳細を出す */
+function bmViewRun(id) {
+  if (!S.bench) return;
+  S.bench.cmp = [id]; S.bench.tab = "compare"; bmPersist(); renderBench();
+}
 const bmF1 = x => x == null ? "-" : (+x).toFixed(1);
 const bmF2 = x => x == null ? "-" : (+x).toFixed(2);
 const bmTps = x => x == null ? "-" : (+x >= 100 ? String(Math.round(x)) : (+x).toFixed(1));
@@ -196,6 +223,15 @@ function bmParamsSummary(p) {
   return `${p.num_prompts}req × ${c}並列 · in≈${p.input_len}語 · out≤${p.output_len}t · ` +
     `${p.endpoint === "chat" ? "chat" : "completions"}${p.stream ? "+stream" : ""}` +
     (p.temperature ? ` · temp${p.temperature}` : " · greedy");
+}
+/* 代表値 (履歴行・比較ピッカー共通): decode 優先、無い = 非 stream なので出力 peak */
+function bmPeakOf(r) {
+  const hasDec = (r.stages || []).some(s => s.decode_tps && s.decode_tps.avg != null);
+  const v = Math.max(0, ...(r.stages || []).map(s => {
+    const x = hasDec ? (s.decode_tps && s.decode_tps.avg) : s.out_tps;
+    return x || 0;
+  }));
+  return {v: v || null, dec: hasDec};
 }
 function bmStallCell(st) {
   // 最長停止 = 生成開始後のチャンク間ギャップのワースト。目標は「人間が関知
@@ -516,8 +552,31 @@ function renderBench() {
   $("#bm-start").disabled = S.bench.busy || !!S.bench.active || !p;
   $("#bm-note").textContent = S.bench.busy ? "開始中…"
     : (S.bench.active ? "ベンチマーク実行中です (同時に 1 件)" : "");
-  renderBenchActive(S.bench.runs.find(r => r.id === S.bench.active) || null);
+  const d = S.bench;
+  // 削除された / 実行中の id の残選択を掃除 (タブバッジと比較パネルは同じ出典を使う)
+  d.cmp = (d.cmp || []).filter(id => (d.runs || []).some(r => r.id === id && r.id !== d.active));
+  bmTabBar();
+  renderBenchActive(d.runs.find(r => r.id === d.active) || null);
   renderBenchHistory();
+  renderBenchCompare();
+}
+/* タブバー: 選択表示 + 件数バッジ (履歴 = 完了系, 比較 = 選択中) + 実行中ドット。
+   ペインは hidden の切り替えだけで、DOM は常に維持する (フォームの状態が飛ぶのを防ぐ) */
+function bmTabBar() {
+  const d = S.bench;
+  BM_TABS.forEach(t => {
+    const b = $("#bmt-" + t); if (!b) return;
+    b.classList.toggle("on", d.tab === t);
+    b.setAttribute("aria-selected", d.tab === t ? "true" : "false");
+  });
+  const panes = {run: "bmt-p-run", history: "bmt-p-history", compare: "bmt-p-compare"};
+  Object.keys(panes).forEach(k => $("#" + panes[k]).classList.toggle("hidden", k !== d.tab));
+  const hn = $("#bmt-hn");
+  if (hn) hn.textContent = (d.runs || []).filter(r => r.id !== d.active).length;
+  const cn = $("#bmt-cn");
+  if (cn) { cn.textContent = (d.cmp || []).length; cn.classList.toggle("hidden", !(d.cmp || []).length); }
+  const dot = $("#bmt-run-dot");
+  if (dot) dot.classList.toggle("hidden", !d.active);
 }
 function renderBenchActive(run) {
   const el = $("#bm-active");
@@ -572,61 +631,102 @@ function renderBenchActive(run) {
   </div>`;
   logScrollBack(el, _ls);
 }
+/* 履歴・管理タブ: 結果の一覧と管理操作だけ (結果を見る / 設定再実行 / 保存 / 削除 /
+   一括クリア)。結果の表示・比較は「結果・比較」タブの役目なのでここに置かない */
 function renderBenchHistory() {
   const el = $("#bm-history");
   const runs = (S.bench.runs || []).filter(r => r.id !== S.bench.active);
   if (!runs.length) {
-    const empty = `<div class="empty" style="margin-top:12px">ベンチ履歴はまだありません。上で条件をセットして <svg class=ic aria-hidden=true><use href=#i-play /></svg> ベンチ開始。</div>`;
+    const empty = `<div class="empty" style="margin-top:12px">ベンチ履歴はまだありません。実行タブで条件をセットして <svg class=ic aria-hidden=true><use href=#i-play /></svg> ベンチ開始。</div>`;
     if (S.bench._bh !== empty) { S.bench._bh = empty; el.innerHTML = empty; }   // 空欄も毎回は書き直さない
     return;
   }
   // スクロール中は組み直しを後回し (摘まみを離してしまう)。枠が空のときは必ず描く
   if (uiScrolling() && el.childElementCount) { deferRender("bm-hist", renderBenchHistory); return; }
-  const nSel = (S.bench.cmp || []).length;
-  const html = `<div class="row" style="margin-top:18px;align-items:center;flex-wrap:wrap">
-      <h2 class="view-title" style="margin:0">履歴 (${runs.length})</h2><span class="grow"></span>
-      ${nSel ? `<button class="ghost" onclick="bmCmpClear()">比較解除 (${nSel})</button>` : ""}
+  const html = `<div class="row" style="margin-top:14px;align-items:center;flex-wrap:wrap">
+      <h2 class="view-title" style="margin:0">履歴 (${runs.length})</h2>
+      <span class="muted" style="font-size:11.5px">一覧と管理。結果の表示・比較は「結果・比較」タブへ</span><span class="grow"></span>
       <button class="ghost danger" title="完了済みの履歴をまとめて消します (実行中は残りません)" onclick="bmClearAll()"><svg class=ic aria-hidden=true><use href=#i-trash /></svg> 履歴をクリア</button>
     </div>` +
-    bmCmpPanel(runs) +
     runs.map(r => {
-    const open = S.bench.open === r.id;
-    // 代表値も decode 優先 (無い = 非 stream なので出力 peak にフォールバック)
-    const hasDec = (r.stages || []).some(s => s.decode_tps && s.decode_tps.avg != null);
-    const best = Math.max(0, ...(r.stages || []).map(s => {
-      const v = hasDec ? (s.decode_tps && s.decode_tps.avg) : s.out_tps;
-      return v || 0;
-    }));
-    return `<div class="card bm-run" data-run="${esc(r.id)}">
+      const pk = bmPeakOf(r);
+      return `<div class="card bm-run" data-run="${esc(r.id)}">
       <div class="row">
-        <label class="bm-ck" title="比較に選択"><input type="checkbox"${S.bench.cmp.includes(r.id) ? " checked" : ""} onchange="bmCmpToggle('${r.id}')"></label>
         ${bmStatusBadge(r)}
-        <b class="grow ellip" style="font-size:14.5px;cursor:pointer" onclick="bmToggle('${r.id}')">${esc(r.profile_name)}</b>
+        <b class="grow ellip" style="font-size:14.5px">${esc(r.profile_name)}</b>
         <span class="chip ${esc(r.backend)}">${esc(r.backend_name)}</span>
       </div>
       <div class="muted" style="margin-top:5px;font-size:12px">${esc(bmParamsSummary(r.params || {}))}
-        ${(r.stages || []).length ? ` · peak ${hasDec ? "decode" : "出力"} <b style="color:var(--text)">${bmTps(best)}</b> tok/s` : ""}
-        ${r.error ? ` · <span style="color:var(--err)">${esc(String(r.error).slice(0, 90))}</span>` : ""}
-        · ${r.finished_at ? fmtAgo(r.finished_at) : "-"}</div>
+        ${(r.stages || []).length ? ` · peak ${pk.dec ? "decode" : "出力"} <b style="color:var(--text)">${bmTps(pk.v)}</b> tok/s` : ""}
+        · ${bmWhen(r)} (${r.finished_at ? fmtAgo(r.finished_at) : fmtAgo(r.created_at)})
+        ${r.error ? ` · <span style="color:var(--err)">${esc(String(r.error).slice(0, 90))}</span>` : ""}</div>
       <div class="row" style="margin-top:8px">
-        <button onclick="bmToggle('${r.id}')">${open ? "<svg class=ic aria-hidden=true><use href=#i-chev_up /></svg> 閉じる" : "<svg class=ic aria-hidden=true><use href=#i-chart /></svg> 結果"}</button>
+        <button onclick="bmViewRun('${r.id}')"><svg class=ic aria-hidden=true><use href=#i-chart /></svg> 結果を見る</button>
         <button onclick="bmRerun('${r.id}')"><svg class=ic aria-hidden=true><use href=#i-refresh /></svg> 設定再実行</button>
         <button class="ghost" onclick="bmExport('${r.id}')"><svg class=ic aria-hidden=true><use href=#i-download /></svg> JSON</button>
         <span class="grow"></span>
         <button class="ghost danger" onclick="bmDelete('${r.id}')">削除</button>
       </div>
-      ${open && (r.stages || []).length ? bmStageTable(r.stages, "k:" + r.id) : ""}
-      ${open ? (r.stages || []).map(st => bmPhaseBlock(`フェーズ (${st.concurrency}p)`, st.reqs, st.wall_secs, st.reqs_truncated)).join("") : ""}
-      ${open ? `<div class="muted mono" style="margin-top:6px;font-size:11px;overflow-wrap:anywhere">
-        model: ${esc(r.model || "-")} · session: ${esc(r.session_id || "-")}${r.auto_started ? " (自動起動)" : ""}${r.stopped_after ? " · 停止済み" : ""}${r.port ? ` · :${r.port}` : ""}</div>` : ""}
-      ${open && r.stop_error ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--err)">サーバーの自動停止に失敗: ${esc(r.stop_error)}</div>` : ""}
-      ${open && r.server_left_running ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--warn)">※ launcher 再起動時に自動起動したサーバーが残っています。サーバータブで停止してください</div>` : ""}
     </div>`;
-  }).join("");
-  // 中身が変わらなければ組み直さない = 横スクロールバーの摘まみ・開いた details を殺さない
-  // (履歴は fmtAgo のラベルしか変わらないので、これで再構築は分単位に 1 回になる)
+    }).join("");
+  // 中身が変わらなければ組み直さない (履歴は fmtAgo のラベルしか変わらないので、
+  // これで再構築は分単位に 1 回になる)
   if (html === S.bench._bh && el.childElementCount) return;
   S.bench._bh = html;
+  el.innerHTML = html;
+}
+/* 結果・比較タブ: 実行を選んで表示 — 1 件 = 結果の詳細 (経時チャート・段表・フェーズ
+   スイムレーン)、2 件以上 = 経時カーブ / 並列度カーブ / 指標表で比較。
+   管理操作 (削除・再実行) は置かず、表示に専念する */
+function renderBenchCompare() {
+  const el = $("#bm-compare");
+  const d = S.bench;
+  const runs = (d.runs || []).filter(r => r.id !== d.active);
+  if (!runs.length) {
+    const empty = `<div class="empty" style="margin-top:12px">表示する履歴がまだありません。<b>実行</b> タブでベンチを完了させると、ここに結果が並びます。</div>`;
+    if (S.bench._bc !== empty) { S.bench._bc = empty; el.innerHTML = empty; }
+    return;
+  }
+  if (uiScrolling() && el.childElementCount) { deferRender("bm-cmp", renderBenchCompare); return; }
+  const picks = runs.map(r => {
+    const on = (d.cmp || []).includes(r.id);
+    const pk = bmPeakOf(r);
+    return `<label class="row bm-pick" style="gap:10px;align-items:center;flex-wrap:wrap;padding:6px 8px;border-radius:8px;cursor:pointer${on ? ";background:#e8f0fe" : ""}">
+      <span class="bm-ck"><input type="checkbox"${on ? " checked" : ""} onchange="bmCmpToggle('${r.id}')"></span>
+      ${bmStatusBadge(r)}
+      <b style="font-size:13px;white-space:nowrap">${esc(bmRunShort(r))}</b>
+      <span class="muted" style="font-size:11.5px;overflow-wrap:anywhere">${esc(bmParamsSummary(r.params || {}))}${(r.stages || []).length ? ` · peak ${pk.dec ? "decode" : "出力"} ${bmTps(pk.v)} tok/s` : ""}</span>
+    </label>`;
+  }).join("");
+  const sel = (d.cmp || []).map(id => runs.find(r => r.id === id)).filter(Boolean);
+  const detail = sel.map(r => `<div class="card">
+      <div class="row">
+        ${bmStatusBadge(r)}
+        <b class="grow ellip" style="font-size:14.5px">結果詳細 — ${esc(r.profile_name)} <span class="muted" style="font-weight:400;font-size:12px">${bmWhen(r)}</span></b>
+        <span class="chip ${esc(r.backend)}">${esc(r.backend_name)}</span>
+      </div>
+      <div class="muted" style="margin-top:4px;font-size:12px">${esc(bmParamsSummary(r.params || {}))}${r.error ? ` · <span style="color:var(--err)">${esc(String(r.error).slice(0, 120))}</span>` : ""}</div>
+      ${bmLiveChart(r)}
+      ${(r.stages || []).length ? bmStageTable(r.stages, "c:" + r.id) : ""}
+      ${(r.stages || []).map(st => bmPhaseBlock(`フェーズ (${st.concurrency}p)`, st.reqs, st.wall_secs, st.reqs_truncated)).join("")}
+      <div class="muted mono" style="margin-top:6px;font-size:11px;overflow-wrap:anywhere">model: ${esc(r.model || "-")} · session: ${esc(r.session_id || "-")}${r.auto_started ? " (自動起動)" : ""}${r.stopped_after ? " · 停止済み" : ""}${r.port ? ` · :${r.port}` : ""}</div>
+      ${r.stop_error ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--err)">サーバーの自動停止に失敗: ${esc(r.stop_error)}</div>` : ""}
+      ${r.server_left_running ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--warn)">※ launcher 再起動時に自動起動したサーバーが残っています。サーバータブで停止してください</div>` : ""}
+    </div>`).join("");
+  const html = `<div class="card" style="margin-top:14px">
+      <div class="row" style="align-items:center;flex-wrap:wrap;gap:8px">
+        <b style="font-size:14px">表示・比較する実行</b>
+        <span class="muted" style="font-size:11.5px">1 件 = 結果の詳細 / 2 件以上 = 経時カーブ・並列度カーブ・指標表で比較 (最大 ${BM_CMP_MAX} 件)</span>
+        <span class="grow"></span>
+        ${(d.cmp || []).length ? `<button class="ghost" onclick="bmCmpClear()">選択を解除</button>` : ""}
+      </div>
+      <div style="margin-top:4px">${picks}</div>
+    </div>` +
+    (d.cmp.length >= 2 ? bmCmpPanel(runs) : "") +
+    (sel.length ? `<div class="muted" style="margin:14px 2px 6px;font-size:12px">▼ 結果詳細 (${sel.length} 件)</div>` + detail
+                 : `<div class="muted" style="margin-top:12px;font-size:12px">↑ 上で行を選択すると、ここに結果を表示します</div>`);
+  if (html === S.bench._bc && el.childElementCount) return;
+  S.bench._bc = html;
   const _ls = logScrollSnap(el);                // 組み直したときだけ横位置・開閉を復元
   el.innerHTML = html;
   logScrollBack(el, _ls);
