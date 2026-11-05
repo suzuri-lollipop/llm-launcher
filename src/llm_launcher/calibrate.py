@@ -325,9 +325,9 @@ def _strata_parallel_command(root: Path, profile: dict[str, Any], python: str, r
     The tool lives in the main Strata clone; `--root` points it at the fork clone when the profile is
     `strata-fork`, so the same tool starts the fork's serve/server.py.  It writes the winner to the run
     config's env itself (`--apply`), with a backup."""
-    tool = root / "module" / "strata" / "tools" / "parallel_calibrate.py"
+    tool = root / "module" / "strata" / "tools" / "calibrate_serving.py"
     cfg = strata_config_path(root, profile)
-    argv = [python, str(tool), "--config", cfg or "", "--out", report, "--apply"]
+    argv = [python, str(tool), "--config", cfg or "", "--out", report, "--apply", "--multi"]
     values = profile.get("values") or {}
     n = str(values.get("parallel") or "").strip()
     if n.isdecimal():

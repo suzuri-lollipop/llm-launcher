@@ -135,8 +135,8 @@ def test_strata_commands_are_profile_based_measure_review_apply(tmp_path):
     assert all("--output" in c and "json" in c for c in cmds.values() if c is not cmds["parallel"])
     # 並列校正は engine calibrate ではなく launcher の tool を直接叩く (config の env に --apply)
     par = cmds["parallel"]
-    assert par[1].endswith("module/strata/tools/parallel_calibrate.py")
-    assert "--config" in par and "--apply" in par and str(tmp_path / "r.json") in par
+    assert par[1].endswith("module/strata/tools/calibrate_serving.py")
+    assert "--config" in par and "--apply" in par and "--multi" in par and str(tmp_path / "r.json") in par
     assert "--root" not in par
 
 
