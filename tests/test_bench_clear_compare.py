@@ -388,6 +388,22 @@ def test_phase_compare_bars():
     assert "g.q.push" in agg and "g.wait.push" in agg and "g.dec.push" in agg
 
 
+def test_phase_swimlane_compare_normalized():
+    """ユーザー要望「この表示 (フェーズ・スイムレーン) をこのままの表示で比較できるように
+    してください。秒数軸をパーセンテージに変換すれば行けそうな気がします」: 比較パネルに
+    同じ段の実物スイムレーンを実行ごとに並べ、横軸をその段の時間 0〜100% に正規化する
+    (絶対秒 114s vs 73s でも階段・デコードの伸び・停止配置を重ねて読める)。
+    絶対秒はツールチップに残す (数字を黙って消さない方針)。"""
+    js = _bench_js()
+    panel = js[js.index("function bmCmpPanel"):js.index("function bmCmpToggle")]
+    assert "function bmPhaseLegend" in js                       # 凡例は本体と比較で共通
+    assert "フェーズ比較 (スイムレーン)" in panel
+    assert re.search(r"bmPhaseSvg\([^)]*\btrue\b", js), "pct 軸 (0〜100%) の呼び出しがない"
+    svg = js[js.index("function bmPhaseSvg"):js.index("function bmPhaseLegend")]
+    assert 'pct ? Math.round(v / maxT * 100) + "%"' in svg      # 目盛りだけ %、ジオメトリは秒のまま
+    assert "正規化" in panel and "ホバー" in panel               # 軸の意味と絶対秒の所在を明記
+
+
 def test_api_route_declared():
     src = (Path(__file__).resolve().parents[1] / "src" / "llm_launcher" / "app.py").read_text(encoding="utf-8")
     assert '@app.delete("/api/benchmarks")' in src

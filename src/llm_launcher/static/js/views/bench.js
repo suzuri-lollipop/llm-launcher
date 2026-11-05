@@ -18,6 +18,14 @@ VIEWS.bench = `
         <span class="badge" id="bm-prof-state"><span class="dot"></span>-</span>
       </div>
       <div class="muted" id="bm-prof-note" style="margin-top:6px"></div>
+      <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:4px;align-items:flex-end">
+        <div class="grow" style="min-width:220px"><label class="f" for="bm-bp">ベンチプロファイル <span class="muted">(設定一式を保存・再利用)</span></label>
+          <select id="bm-bp" class="grow" onchange="bmProfileLoad()" style="min-width:200px"><option value="">（未選択）</option></select></div>
+        <div style="min-width:180px"><label class="f" for="bm-bp-name">名前</label><input type="text" id="bm-bp-name" placeholder="例: Qwen NVFP4 c4 長デコード" maxlength="80" style="width:100%"></div>
+        <button class="ghost" onclick="bmProfileSave()">保存</button>
+        <button class="ghost" onclick="bmProfileDelete()">削除</button>
+        <span class="muted" id="bm-bp-note" style="font-size:11px"></span>
+      </div>
       <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:4px">
         <div><label class="f" for="bm-mode">送信方式</label><select id="bm-mode" onchange="bmModeUI()" style="width:240px"><option value="loop">ループ (N 並列・空いた分を即送信)</option><option value="stagger">インタリーブ (デコード中に次を送信)</option></select></div>
         <div id="bm-gap-wrap" class="hidden"><label class="f" for="bm-gap">送信間隔 (秒)</label><input type="number" id="bm-gap" min="0.1" step="0.1" value="2" style="width:90px"></div>
@@ -25,7 +33,10 @@ VIEWS.bench = `
         <div><label class="f" for="bm-num">リクエスト数/段</label><input type="number" id="bm-num" min="1" value="24" style="width:96px"></div>
         <div><label class="f" for="bm-warm">warmup</label><input type="number" id="bm-warm" min="0" value="1" style="width:76px"></div>
         <div><label class="f" for="bm-inlen">prompt 語数≈</label><input type="number" id="bm-inlen" min="8" value="128" style="width:90px"></div>
-        <div><label class="f" for="bm-outlen">max_tokens</label><input type="number" id="bm-outlen" min="1" value="128" style="width:96px"></div>
+        <div><label class="f" for="bm-decode">デコード長</label><select id="bm-decode" onchange="bmDecodeUI()" style="width:150px"><option value="custom">カスタム</option><option value="shortest">最短 (8 tok)</option><option value="longest">最長 (8192 tok)</option></select></div>
+        <div><label class="f" for="bm-outlen">max_tokens</label><input type="number" id="bm-outlen" min="1" max="32768" value="128" style="width:96px"></div>
+        <div><label class="f" for="bm-mintok">min_tokens</label><input type="number" id="bm-mintok" min="0" max="32768" value="0" style="width:96px"></div>
+        <label class="switch" style="align-self:flex-end"><input type="checkbox" id="bm-ignoreeos"><span class="track"></span><span class="lab" style="font-size:12.5px">EOS 無視</span></label>
         <div><label class="f" for="bm-temp">temperature</label><input type="number" id="bm-temp" min="0" max="2" step="0.05" value="0" style="width:88px"></div>
         <div><label class="f" for="bm-endpoint">エンドポイント</label><select id="bm-endpoint" style="width:170px"><option value="chat">/v1/chat/completions</option><option value="completions">/v1/completions</option></select></div>
         <label class="switch" style="align-self:flex-end"><input type="checkbox" id="bm-stream" checked><span class="track"></span><span class="lab" style="font-size:12.5px">stream (TTFT計測)</span></label>
@@ -38,6 +49,7 @@ VIEWS.bench = `
       <input type="text" id="bm-model" class="mono" placeholder="(自動)">
       <div class="muted" style="font-size:11.5px;margin-top:6px">プロンプトは launcher が生成するランダム文章 (≈語数。リクエスト毎に重複なしで prefix cache を抑制)。トークン数は API の usage 優先、未取得時は文字数推定 (≈)。同一機上で複数実行すると結果が相互に狂うため同時実走は 1 件です。</div>
       <div class="muted" id="bm-mode-note" style="font-size:11.5px;margin-top:4px"></div>
+      <div class="muted" id="bm-decode-note" style="font-size:11.5px;margin-top:2px"></div>
       <div class="row" style="margin-top:10px">
         <button class="primary need-bench" id="bm-start" onclick="bmStart()"><svg class=ic aria-hidden=true><use href=#i-play /></svg> ベンチ開始</button>
         <span class="grow"></span>
@@ -60,8 +72,8 @@ VIEWS.bench = `
 const BM_KEY = "llm-laun…h.v1";
 const BM_TABS = ["run", "history", "compare"];
 const BM_INPUTS = ["bm-profile","bm-conc","bm-num","bm-warm","bm-inlen","bm-outlen",
-                   "bm-temp","bm-endpoint","bm-stream","bm-autostart","bm-stopafter","bm-model",
-                   "bm-mode","bm-gap"];
+                   "bm-mintok","bm-ignoreeos","bm-decode","bm-temp","bm-endpoint",
+                   "bm-stream","bm-autostart","bm-stopafter","bm-model","bm-mode","bm-gap"];
 function bmInit() {
   let d = {};
   try { d = JSON.parse(localStorage.getItem(BM_KEY) || "{}") || {}; } catch { d = {}; }
@@ -69,6 +81,7 @@ function bmInit() {
   // tab: ページ内タブ (実行 / 履歴・管理 / 結果・比較) — 選択を localStorage で保つ
   S.bench = { runs: [], active: null, busy: false, _pSig: "", _bh: "", _bc: "", _recv: 0,
               cmp: [], cmpMetric: "decode", cmpConc: null, moreCols: false,
+              profiles: [], bpId: "",
               tab: BM_TABS.includes(d.tab) ? d.tab : "run" };
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") {
     if (el.type === "checkbox") el.checked = !!v; else el.value = v; } };
@@ -76,11 +89,15 @@ function bmInit() {
   set("#bm-warm", d.warm); set("#bm-inlen", d.inlen); set("#bm-outlen", d.outlen);
   set("#bm-temp", d.temp); set("#bm-endpoint", d.endpoint);
   set("#bm-model", d.model); set("#bm-mode", d.mode); set("#bm-gap", d.gap);
+  set("#bm-mintok", d.mintok); set("#bm-decode", d.decode);
+  if (d.ignoreeos === true) $("#bm-ignoreeos").checked = true;
   if (d.stream === false) $("#bm-stream").checked = false;
   if (d.autostart === false) $("#bm-autostart").checked = false;
   if (d.stopafter === true) $("#bm-stopafter").checked = true;
-  BM_INPUTS.forEach(id => $(`#${id}`).addEventListener("change", bmPersist));
+  BM_INPUTS.forEach(id => { const el = $(`#${id}`); if (el) el.addEventListener("change", bmPersist); });
   bmModeUI();
+  bmDecodeUI();
+  bmProfileList();
 }
 /* インタリーブ模式的な UI 切り替え: 間隔入力を出し、並列度入力は意味を失うので隠す
    (バックエンドは mode=stagger で concurrency=[本数] に正規化する) */
@@ -99,7 +116,9 @@ function bmPersist() {
   try {
     localStorage.setItem(BM_KEY, JSON.stringify({
       profile: v("#bm-profile"), conc: v("#bm-conc"), num: v("#bm-num"), warm: v("#bm-warm"),
-      inlen: v("#bm-inlen"), outlen: v("#bm-outlen"), temp: v("#bm-temp"),
+      inlen: v("#bm-inlen"), outlen: v("#bm-outlen"), mintok: v("#bm-mintok"),
+      ignoreeos: $("#bm-ignoreeos").checked, decode: v("#bm-decode"), temp: v("#bm-temp"),
+      bp: S.bench.bpId, bpName: v("#bm-bp-name"),
       endpoint: v("#bm-endpoint"), model: v("#bm-model"),
       stream: $("#bm-stream").checked, autostart: $("#bm-autostart").checked,
       stopafter: $("#bm-stopafter").checked, tab: S.bench.tab,
@@ -118,6 +137,7 @@ function openBench(pid) {
   S.bench.tab = "run";                        // 各所の「ベンチ」ボタンは実行の意図で飛ぶ
   if (pid) { $("#bm-profile").value = pid; bmPersist(); }
   switchTab("bench");
+  bmProfileList();
   bmPoll(true);
 }
 function bmFormBody() {
@@ -143,6 +163,8 @@ function bmFormBody() {
     num_prompts: num("#bm-num", 24),
     input_len: num("#bm-inlen", 128),
     output_len: num("#bm-outlen", 128),
+    min_tokens: num("#bm-mintok", 0),
+    ignore_eos: $("#bm-ignoreeos").checked,
     warmup: num("#bm-warm", 1),
     auto_start: $("#bm-autostart").checked,
     stop_after: $("#bm-stopafter").checked,
@@ -216,7 +238,12 @@ function bmRerun(id) {
     if (el.type === "checkbox") el.checked = !!v2; else el.value = v2; } };
   set("#bm-profile", r.profile_id); set("#bm-conc", (p.concurrency || []).join(","));
   set("#bm-num", p.num_prompts); set("#bm-warm", p.warmup); set("#bm-inlen", p.input_len);
-  set("#bm-outlen", p.output_len); set("#bm-temp", p.temperature); set("#bm-endpoint", p.endpoint);
+  set("#bm-outlen", p.output_len); set("#bm-mintok", p.min_tokens || 0);
+  if (p.ignore_eos === true) $("#bm-ignoreeos").checked = true; else $("#bm-ignoreeos").checked = false;
+  set("#bm-decode", p.ignore_eos && Number(p.min_tokens || 0) >= 8192 ? "longest"
+    : (Number(p.output_len) <= 8 && !Number(p.min_tokens || 0) ? "shortest" : "custom"));
+  bmDecodeUI();
+  set("#bm-temp", p.temperature); set("#bm-endpoint", p.endpoint);
   set("#bm-stream", p.stream); set("#bm-autostart", p.auto_start); set("#bm-stopafter", p.stop_after);
   set("#bm-model", p.model || ""); set("#bm-mode", p.mode || "loop"); set("#bm-gap", p.gap_s);
   S.bench.tab = "run";                      // フォームは実行タブ: そのまま見せる
@@ -253,14 +280,110 @@ function bmStatusBadge(r) {
   const [cls, label] = map[r.status] || ["", r.status];
   return `<span class="badge ${cls}"><span class="dot"></span>${label}</span>`;
 }
+function bmLenSummary(p) {
+  const out = `out≤${p.output_len}t`;
+  const min = Number(p.min_tokens || 0);
+  return out + (min > 0 ? ` · min≥${min}t` : "") + (p.ignore_eos ? " · EOS無視" : "");
+}
+function bmDecodeUI() {
+  const el = $("#bm-decode"); if (!el) return;
+  const mode = el.value || "custom";
+  if (mode === "shortest") {
+    $("#bm-outlen").value = 8; $("#bm-mintok").value = 0; $("#bm-ignoreeos").checked = false;
+  } else if (mode === "longest") {
+    $("#bm-outlen").value = 8192; $("#bm-mintok").value = 8192; $("#bm-ignoreeos").checked = true;
+  }
+  $("#bm-decode-note").textContent = mode === "shortest"
+    ? "最短: max_tokens=8。デコードの立ち上がり/TTFT 寄りの計測になります (トークン数が少ないと decode tok/s は不安定)。"
+    : mode === "longest"
+      ? "最長: max_tokens=8192 + min_tokens=8192 + EOS 無視。min_tokens / ignore_eos を解釈しないサーバーでは 400 になることがあります (その場合はカスタムで min_tokens=0 に)。"
+      : "カスタム: max_tokens / min_tokens / EOS 無視を個別に指定します。min_tokens は max_tokens 以下にしてください。";
+  bmPersist();
+}
+/* ---- benchmark profiles (data/bench_profiles.json): what to measure, separate from the launch profile ---- */
+async function bmProfileList() {
+  try {
+    const j = await api("/api/bench-profiles");
+    S.bench.profiles = j.profiles || [];
+  } catch { S.bench.profiles = []; }
+  bmProfileRender();
+}
+function bmProfileRender() {
+  const sel = $("#bm-bp"); if (!sel) return;
+  const cur = S.bench.bpId || sel.value;
+  sel.innerHTML = `<option value="">（未選択）</option>` + (S.bench.profiles || [])
+    .map(p => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join("");
+  sel.value = (S.bench.profiles || []).some(p => p.id === cur) ? cur : "";
+}
+function bmProfileLoad() {
+  const sel = $("#bm-bp"); if (!sel) return;
+  const id = sel.value; S.bench.bpId = id;
+  const p = (S.bench.profiles || []).find(x => x.id === id);
+  $("#bm-bp-note").textContent = "";
+  if (!p) { $("#bm-bp-name").value = ""; bmPersist(); return; }
+  $("#bm-bp-name").value = p.name;
+  bmApplyParams(p.params || {});
+  const target = $("#bm-profile");
+  if (p.params && p.params.profile_id && target &&
+      ![...target.options].some(o => o.value === p.params.profile_id))
+    $("#bm-bp-note").textContent = "対象の起動プロファイルが見つかりません";
+  bmPersist();
+}
+function bmApplyParams(p) {
+  const set = (id, v) => { const el = $(id); if (el && v != null) el.value = v; };
+  set("#bm-profile", p.profile_id); set("#bm-mode", p.mode || "loop");
+  set("#bm-gap", p.gap_s || 2); set("#bm-conc", (p.concurrency || []).join(","));
+  set("#bm-num", p.num_prompts); set("#bm-warm", p.warmup); set("#bm-inlen", p.input_len);
+  set("#bm-outlen", p.output_len); set("#bm-mintok", p.min_tokens || 0);
+  set("#bm-temp", p.temperature); set("#bm-endpoint", p.endpoint); set("#bm-model", p.model || "");
+  if (p.stream === false) $("#bm-stream").checked = false; else $("#bm-stream").checked = true;
+  if (p.auto_start === false) $("#bm-autostart").checked = false; else $("#bm-autostart").checked = true;
+  $("#bm-stopafter").checked = p.stop_after === true;
+  $("#bm-ignoreeos").checked = p.ignore_eos === true;
+  set("#bm-decode", p.ignore_eos && Number(p.min_tokens || 0) >= 8192 ? "longest"
+    : (Number(p.output_len) <= 8 && !Number(p.min_tokens || 0) ? "shortest" : "custom"));
+  bmDecodeUI();
+  bmModeUI();
+}
+async function bmProfileSave() {
+  const name = ($("#bm-bp-name").value || "").trim();
+  if (!name) return toast("ベンチプロファイル名を入力してください");
+  if (!$("#bm-profile").value) return toast("対象の起動プロファイルを選択してください");
+  const params = bmFormBody();
+  const id = S.bench.bpId;
+  try {
+    const p = id
+      ? await api(`/api/bench-profiles/${id}`, {method: "PUT", body: {name, params}})
+      : await api("/api/bench-profiles", {method: "POST", body: {name, params}});
+    S.bench.bpId = p.id;
+    await bmProfileList();
+    $("#bm-bp").value = p.id;
+    $("#bm-bp-name").value = p.name;
+    $("#bm-bp-note").textContent = id ? "更新しました" : "保存しました";
+    toast(id ? "ベンチプロファイルを更新しました" : "ベンチプロファイルを保存しました");
+    bmPersist();
+  } catch (e) { toast("保存失敗: " + e.message); }
+}
+async function bmProfileDelete() {
+  const id = S.bench.bpId;
+  if (!id) return toast("削除するベンチプロファイルを選択してください");
+  if (!confirm("このベンチプロファイルを削除しますか? (実行履歴は残ります)")) return;
+  try {
+    await api(`/api/bench-profiles/${id}`, {method: "DELETE"});
+    S.bench.bpId = ""; $("#bm-bp-name").value = ""; $("#bm-bp-note").textContent = "削除しました";
+    await bmProfileList();
+    toast("ベンチプロファイルを削除しました");
+    bmPersist();
+  } catch (e) { toast("削除失敗: " + e.message); }
+}
 function bmParamsSummary(p) {
   const ep = `${p.endpoint === "chat" ? "chat" : "completions"}${p.stream ? "+stream" : ""}` +
     (p.temperature ? ` · temp${p.temperature}` : " · greedy");
   if (p.mode === "stagger") {
-    return `インタリーブ ${p.num_prompts} 本 · ${(p.gap_s || 2)}s 間隔で送信 · in≈${p.input_len}語 · out≤${p.output_len}t · ${ep}`;
+    return `インタリーブ ${p.num_prompts} 本 · ${(p.gap_s || 2)}s 間隔で送信 · in≈${p.input_len}語 · ${bmLenSummary(p)} · ${ep}`;
   }
   const c = (p.concurrency || []).join("/") || "-";
-  return `${p.num_prompts}req × ${c}並列 · in≈${p.input_len}語 · out≤${p.output_len}t · ${ep}`;
+  return `${p.num_prompts}req × ${c}並列 · in≈${p.input_len}語 · ${bmLenSummary(p)} · ${ep}`;
 }
 /* 代表値 (履歴行・比較ピッカー共通): decode 優先、無い = 非 stream なので出力 peak */
 function bmPeakOf(r) {
@@ -376,8 +499,9 @@ function bmStallRects(r, rect, until) {
    reqs = [{s,a,d,e,n}] — s=送信 a=最初のトークン d=最後のトークン e=確定 n=トークン数
    (段開始からの秒。None=未達)。行の重なりが同時実走、琥珀の長さが待ち (送信→最初の
    トークン = サーバー側キュー+プレフィル込み)、緑がデコード、灰色は確定処理。
-   nowSec 指定 (ライブ) では未確定の行を現在まで延ばす。 */
-function bmPhaseSvg(reqs, nowSec) {
+   nowSec 指定 (ライブ) では未確定の行を現在まで延ばす。pct=true で横軸を
+   段時間の 0〜100% に正規化 (絶対秒の違う実行の形比較用。ツールチップは秒のまま)。 */
+function bmPhaseSvg(reqs, nowSec, pct) {
   const rows = (reqs || []).filter(r => r && r.s != null).sort((x, y) => x.s - y.s).slice(0, 60);
   if (!rows.length) return "";
   const endOf = r => r.e != null ? r.e : (r.d != null ? r.d : (r.a != null ? r.a : r.s));
@@ -426,12 +550,14 @@ function bmPhaseSvg(reqs, nowSec) {
     return `<g><title>#${i + 1} ${esc(tip)}</title>` +
       rect(0, maxT, "var(--line)", `#${i + 1} ${tip}`, ".25") + segs.join("") + `</g>`;
   }).join("");
+  const axl = v => pct ? Math.round(v / maxT * 100) + "%" : Math.round(v) + "s";
   const axis = [0, maxT / 2, maxT].map(v =>
-    `<text x="${X(v).toFixed(1)}" y="${H - 4}" text-anchor="middle" font-size="9" style="fill:var(--sub)">${Math.round(v)}s</text>`).join("");
+    `<text x="${X(v).toFixed(1)}" y="${H - 4}" text-anchor="middle" font-size="9" style="fill:var(--sub)">${axl(v)}</text>`).join("");
   return `<svg viewBox="0 0 ${W} ${H}" role="img">${body}${axis}</svg>`;
 }
-function bmPhaseBlock(title, reqs, nowSec, truncated) {
-  if (!(reqs || []).length) return "";
+/* 凡例 (スイムレーン本体と「比較」パネルで共通)。サーバー内訳が付き始めた reqs が
+   あれば 5 色分割版、無ければ 待ち/デコード/確定。停止区間は実データがある時だけ追加 */
+function bmPhaseLegend(reqs) {
   const pm = reqs.some(r => r && r.arr != null);   // サーバー内訳が付き始めたか
   const anyStall = reqs.some(r => r && ((Array.isArray(r.g) && r.g.length) || r.st));
   let legend = pm
@@ -444,7 +570,12 @@ function bmPhaseBlock(title, reqs, nowSec, truncated) {
       `<span><i style="background:var(--ok)"></i>デコード</span>` +
       `<span><i style="background:#94a3b8"></i>確定</span>`;
   if (anyStall) legend += `<span><i style="background:var(--err)"></i>停止</span>`;
-  legend += `</span>`;
+  return legend + `</span>`;
+}
+function bmPhaseBlock(title, reqs, nowSec, truncated) {
+  if (!(reqs || []).length) return "";
+  const pm = reqs.some(r => r && r.arr != null);   // サーバー内訳が付き始めたか
+  const legend = bmPhaseLegend(reqs);
   return `<div class="row" style="gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
       <b style="font-size:13px">${esc(title)}</b>${legend}</div>` +
     `<div class="bm-chart" style="margin-top:4px">${bmPhaseSvg(reqs, nowSec)}</div>` +
@@ -612,7 +743,23 @@ function bmCmpPanel(runs) {
       <b style="font-size:13px">フェーズ比較</b>
       <span class="muted" style="font-size:11px">リクエスト 1 本あたりの平均秒 (同じ時間スケール・積み上げ) · 時間経過と同じ ${conc}${unit} 段</span></div>` +
       `<div class="bm-chart">${bmPhaseCmpBlock(phs)}<div class="muted" style="font-size:11px">「待ち」の中身分割はサーバーが内訳を報告する実行のみ (strata 系 /metrics: キュー待ち=紫・プレフィル=琥珀)。非公開のサーバーは「待ち」にまとまった実測値です。<b>停止 (赤)</b> はデコード区間から切り出した空白時間 (チャンク間が検出閾値以上) — デコードの緑と足すと丸ごとのデコード秒に戻ります。行末 = その段の decode tok/s Σ (全並列合算) と合計平均秒 · 棒にホバーで内訳${phMiss ? ` · フェーズ記録なし ${phMiss} 件 (記録機能追加前の履歴)` : ""}</div></div>`
-    : `<div class="muted" style="font-size:12px;margin-top:8px">選択した実行にフェーズ記録がありません (記録機能追加前の履歴です)。数値比較は下の表でできます</div>`;  return `<div class="card bm-cmp">
+    : `<div class="muted" style="font-size:12px;margin-top:8px">選択した実行にフェーズ記録がありません (記録機能追加前の履歴です)。数値比較は下の表でできます</div>`;
+  // スイムレーン比較 (ユーザー要望「この表示のまま比較したい」): 同じ段の実物レーンを
+  // 実行ごとに並べ、横軸をその段の時間 0〜100% に正規化。絶対秒が違っても (114s vs 73s)
+  // キュー待ちの階段・デコードの伸び・停止の配置を同じ尺度で重ねて読める。
+  // 絶対秒は行ホバーと実行ごとの個別ビューに出す (ここは形の比較に専念)
+  const lanes = sel.map((r, i) => { const st = bmStageOf(r, conc);
+    return st && (st.reqs || []).length ? {r, st, c: col(i)} : null; }).filter(Boolean);
+  const laneBlock = lanes.length ? `<div class="row" style="gap:8px;margin-top:12px;flex-wrap:wrap;align-items:center">
+      <b style="font-size:13px">フェーズ比較 (スイムレーン)</b>${bmPhaseLegend(lanes.flatMap(o => o.st.reqs))}</div>` +
+    `<div style="display:flex;flex-direction:column;gap:10px">` + lanes.map(o =>
+      `<div><div class="row" style="gap:6px;align-items:center;margin-top:4px">
+        <i style="background:${o.c};width:10px;height:10px;border-radius:2px;flex:none"></i>
+        <b style="font-size:12px" class="ellip">${esc(bmRunShort(o.r))}</b>
+        <span class="muted" style="font-size:11px">${bmF1(o.st.wall_secs)}s · ${o.st.ok} req${o.st.reqs_truncated ? " · 間引き表示" : ""}</span></div>
+        <div class="bm-chart" style="margin-top:2px">${bmPhaseSvg(o.st.reqs, null, true)}</div></div>`).join("") + `</div>` +
+    `<div class="muted" style="font-size:11px">各行 = リクエスト 1 本 (上から送信順)。横軸 = この ${conc}${unit} 段の時間を 0〜100% に正規化 (${lanes.map(o => Math.round(o.st.wall_secs)).join("s vs ")}s と違う絶対秒でも同じ尺度で形を比較できる)。絶対秒・内訳は行にホバー${sel.length - lanes.length ? ` · フェーズ記録なし ${sel.length - lanes.length} 件` : ""}</div>` : "";
+  return `<div class="card bm-cmp">
     <div class="row"><b style="font-size:14px">結果比較 (${sel.length} 件)</b><span class="grow"></span>
       <button class="ghost" onclick="bmCmpClear()">選択を解除</button></div>
     ${sweep.length > 1 ? `<div class="bm-chart">${bmSvgChart(sweep, {ylab: "tok/s", xNum: true})}${bmLegend(sweep)}<div class="muted" style="font-size:11px">並列度に対する確定値の decode tok/s Σ (全並列合算。非 stream の実行は出力 tok/s。段の区切りでガタつかない全体像。1 本あたり平均が欲しければ比較指標の表で段ごとに確認できます)</div></div>` : ""}
@@ -621,6 +768,7 @@ function bmCmpPanel(runs) {
                 : `<div class="muted" style="font-size:12px;margin-top:4px">この並列度の経時記録がありません (記録機能追加前の履歴です)。数値比較は下の表でできます</div>`}
     ${noSeries && ts.length ? `<div class="muted" style="font-size:11px">※ ${noSeries} 件はこの並列度の経時記録なし</div>` : ""}
     ${phBlock}
+    ${laneBlock}
     <div class="row" style="gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
       <b style="font-size:13px">比較指標</b>${mSel}
       <span class="muted" style="font-size:11px">同じ並列度のステージを横並びで</span></div>
