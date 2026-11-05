@@ -1576,6 +1576,13 @@ class CalibrationManager:
                     if job["id"] in self._cancel:
                         raise _Cancelled()
                     payload = self._parse_json(raw)
+                    if step["name"] == "parallel":
+                        # the tool writes its report to --out; stdout is the live log
+                        out = next((step["argv"][i + 1] for i, t in enumerate(step["argv"])
+                                    if t == "--out" and i + 1 < len(step["argv"])), "")
+                        if out:
+                            with contextlib.suppress(OSError, ValueError):
+                                payload = json.loads(Path(out).read_text("utf-8"))
                     if rc != 0:
                         err = (payload or {}).get("error") if isinstance(payload, dict) else None
                         msg = err.get("message") if isinstance(err, dict) else ""
@@ -1696,6 +1703,19 @@ def _summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
                 "settings": rep.get("winner") or {},
                 "improvement_pct": rep.get("improvement_pct"),
                 "latency": rep.get("latency", "")}
+    if kind == "strata" and isinstance(result.get("parallel"), dict) and result["parallel"]:
+        p = result["parallel"]
+        w = p.get("winner") or {}
+        settings = {**(w.get("config_env") or {}), **(w.get("server_env") or {})}
+        arms = {}
+        for name, r in (p.get("arms") or {}).items():
+            if not isinstance(r, dict):
+                continue
+            probe = r.get(r.get("score_probe") or "stagger") or {}
+            arms[name] = {"error": r.get("error", ""), "agg_tps": probe.get("agg_tps"),
+                          "max_q": probe.get("max_q"), "sum_p": probe.get("sum_p")}
+        return {"settings": settings, "applied": bool(w.get("arm") and w.get("arm") != "baseline"),
+                "parallel": {"winner": w, "arms": arms}}
     # Strata の JSON は {"schema_version":1, "ok":true, "review": {...}} / {"... ","application": {...}}
     review = (result.get("review") or {}).get("review") or result.get("review") or {}
     apply = result.get("apply") or {}

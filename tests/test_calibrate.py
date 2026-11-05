@@ -1835,3 +1835,15 @@ def test_auto_micro_adopts_wiring_for_mtp_winner(tmp_path):
     saved = json.loads((tmp_path / "profiles.json").read_text())[0]
     assert saved["env"]["FREETOKEN_MTP_WIRING"] == "norm_mix_fc"
     assert "micro-mtp_wiring=norm_mix_fc" in [c[0] for c in calls["final"]]
+
+
+def test_parallel_report_summary_shows_the_winner_env():
+    rep = {"winner": {"arm": "routed", "config_env": {"STRATA_PREFILL_ROUTED_STREAM": "1"},
+                      "server_env": {}, "improvement_pct": 40.0},
+           "arms": {"baseline": {"score_probe": "stagger", "stagger": {"agg_tps": 27.0, "max_q": 0.0, "sum_p": 10.8}},
+                    "routed": {"score_probe": "stagger", "stagger": {"agg_tps": 27.3, "max_q": 0.0, "sum_p": 10.7}}}}
+    out = calibrate._summary("strata", {"parallel": rep})
+    assert out["applied"] is True
+    assert out["settings"] == {"STRATA_PREFILL_ROUTED_STREAM": "1"}
+    assert out["parallel"]["winner"]["arm"] == "routed"
+    assert out["parallel"]["arms"]["routed"]["agg_tps"] == 27.3
