@@ -56,6 +56,77 @@ class _Cancelled(Exception):
     """キャンセル検出 (内部シグナル)。"""
 
 
+class BenchProfileError(Exception):
+    """ベンチマークプロファイルの保存・更新の失敗 (ユーザーに提示する)。"""
+
+
+class BenchProfiles:
+    """Named, reusable benchmark settings (`data/bench_profiles.json`).
+
+    A profile stores a whole benchmark body (the target launch profile, mode, stages and the decode
+    controls), so the same run can be repeated from the UI or the API.  The app validates the body
+    with BenchBody before it gets here; this class only owns names, ids and the store."""
+
+    MAX = 100
+    NAME_MAX = 80
+
+    def __init__(self, store: JsonStore):
+        self.store = store
+
+    def list(self) -> list[dict[str, Any]]:
+        return sorted(self.store.load(), key=lambda p: p.get("updated_at") or 0, reverse=True)
+
+    def get(self, pid: str) -> dict[str, Any] | None:
+        return next((p for p in self.store.load() if p.get("id") == pid), None)
+
+    def _name(self, name: Any, *, skip: str | None = None) -> str:
+        text = str(name or "").strip()
+        if not text:
+            raise BenchProfileError("ベンチプロファイル名を入力してください")
+        if len(text) > self.NAME_MAX:
+            raise BenchProfileError(f"ベンチプロファイル名は {self.NAME_MAX} 文字までです")
+        for p in self.store.load():
+            if p.get("id") != skip and str(p.get("name") or "").casefold() == text.casefold():
+                raise BenchProfileError(f"同名のベンチプロファイルがあります: {text}")
+        return text
+
+    def create(self, name: Any, params: dict[str, Any]) -> dict[str, Any]:
+        data = self.store.load()
+        if len(data) >= self.MAX:
+            raise BenchProfileError(f"ベンチプロファイルは {self.MAX} 件までです。不要なものを削除してください")
+        text = self._name(name)
+        item = {"id": new_id("bp"), "name": text, "params": dict(params),
+                "created_at": now(), "updated_at": now()}
+        self.store.mutate(lambda lst: lst.append(item))
+        return item
+
+    def update(self, pid: str, name: Any, params: dict[str, Any]) -> dict[str, Any]:
+        item = self.get(pid)
+        if item is None:
+            raise KeyError(pid)
+        text = self._name(name, skip=pid)
+        item = {**item, "name": text, "params": dict(params), "updated_at": now()}
+
+        def patch(data: list[dict[str, Any]]) -> bool:
+            for i, p in enumerate(data):
+                if p.get("id") == pid:
+                    data[i] = item
+                    return True
+            return False
+
+        if not self.store.mutate(patch):
+            raise KeyError(pid)
+        return item
+
+    def delete(self, pid: str) -> bool:
+        data = self.store.load()
+        keep = [p for p in data if p.get("id") != pid]
+        if len(keep) == len(data):
+            return False
+        self.store.mutate(lambda lst: lst.__setitem__(slice(None), keep))
+        return True
+
+
 # ------------------------------------------------------------------ 実走の排他
 
 
@@ -890,6 +961,13 @@ class BenchManager:
         body: dict[str, Any] = {"max_tokens": params["output_len"], "stream": params["stream"]}
         if params.get("temperature") is not None:
             body["temperature"] = params["temperature"]
+        # Decode-length controls.  min_tokens / ignore_eos are the OpenAI-compatible extensions most
+        # servers take (vLLM, llama.cpp); a server that does not know them ignores the keys, and one
+        # that refuses them fails the run with the server's own message.  0 / false sends nothing.
+        if int(params.get("min_tokens") or 0) > 0:
+            body["min_tokens"] = int(params["min_tokens"])
+        if params.get("ignore_eos") is True:
+            body["ignore_eos"] = True
         if params["stream"]:
             body["stream_options"] = {"include_usage": True}
         if model:

@@ -134,7 +134,7 @@ def required_cap(method: str, path: str) -> str | None:
         return "backends.edit"
     if p.startswith("/api/playground"):
         return "playground"
-    if p.startswith("/api/benchmarks"):
+    if p.startswith("/api/benchmarks") or p.startswith("/api/bench-profiles"):
         return "bench"
     if p.startswith("/api/calibrations"):
         # 実行はエンジン起動 + config 書き換え。閲覧も config パス・CLI ログを含むので同じ権限にする

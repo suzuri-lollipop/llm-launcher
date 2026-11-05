@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
@@ -31,7 +31,7 @@ from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv
                        supported_models)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
-from .bench import MAX_STAGES, BenchError, BenchManager
+from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         clone_exists, current_ref, install_tool)
@@ -143,7 +143,11 @@ class BenchBody(BaseModel):
     concurrency: list[int] = Field(default_factory=lambda: [1, 8])
     num_prompts: int = Field(default=24, ge=1, le=10000)
     input_len: int = Field(default=128, ge=8, le=16384)    # プロンプト語数(≈語=token)
-    output_len: int = Field(default=128, ge=1, le=8192)    # max_tokens
+    output_len: int = Field(default=128, ge=1, le=32768)   # max_tokens
+    # Decode-length controls: min_tokens forces at least that many tokens (vLLM / llama.cpp take it),
+    # ignore_eos keeps going past the first stop token.  0 / false sends neither.
+    min_tokens: int = Field(default=0, ge=0, le=32768)
+    ignore_eos: bool = False
     temperature: float | None = Field(default=0.0, ge=0.0, le=2.0)
     warmup: int = Field(default=1, ge=0, le=16)
     request_timeout: int = Field(default=180, ge=10, le=3600)
@@ -164,6 +168,9 @@ class BenchBody(BaseModel):
             raise ValueError("endpoint は chat または completions を指定してください")
         if self.mode not in ("loop", "stagger"):
             raise ValueError("mode は loop または stagger を指定してください")
+        if self.min_tokens > self.output_len:
+            raise ValueError("min_tokens は max_tokens 以下にしてください "
+                             f"(min_tokens={self.min_tokens} > max_tokens={self.output_len})")
         if self.mode == "stagger":
             # インタリーブは「先行するストリームがデコード中に次のプロンプトを届ける」
             # 干渉計測。1 段 = num_prompts 本の同時ストリーム (並列度リストは使わず
@@ -194,6 +201,12 @@ class BenchBody(BaseModel):
         d.pop("profile_id")
         d["model"] = self.model.strip()
         return d
+
+
+class BenchProfileBody(BaseModel):
+    """保存するベンチマークプロファイル (名前 + BenchBody の params)。"""
+    name: str = Field(min_length=1, max_length=80)
+    params: dict[str, Any]
 
 
 class CalibrateBody(BaseModel):
@@ -528,6 +541,7 @@ def create_app(root: Path) -> FastAPI:
     sessions_store = JsonStore(data_dir / "sessions.json", [])
     manager = ProcessManager(root, runs_store, profiles_store, settings_store)
     bench = BenchManager(bench_store, profiles_store, manager)
+    bench_profiles = BenchProfiles(JsonStore(data_dir / "bench_profiles.json", []))
     calibrations_store = JsonStore(data_dir / "calibrations.json", [])
     calibrate = CalibrationManager(root, profiles_store, calibrations_store, manager)
     # 同じ GPU を使う実走 (ベンチ / キャリブレーション) を 1 本に制限する。
@@ -1481,6 +1495,47 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(404, "ベンチマークが見つかりません")
         except BenchError as e:
             raise HTTPException(409, str(e))
+        return {"ok": True}
+
+    # ---------------------------------------------------------- benchmark profiles
+    # Named, reusable groups of benchmark settings (target launch profile, stages, decode length).
+    # They are separate from the launch profiles: the launch profile says WHAT server to start, the
+    # benchmark profile says HOW to measure it.
+
+    def _bench_body(raw: Any) -> dict[str, Any]:
+        try:
+            return BenchBody(**raw).model_dump()
+        except ValidationError as e:
+            msgs = "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+                             for err in e.errors()[:4])
+            raise HTTPException(400, f"ベンチ設定が不正です: {msgs}")
+
+    @app.get("/api/bench-profiles")
+    async def list_bench_profiles() -> dict[str, Any]:
+        return {"profiles": bench_profiles.list()}
+
+    @app.post("/api/bench-profiles", status_code=201)
+    async def create_bench_profile(body: BenchProfileBody) -> dict[str, Any]:
+        params = _bench_body(body.params)
+        try:
+            return bench_profiles.create(body.name, params)
+        except BenchProfileError as e:
+            raise HTTPException(409, str(e))
+
+    @app.put("/api/bench-profiles/{pid}")
+    async def update_bench_profile(pid: str, body: BenchProfileBody) -> dict[str, Any]:
+        params = _bench_body(body.params)
+        try:
+            return bench_profiles.update(pid, body.name, params)
+        except KeyError:
+            raise HTTPException(404, "ベンチプロファイルが見つかりません")
+        except BenchProfileError as e:
+            raise HTTPException(409, str(e))
+
+    @app.delete("/api/bench-profiles/{pid}")
+    async def delete_bench_profile(pid: str) -> dict[str, Any]:
+        if not bench_profiles.delete(pid):
+            raise HTTPException(404, "ベンチプロファイルが見つかりません")
         return {"ok": True}
 
     # ------------------------------------------------------------- 簡易画面
