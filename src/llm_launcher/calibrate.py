@@ -795,6 +795,24 @@ class CalibrationManager:
         if not self.profiles.mutate(patch):
             raise CalibrateError("計測中にプロファイルが消えたため、結果を保存できませんでした")
 
+    def _write_profile_env(self, profile: dict[str, Any], updates: dict[str, str]) -> None:
+        """Write server-side env (e.g. STRATA_COALESCE_PREFILL) into the profile store, where the
+        server process reads it.  The run config's env only reaches the engine."""
+        if not updates:
+            return
+
+        def patch(data: list[Any]) -> bool:
+            for p in data:
+                if isinstance(p, dict) and p.get("id") == profile["id"]:
+                    p.setdefault("env", {}).update({str(k): str(v) for k, v in updates.items()})
+                    if isinstance(p.get("_resolved_env"), dict):
+                        p["_resolved_env"].update({str(k): str(v) for k, v in updates.items()})
+                    return True
+            return False
+
+        if not self.profiles.mutate(patch):
+            raise CalibrateError("計測中にプロファイルが消えたため、サーバー側 env を保存できませんでした")
+
     def _ft_read_log(self, rel: str, limit: int = 400_000) -> str:
         """root 相対ログ路径の末尾を読む (machine-fit は起動行だけ必要)。"""
         if not rel:
@@ -1583,6 +1601,12 @@ class CalibrationManager:
                         if out:
                             with contextlib.suppress(OSError, ValueError):
                                 payload = json.loads(Path(out).read_text("utf-8"))
+                    if step["name"] == "parallel" and isinstance(payload, dict):
+                        server_env = (payload.get("winner") or {}).get("server_env") or {}
+                        if server_env:
+                            self._write_profile_env(profile, server_env)
+                            self._append_log(job, "サーバー側 env をプロファイルに適用: "
+                                             + ", ".join(f"{k}={v}" for k, v in server_env.items()))
                     if rc != 0:
                         err = (payload or {}).get("error") if isinstance(payload, dict) else None
                         msg = err.get("message") if isinstance(err, dict) else ""
