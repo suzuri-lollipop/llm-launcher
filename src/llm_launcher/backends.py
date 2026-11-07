@@ -655,6 +655,82 @@ def build_maya() -> dict[str, Any]:
     return _backend_meta(b, fields)
 
 
+def build_basalt() -> dict[str, Any]:
+    """Basalt (https://github.com/jesdga95/basalt) — Strata 系フォークの、NVIDIA Blackwell
+    (sm_120) 向けの MoE ローカル推論エンジン (OpenAI/Anthropic 互換 + Web UI)。
+
+    起動の入口は cmake でビルドする bin/basalt の serve サブコマンド。ラッパが
+    「リポジトリ直下の .venv があればそれ、無ければ python3」で serve/server.py を
+    --engine-bin 付きで起動するため、GUI からは {llama_server} (= バックエンド設定で
+    上書き可能な bin/basalt の解決結果) + サーバー起動フラグだけを出す。
+    モデル本体の設定 (pack・コンテキスト長・expert 階層) は basalt_config.json の
+    "models" / "engine" 側に入るため、正表は serve/config.py build_parser のサーバー CLI。
+    """
+    b = "basalt"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--model", "モデルファイル (.basalt)",
+          placeholder="module/basalt/models/Qwen3.8-FN-NVFP4-DQ6_K.basalt",
+          help="エンジン・トークナイザ・サンプリング・ビジョンはモデルファイルから来る。"
+               "pack は huggingface.co/jesdga/Qwen3.8-Flash-Next-Basalt 等から DL"),
+        F("--config", "実行設定 JSON (basalt_config.json)",
+          placeholder="module/basalt/basalt_config.json",
+          help='{"server": {...}, "engine": {...}, "models": [{"model": FILE}]} 形式。'
+               "コンテキスト長・expert 階層など本体設定はこの args 側 (コマンドラインが優先)"),
+        F("--alias", "API のモデル名 (alias)", help="空 = モデルファイルに保存された名前"),
+        F("--vision", "ビジョンエンコーダ", placeholder="off / dynamic / cpu / GPU番号",
+          help="画像入力: off / dynamic (メイン GPU の expert-cache 枠を間借り) / cpu / sidecar を常駐させる GPU 番号"),
+        F("--tokenizer", "トークナイザ DIR",
+          help="空 = リポジトリの pack/full/tokenizer (mock エンジン用。通常は触らない)"),
+        F("--gpu", "GPU 指定", section="parallel", placeholder="0 / 0,1 / auto",
+          help="nvidia-smi の番号。先頭がメインで残りはエンジンが役割を分担。auto = 全 Blackwell カード"),
+        F("--parallel", "並列スロット数 (1-8)", section="parallel", ftype="int", placeholder="空=1",
+          help="N リクエストを同時処理 (超過は到着順に待機)。--max-context は N 分割 "
+               "(slot-full-context で各スロットに全長。KV cache は expert cache から出る)"),
+        F("--slot-full-context", "各スロットに full context", section="parallel", default_on=False,
+          help="--parallel と併用。全スロットに --max-context 全体を与える (KV cache は N 倍)"),
+        F("--lazy", "遅延ロード (初回リクエストで起動)", section="sched", default_on=False,
+          help="API は未ロードで待ち受け、最初のリクエストでロード (sidecar ビジョンは降ろす)"),
+        F("--idle-unload", "アイドル自動アンロード秒", section="sched", ftype="float",
+          placeholder="空=常駐", help="指定秒リクエストが無いとモデルを降ろす。次のリクエストで再ロード"),
+        F("--idle-sleep", "アイドル就寝秒 (VRAM 解放)", section="sched", ftype="float",
+          placeholder="空=常駐", help="指定秒無リクエストでエンジンの VRAM を解放 (RAM 側は残る)。"
+              "次リクエストで数秒で復帰 (Linux)。--idle-unload の代わりに使える"),
+        F("--min-free-vram-mib", "ロードに必要な空き VRAM (MiB)", section="sched",
+          placeholder="空=常にロード", help="未ロード時にこれ未満なら 503 を返す"),
+        F("--host", "ホスト", section="server", default="0.0.0.0",
+          help="0.0.0.0 で LAN 公開 (その場合は APIキーを推奨)。127.0.0.1 = この PC のみ"),
+        F("--port", "ポート", section="server", default="8080"),
+        F("--api-key", "APIキー", section="server", placeholder="key (コマンドラインのみ)",
+          help="/v1/* で Bearer / x-api-key を必須 (--host 0.0.0.0 と併用)。--config には書けない"),
+        F("--open", "起動時にブラウザを開く", section="server", default_on=False,
+          help="モデルが ready になった時点でローカルページ ( stats ページ) を開く"),
+        F("--fit-max-tokens", "max_tokens を残り長さに clamp", section="server", default_on=False,
+          help="OFF はコンテキスト超過を 400 で拒否 (llama.cpp / Strata と同じ既定)"),
+        F("--max-payload-mib", "最大リクエストボディ (MiB)", section="server",
+          placeholder="空=256", help="超過は 413"),
+        F("--allowed-host", "応答する Host 名", section="server", placeholder="例: pc.local (* で検査オフ)",
+          help="追記で複数可。空 = localhost 系のみ"),
+        F("--cors-origin", "CORS 許可 ORIGIN", section="server", placeholder="例: https://example.com",
+          help="この origin の Web ページに /v1/* を使わせる (追記で複数可)"),
+        F("--image-url-host", "画像 URL 許可 HOST[:PORT]", section="server",
+          placeholder="例: img.example.com", help="他マシンからのリクエストの http(s) 画像 URL をこの host に限定 (追記で複数可)"),
+        F("--image-dir", "画像ファイル許可 DIR", section="server",
+          placeholder="例: module/basalt/models", help="他マシンからのリクエストにこの配下のファイルを名指しさせる (追記で複数可)"),
+        F("--image-remote-only", "自マシンも remote 扱い", section="server", default_on=False,
+          help="自マシンのリクエストにも data: URL と許可 host/dir のみ通す (プロキシ併用環境向け)"),
+        F("--mock-engine", "mock エンジン (疎通確認)", section="server", default_on=False,
+          help="モデル無しでスクリプトどおり回答する偽エンジン。API 疎通・UI 確認用 (--model 不要)"),
+        F("--script", "mock エンジンの回答", section="server", placeholder="複数ある場合は追加引数へ",
+          help="--mock-engine のときだけ有効。複数指定可 (GUI は 1 つまで)"),
+        F("--debug", "リクエスト毎のデバッグログ", section="logs", default_on=False,
+          help="1 リクエスト 1 行 + 回答後の生モデルテキストをログに出す"),
+        F("--request-lines", "エンジン要求サマリを stdout へ", section="logs", default_on=False,
+          help="[server] done 行を stdout に返す (supervisor が stdout だけ見る場合向け)"),
+    ]
+    return _backend_meta(b, fields)
+
+
 # モジュール側が自動導出する項目: GUI 既定値で上書きしないよう既定 OFF (チェックで ON にすると送信)
 DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     "vllm": {"dtype", "load_format", "kv_cache_dtype", "generation_config",
@@ -693,6 +769,10 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     # Project Maya: 同様に maya-<model>.json (config) が正解を持つ項目 / 起動のたびに不要な項目は既定 OFF
     "maya": {"config", "gpu", "gpus", "parallel", "vram_reserve_mib", "calibrate",
              "backend", "env"},
+    # Basalt: 正解を basalt_config.json (config) が既に持っている項目 / 空なら上流既定に任せる項目は既定 OFF
+    "basalt": {"config", "alias", "gpu", "tokenizer", "vision", "parallel", "idle_unload",
+               "idle_sleep", "min_free_vram_mib", "max_payload_mib", "allowed_host",
+               "cors_origin", "image_url_host", "image_dir", "script"},
 }
 
 # 常に送信する (無効化できない) 項目
@@ -703,6 +783,7 @@ REQUIRED_KEYS: dict[str, set[str]] = {
     "freetoken": {"model_path", "host", "port"},
     "strata": {"config", "engine", "host", "port"},
     "maya": {"host", "port"},
+    "basalt": {"host", "port"},
 }
 
 # fork バックエンドは基底 (freetoken) と同じ送信ポリシー (コピーして派生 = 個別追加可)
@@ -844,6 +925,26 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["ready: http"],
         "default_port": "8080",
     },
+    "basalt": {
+        "id": "basalt", "name": "Basalt",
+        "repo": "https://github.com/jesdga95/basalt",
+        "module_path": "module/basalt", "kind": "python",
+        "desc": "Strata 系フォークの Blackwell (sm_120) 向け MoE ローカル推論エンジン"
+                " (Qwen3.8-Flash-Next / DeepSeek-V4.1-Flash、OpenAI/Anthropic 互換)。"
+                "入口は cmake ビルドした bin/basalt の serve サブコマンドで、ラッパが "
+                "module/basalt/.venv (無ければ python3) で serve/server.py を起動する。"
+                "初回は セットアップタブ (📦) か module/basalt で "
+                "cmake -B build && cmake --build build -j + pip install -r requirements.txt を実行する。",
+        # bin/basalt serve が --engine-bin 自身を付けて python サーバーを exec する
+        "default_command": "{llama_server} serve",
+        # serve はリポジトリ直下のパッケージ (未 install) → submodule を cwd にして実 import して判定。
+        # 依存 (jinja2 / numpy / psutil …) は requirements.txt 製なので setup 前は未検出になる
+        "check_module": "serve.server", "check_cwd": True, "health_path": "/health",
+        "ready_markers": ["[server] ready"],
+        "default_port": "8080",
+        "binaries": ["basalt"],
+        "build_candidates": ["module/basalt/bin/basalt"],
+    },
 }
 
 BACKENDS: dict[str, dict[str, Any]] = {
@@ -855,6 +956,7 @@ BACKENDS: dict[str, dict[str, Any]] = {
     "strata": build_strata(),
     "strata-fork": build_strata("strata-fork"),
     "maya": build_maya(),
+    "basalt": build_basalt(),
 }
 
 
@@ -1071,9 +1173,11 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
         command = (profile.get("command") or "").strip() or backend["default_command"]
         resolved = resolve_command_tokens(root, command, python=python, binary=binary,
                                           values=values)
-        if backend["kind"] == "binary" and not binary:
-            raise ValueError("llama-server が見つかりません。バックエンド設定でパスを指定するか、"
-                             "module/llama.cpp をビルドしてください")
+        if backend.get("binaries") and not binary:
+            name = backend["binaries"][0]
+            mod = backend.get("module_path", "")
+            raise ValueError(f"{name} が見つかりません。バックエンド設定でパスを指定するか、"
+                             f"{mod} をビルドしてください")
         if not resolved.strip():
             raise ValueError("起動コマンドが空です")
         argv = shlex.split(resolved)

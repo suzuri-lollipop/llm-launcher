@@ -56,6 +56,8 @@ PROGRESS_MIN_INTERVAL = 1.0
 
 # UI からインストールできるバックエンド。strata / maya は setup.sh / maya.sh 側が
 # 対話プロンプトを含むため UI 化していない (導線を壊さない範囲で今後追加する)。
+# requirements / cmake / engine_bin を持つ spec は FreeToken 系と打って変わって
+# 「pip のパッケージ化が無い + ネイティブビルド込み」の形 (Basalt) に対応する。
 INSTALL_SPECS: dict[str, dict[str, Any]] = {
     "freetoken-fork": {
         "clone": "https://github.com/suzuri-lollipop/FreeToken",
@@ -79,6 +81,22 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
         "module_path": "module/freetoken",
         "check": "freetoken",
         "extras": "accel",
+    },
+    # Basalt (Strata 系フォーク / Blackwell 向け MoE エンジン): pip パッケージでは無い
+    # (pyproject なし) ので requirements.txt を入れ、cmake でネイティブエンジン
+    # (bin/basalt) をビルドする。 submodule なので clone 済み (git submodule update --init)
+    # なら clone step はスキップされ、.venv → pip → cmake → verify だけ走る。
+    "basalt": {
+        "clone": "https://github.com/jesdga95/basalt",
+        "ref": "",
+        "refs": [],
+        "fork_name": "",
+        "module_path": "module/basalt",
+        "check": "serve.server",         # submodule を cwd にした実 import (Strata と同じ)
+        "extras": "",                    # -e . ではなく requirements.txt 側で入れる
+        "requirements": "requirements.txt",
+        "cmake": True,                   # cmake configure + build の 2 step を install 後に挟む
+        "engine_bin": "bin/basalt",      # ビルド成果物。precheck / verify はこれも要求する
     },
 }
 
@@ -448,9 +466,16 @@ class InstallManager:
         tool = install_tool()
         uv_path = find_uv()
         venvpy = str(module_dir / ".venv" / "bin" / "python")
+        # requirements 系 spec (Basalt) は verify でもネイティブエンジンの実在を要求する。
+        # precheck が通らない = 依存 or エンジンのどれかが欠けている、ということで
+        # install / cmake が必ず走る (pip の再実行はほぼキャッシュで素通しになる)。
+        engine_bin = str(spec.get("engine_bin") or "")
+        engine_check = (f"; import os as _os, sys as _sys;"
+                        f" _sys.exit(0 if _os.access({engine_bin!r}, _os.X_OK) else 1)"
+                        if engine_bin else "")
         verify_argv = [venvpy, "-c",
                        f"import {check}, sys; print('{check}', getattr({check}, '__version__', '?'),"
-                       f" 'py', sys.version.split()[0])"]
+                       f" 'py', sys.version.split()[0])" + engine_check]
         steps: list[dict[str, Any]] = []
         if needs_clone:
             argv = ["git", "clone", "--depth", "1"]
@@ -463,14 +488,32 @@ class InstallManager:
             steps.append({"name": "branch"})
         steps.append({"name": "venv"})
         steps.append({"name": "precheck", "argv": verify_argv, "cwd": str(module_dir)})
-        spec_arg = f".[{extras_str}]" if extras_str else "."
+        req = str(spec.get("requirements") or "")
+        if req:
+            # 非 packaging リポジトリ (pyproject の無い Basalt など): requirements.txt 直指定
+            spec_args = ["-r", req]
+        else:
+            spec_args = ["-e", f".[{extras_str}]" if extras_str else "."]
         if uv_path:
             # 絶対パスのまま argv[0] に置く — 子プロセスの PATH が短くても解る
-            install_argv = [uv_path, "pip", "install", "--python", venvpy, "-e", spec_arg]
+            install_argv = [uv_path, "pip", "install", "--python", venvpy, *spec_args]
         else:
-            install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off",
-                            "-e", spec_arg]
+            install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off", *spec_args]
         steps.append({"name": "install", "argv": install_argv, "cwd": str(module_dir)})
+        if spec.get("cmake"):
+            if not shutil.which("cmake"):
+                raise InstallError("cmake が見つかりません (Basalt のエンジンビルドに必要です。"
+                                   "CMake 3.24+ をインストールしてから実行してください)")
+            # 実行時点では clean で build/ が消えているかもしれないので、計画段階の実在チェック
+            # では止めず cmake 側に再構築させる (構成は差分なし、ビルドは no-op で速い)
+            steps.append({"name": "cmake",
+                          "argv": ["cmake", "-S", ".", "-B", "build",
+                                   "-DCMAKE_BUILD_TYPE=Release"],
+                          "cwd": str(module_dir)})
+            steps.append({"name": "cmake-build",
+                          "argv": ["cmake", "--build", "build",
+                                   "--parallel", str(os.cpu_count() or 4)],
+                          "cwd": str(module_dir)})
         steps.append({"name": "verify", "argv": verify_argv, "cwd": str(module_dir)})
 
         job = self._new_job("install", actor, backend=backend_id,
@@ -585,6 +628,9 @@ class InstallManager:
             if job.get("clean") and (module_dir / ".venv").exists():
                 self._append_log(job, "クリーン再インストール: .venv を削除します")
                 await asyncio.to_thread(shutil.rmtree, module_dir / ".venv")
+            if job.get("clean") and spec.get("cmake") and (module_dir / "build").exists():
+                self._append_log(job, "クリーン再インストール: build/ を削除します")
+                await asyncio.to_thread(shutil.rmtree, module_dir / "build")
             for step in steps:
                 if job["id"] in self._cancel:
                     raise _Cancelled()

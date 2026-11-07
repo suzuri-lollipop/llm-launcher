@@ -1742,6 +1742,10 @@ def create_app(root: Path) -> FastAPI:
                           for r in (spec.get("refs") or [])],
                  "current_ref": current_ref(root, spec), "cloned": clone_exists(root, spec),
                  "module_path": spec["module_path"], "extras": spec["extras"],
+                 # requirements 系 (pyproject の無いリポジトリ) / cmake ビルド有無は
+                 # セットアップタブのプレビュー文言組み立てに使う (Basalt 対応)
+                 "requirements": spec.get("requirements", ""),
+                 "cmake": bool(spec.get("cmake")),
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
                                 if BACKENDS[bid].get("model_data") else ""),
                  # 対応モデル一覧: clone 内の docs/models.md (model_list_doc) を読んだ既知の正常構成。

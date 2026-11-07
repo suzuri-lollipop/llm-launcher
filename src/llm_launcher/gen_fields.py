@@ -358,6 +358,36 @@ def gen_strata(root: Path, sub: str = "strata") -> dict[str, Any]:
     return _argparse_table(src)
 
 
+# -------------------------------------------------------------------- Basalt
+def gen_basalt(root: Path) -> dict[str, Any]:
+    """Basalt のサーバー CLI は serve/config.py の build_parser が全て (Strata 系フォーク)。
+
+    モデル本体の構成 (pack・コンテキスト長・expert 階層) は basalt_config.json の
+    "models" / "engine" 側に入るため、ここではサーバープロセス自体の起動フラグだけを
+    正表化する。--temperature 系は build_parser 内のループ生成 (f"--{key}") なので
+    AST から拾えず、同一ソースの静的タプル (key, text) に従ってここで補う。
+    --engine-bin は `basalt serve` ラッパが自分向けに付ける内部フラグなので落とす。
+    """
+    src = (_repo(root, "basalt") / "serve" / "config.py").read_text()
+    table = _argparse_table(src)
+    table.pop("--engine-bin", None)
+    for key, text in (
+            ("temperature", "0 = greedy; higher is more random"),
+            ("top-p", "nucleus cutoff, 0 < value <= 1 (1 = off)"),
+            ("top-k", "keep the K likeliest tokens (0 = off: every token)"),
+            ("min-p", "drop tokens less likely than this times the likeliest, 0..1 (0 = off)"),
+            ("presence-penalty", "flat penalty on a token seen in the window"),
+            ("frequency-penalty", "penalty growing with how often a token was seen"),
+            ("repetition-penalty", "multiplicative penalty on seen tokens, > 0 (1 = off)"),
+            ("penalty-last-n", "the window the penalties look back over, in tokens (at most 4096)"),
+            ("seed", "fix the random draw, an integer")):
+        table[f"--{key}"] = {
+            "aliases": [],
+            "type": "int" if key in ("top-k", "penalty-last-n", "seed") else "float",
+            "help": f"default {key.replace('-', '_')} for requests that leave it out: {text}"}
+    return table
+
+
 # ---------------------------------------------------------------------- Maya
 def gen_maya(root: Path) -> dict[str, Any]:
     """Project Maya の CLI は maya.py (セットアップ+起動ラッパ) の argparse が全て。
@@ -418,6 +448,11 @@ def build(root: Path) -> dict[str, dict[str, Any]]:
         tables["maya"] = gen_maya(root)
     else:
         print("maya: module/maya が未クローンのため skip", flush=True)
+    # Basalt (module/basalt): submodule 取得済みなら serve/config.py の build_parser から生成
+    if (_repo(root, "basalt") / "serve" / "config.py").exists():
+        tables["basalt"] = gen_basalt(root)
+    else:
+        print("basalt: module/basalt が未クローンのため skip", flush=True)
     # フォーク (module/fork/<name>): clone 済みなら fork ソースから正表を生成。
     # ディレクトリ名は大小文字を無視して解決 (git clone 既定のリポジトリ名 Strata / FreeToken にも対応)。
     # 未 clone 時は skip し、backends.py の TABLE_FALLBACK で基底表が流用される。

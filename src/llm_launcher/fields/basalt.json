@@ -1,0 +1,218 @@
+{
+ "--alias": {
+  "aliases": [],
+  "help": "the model name the API reports (default: the name stored in the model file)",
+  "type": "str"
+ },
+ "--allowed-host": {
+  "aliases": [],
+  "help": "also answer to this Host name (repeatable; \"*\" turns the check off)",
+  "metavar": "NAME",
+  "type": "str"
+ },
+ "--answer-room": {
+  "aliases": [],
+  "default": "True",
+  "help": "reserve space for closing the thinking and the answer when the output cap is at least 1024 tokens; an explicit request budget of 0 opts out"
+ },
+ "--api-key": {
+  "aliases": [],
+  "default": "",
+  "help": "require this key on /v1/* (Authorization: Bearer ... or x-api-key); command line only, not allowed in a --config file",
+  "type": "str"
+ },
+ "--config": {
+  "aliases": [],
+  "help": "a JSON file {\"server\": {...}, \"engine\": {...}, \"models\": [{\"model\": FILE, ...}]}: settings named without the dashes. \"server\" holds what the server shares, \"engine\" what applies to every model that ta",
+  "metavar": "FILE",
+  "type": "str"
+ },
+ "--cors-origin": {
+  "aliases": [],
+  "help": "let web pages from this origin use /v1/* (repeatable)",
+  "metavar": "ORIGIN",
+  "type": "str"
+ },
+ "--debug": {
+  "aliases": [],
+  "help": "log one line per request and the raw model text after each reply",
+  "type": "bool"
+ },
+ "--fit-max-tokens": {
+  "aliases": [],
+  "help": "clamp max_tokens to the remaining context instead of rejecting the request with 400",
+  "type": "bool"
+ },
+ "--frequency-penalty": {
+  "aliases": [],
+  "help": "default frequency_penalty for requests that leave it out: penalty growing with how often a token was seen",
+  "type": "float"
+ },
+ "--gpu": {
+  "aliases": [],
+  "help": "the GPUs to use, as nvidia-smi numbers them: exactly these, the first is the main card and the engine gives the rest their roles (\"0,1\"); auto = every Blackwell card, the fastest as main (default: GPU",
+  "type": "str"
+ },
+ "--grammar": {
+  "aliases": [],
+  "help": "hold every tool call and JSON response format to a grammar in the engine (on by default; a request with strict: true gets it either way); --no-grammar turns it off"
+ },
+ "--host": {
+  "aliases": [],
+  "default": "127.0.0.1",
+  "help": "the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices on your network (give --api-key)",
+  "type": "str"
+ },
+ "--idle-sleep": {
+  "aliases": [],
+  "help": "put the model to sleep after this many seconds without requests: its VRAM is freed, its RAM copy, conversations and learned expert placement stay, and the next request wakes it in a few seconds (Linux",
+  "metavar": "SECONDS",
+  "type": "float"
+ },
+ "--idle-unload": {
+  "aliases": [],
+  "help": "unload the model after this many seconds without requests; the next request loads it again",
+  "metavar": "SECONDS",
+  "type": "float"
+ },
+ "--image-dir": {
+  "aliases": [],
+  "help": "let requests from other machines name image files under this directory (repeatable). Requests from this machine need no flag",
+  "metavar": "DIR",
+  "type": "str"
+ },
+ "--image-remote-only": {
+  "aliases": [],
+  "help": "treat requests from this machine as remote too, so they get only data: URLs and what --image-url-host and --image-dir allow. For a server behind anything on this machine that forwards other people's r",
+  "type": "bool"
+ },
+ "--image-url-host": {
+  "aliases": [],
+  "help": "let requests from other machines name http(s) image URLs on exactly this host (repeatable; without a port, 80 and 443). A name must resolve to public addresses; an IP address is taken as written. Requ",
+  "metavar": "HOST[:PORT]",
+  "type": "str"
+ },
+ "--lazy": {
+  "aliases": [],
+  "help": "start the API unloaded; load on first request; a sidecar image encoder is dropped, --vision dynamic stays",
+  "type": "bool"
+ },
+ "--max-payload-mib": {
+  "aliases": [],
+  "default": 256,
+  "help": "the largest request body the server reads, in MiB; a bigger one gets a 413 (default 256)",
+  "metavar": "MIB",
+  "type": "int"
+ },
+ "--min-free-vram-mib": {
+  "aliases": [],
+  "help": "load an unloaded model only when this much VRAM is free, else answer 503",
+  "type": "int"
+ },
+ "--min-p": {
+  "aliases": [],
+  "help": "default min_p for requests that leave it out: drop tokens less likely than this times the likeliest, 0..1 (0 = off)",
+  "type": "float"
+ },
+ "--mock-engine": {
+  "aliases": [],
+  "help": "run a scripted engine instead of the model, for clients and tests (no --model needed)",
+  "type": "bool"
+ },
+ "--model": {
+  "aliases": [],
+  "help": "the .basalt model file: the engine, tokenizer, sampling and vision come from it",
+  "type": "str"
+ },
+ "--open": {
+  "aliases": [],
+  "help": "open the local page in the browser once the model is ready",
+  "type": "bool"
+ },
+ "--parallel": {
+  "aliases": [],
+  "metavar": "N",
+  "type": "str"
+ },
+ "--penalty-last-n": {
+  "aliases": [],
+  "help": "default penalty_last_n for requests that leave it out: the window the penalties look back over, in tokens (at most 4096)",
+  "type": "int"
+ },
+ "--port": {
+  "aliases": [],
+  "default": 8080,
+  "help": "the TCP port to listen on (default 8080)",
+  "type": "int"
+ },
+ "--presence-penalty": {
+  "aliases": [],
+  "help": "default presence_penalty for requests that leave it out: flat penalty on a token seen in the window",
+  "type": "float"
+ },
+ "--reasoning-budget-tokens": {
+  "aliases": [],
+  "help": "default thinking budget for requests that leave reasoning_budget_tokens out (0 = none): at the budget the thinking is closed and the answer starts, so set it below the request's max_tokens",
+  "metavar": "N",
+  "type": "str"
+ },
+ "--repetition-penalty": {
+  "aliases": [],
+  "help": "default repetition_penalty for requests that leave it out: multiplicative penalty on seen tokens, > 0 (1 = off)",
+  "type": "float"
+ },
+ "--request-lines": {
+  "aliases": [],
+  "help": "echo the engine's per-request summary on stdout, for a supervisor that only sees this output",
+  "type": "bool"
+ },
+ "--script": {
+  "aliases": [],
+  "help": "the mock engine's answer (default: a short greeting); given more than once, requests get them in turn and the last one repeats",
+  "type": "str"
+ },
+ "--seed": {
+  "aliases": [],
+  "help": "default seed for requests that leave it out: fix the random draw, an integer",
+  "type": "int"
+ },
+ "--slot-full-context": {
+  "aliases": [],
+  "help": "with --parallel, give every slot the whole --max-context instead of an equal part: N slots cost N times the KV cache",
+  "type": "bool"
+ },
+ "--temperature": {
+  "aliases": [],
+  "help": "default temperature for requests that leave it out: 0 = greedy; higher is more random",
+  "type": "float"
+ },
+ "--thinking-loop-tokens": {
+  "aliases": [],
+  "default": 256,
+  "help": "end the thinking and let the model answer when it repeats one token this many times in a row inside the thinking (0 = never)",
+  "metavar": "N",
+  "type": "str"
+ },
+ "--tokenizer": {
+  "aliases": [],
+  "help": "tokenizer directory for the mock engine (a byte tokenizer if absent)",
+  "type": "str"
+ },
+ "--top-k": {
+  "aliases": [],
+  "help": "default top_k for requests that leave it out: keep the K likeliest tokens (0 = off: every token)",
+  "type": "int"
+ },
+ "--top-p": {
+  "aliases": [],
+  "help": "default top_p for requests that leave it out: nucleus cutoff, 0 < value <= 1 (1 = off)",
+  "type": "float"
+ },
+ "--vision": {
+  "aliases": [],
+  "default": "off",
+  "help": "image input: off (default), dynamic (inside the engine: it borrows expert-cache slots on the main GPU while it reads an image, no standing VRAM), cpu (no VRAM, slow) or a GPU number, as nvidia-smi num",
+  "metavar": "MODE|GPU",
+  "type": "str"
+ }
+}
