@@ -128,20 +128,25 @@ function hfPickerHtml(f) {
   const hf = S.hf;
   if (hf === undefined) return `<div class="muted" style="font-size:11.5px;margin-top:4px">HFキャッシュを確認中…</div>`;
   const dirNote = `<div class="muted mono" style="font-size:10.5px;margin-top:3px">${esc(hf.cache_dir)} · <a href="#" onclick="hfReload();return false">再スキャン</a></div>`;
-  const isGguf = S.editing?.backend === "llamacpp";
+  /* 選択中バックエンドが実際に読み込める形だけに出す:
+     basalt = .basalt pack ファイル / llama.cpp = .gguf ファイル (gguf 無ければ DIR 指定)。
+     他 (vLLM / SGLang / FreeToken 系) はスナップショット DIR をそのまま渡す */
+  const bid = S.editing?.backend;
   const opts = [];
   for (const m of (hf.models || [])) {
     const tag = m.source === "data" ? "[データ] " : "";
-    if (isGguf) {
-      for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
+    if (bid === "basalt") {
       for (const g of (m.basalt || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
-      if (!(m.gguf || []).length && !(m.basalt || []).length && m.has_weights !== false)
+    } else if (bid === "llamacpp") {
+      for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
+      if (!(m.gguf || []).length && m.has_weights !== false)
         opts.push({v: m.snapshot, label: `${tag}${m.repo_id} · (ggufなし・ディレクトリ指定)`});
     } else {
       opts.push({v: m.snapshot, label: `${tag}${m.repo_id}${m.revision ? " · rev " + m.revision : ""}`});
     }
   }
-  if (!opts.length) return `<div class="muted" style="font-size:11.5px;margin-top:4px">キャッシュ / データフォルダにモデルがありません${isGguf ? " (gguf検出なし)" : ""}</div>${dirNote}`;
+  const noneNote = bid === "basalt" ? " (.basalt pack 検出なし)" : (bid === "llamacpp" ? " (gguf検出なし)" : "");
+  if (!opts.length) return `<div class="muted" style="font-size:11.5px;margin-top:4px">キャッシュ / データフォルダにモデルがありません${noneNote}</div>${dirNote}`;
   return `
     <select style="margin-top:5px" onchange="hfPick('${f.key}', this.value)">
       <option value="">キャッシュ / データフォルダから選択 (${opts.length})</option>

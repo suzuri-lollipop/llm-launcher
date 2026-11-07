@@ -404,7 +404,13 @@ async function renderModel() {
   W.mdList = ms;                                    // クリック時に include (取得ファイル) を引く
   try {
     const hm = await api("/api/hf-models");
-    mdLocal = (hm.models || []).filter(m => m.has_weights && m.repo_id);
+    /* 選択中バックエンドが読める形のモデルだけに出す
+       (basalt = .basalt pack / llama.cpp = gguf / 他は重量物ディレクトリ) */
+    const shape = W.backend === "basalt" ? "basalt" : (W.backend === "llamacpp" ? "gguf" : "");
+    mdLocal = (hm.models || []).filter(m => m.repo_id && (
+      shape === "basalt" ? (m.basalt || []).length
+      : shape === "gguf" ? ((m.gguf || []).length || m.has_weights)
+      : m.has_weights));
   } catch { mdLocal = []; }
   $("#md-sel").innerHTML = ms.length
     ? ms.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
@@ -412,8 +418,9 @@ async function renderModel() {
     : '<option value="">(このバックエンドに対応モデル一覧がありません)</option>';
   $("#md-local").innerHTML = mdLocal.length
     ? mdLocal.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
-        + `${esc(m.repo_id)}${m.source === "data" ? " — 導入済みモデルフォルダ" : ""}</option>`).join("")
-    : '<option value="">(ダウンロード済みのモデルが見つかりません)</option>';
+        + `${esc(m.repo_id)}` + ((m.basalt || []).length ? ` · ${esc(m.basalt[0].name)}` : "")
+        + `${m.source === "data" ? " — 導入済みモデルフォルダ" : ""}</option>`).join("")
+    : '<option value="">(このバックエンドで使えるダウンロード済みモデルが見つかりません)</option>';
   /* 済みモデルが 0 件ならその選択を不可にしてダウンロード択に寄せる */
   const localR = $$("#md-modes input").find(i => i.value === "local");
   localR.disabled = !mdLocal.length;
@@ -839,16 +846,15 @@ $("#cf-go").addEventListener("click", async () => {
          .basalt ファイル正体なので、一覧の include (既定 pack) かキャッシュスキャンで
          ファイルへ解決する (解決できなければ DIR のまま = 起動時に正直なエラー) */
       const ent = (W.mdList || []).find(m => m.repo_id === String((W.job || {}).repo_id || ""));
-      const fname = (ent && ent.include && ent.include[0]) || "";
+      const want = (ent && ent.include && ent.include[0]) || "";
+      let files = [];
+      try {
+        const hm = await api("/api/hf-models?refresh=1");   // 取得直後でキャッシュが古い可能性
+        const snap = (hm.models || []).find(m => m.snapshot === mp);
+        files = ((snap && snap.basalt) || []).map(f => f.name);
+      } catch { /* スキャン失敗は include で */ }
+      const fname = files.includes(want) ? want : (files[0] || want);
       if (fname) mp = mp.replace(/\/+$/, "") + "/" + fname;
-      else {
-        try {
-          const hm = await api("/api/hf-models");
-          const snap = (hm.models || []).find(m => m.snapshot === mp);
-          const f = snap && (snap.basalt || [])[0];
-          if (f) mp = mp.replace(/\/+$/, "") + "/" + f.name;
-        } catch { /* スキャン失敗は DIR のまま */ }
-      }
     }
     if (mp) {
       vals[modelKey] = mp;
