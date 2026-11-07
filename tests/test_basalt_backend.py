@@ -372,3 +372,26 @@ def test_calibration_is_not_offered_for_basalt(tmp_path: Path):
         "name": "B", "backend": "basalt", "values": {"model": "m.basalt"}}).json()
     r = client.post("/api/calibrations", json={"profile_id": prof["id"]})
     assert r.status_code == 400 and "キャリブレーション" in r.json()["detail"]
+
+
+def test_duplicated_profile_gets_its_own_config(tmp_path: Path):
+    """複製 (POST で values ごとコピー) しても生成 JSON は共有しない。"""
+    from fastapi.testclient import TestClient
+
+    from llm_launcher import app as app_mod
+
+    (tmp_path / "data").mkdir(parents=True)
+    client = TestClient(app_mod.create_app(tmp_path))
+    src = client.post("/api/profiles", json={
+        "name": "B", "backend": "basalt",
+        "values": {"model": "m.basalt", "max_context": "32768", "parallel": "2",
+                   "host": "127.0.0.1", "port": "8090"}}).json()
+    dup = client.post("/api/profiles", json={**src, "name": src["name"] + " のコピー"}).json()
+    assert dup["id"] != src["id"]
+    assert dup["values"]["config"] != src["values"]["config"]
+    assert Path(dup["values"]["config"]).is_file()
+    # 片方の変更がもう片方の JSON へ漏れない
+    dup["values"]["parallel"] = "8"
+    assert client.put(f"/api/profiles/{dup['id']}", json=dup).status_code == 200
+    assert json.loads(Path(src["values"]["config"]).read_text())["models"][0]["parallel"] == 2
+    assert json.loads(Path(dup["values"]["config"]).read_text())["models"][0]["parallel"] == 8

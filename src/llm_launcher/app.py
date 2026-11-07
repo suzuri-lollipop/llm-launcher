@@ -1015,9 +1015,11 @@ def create_app(root: Path) -> FastAPI:
         data["updated_at"] = now()
         # Basalt はモデルが入っていれば保存と同時に設定 JSON も作る (フォームの値をそのまま
         # 反映した v2 config)。モデル未設定 (mock 用途) は作らず、後から作成ボタンで補える。
-        if data.get("backend") == "basalt" and not str((data.get("values") or {}).get("config") or "").strip():
+        # 複製 / インポートで他プロファイルの生成 JSON を引き継いだ場合も、この ID 専用の
+        # パスへ作り直す (共有すると片方の変更がもう片方へ漏れる)。
+        if data.get("backend") == "basalt" and _basalt_should_seed(data):
             try:
-                _path, rel, _cfg = _basalt_config_write(data)
+                _path, rel, _cfg = _basalt_config_write(_basalt_ready(data))
             except ValueError:
                 rel = ""
             if rel:
@@ -1230,6 +1232,16 @@ def create_app(root: Path) -> FastAPI:
             out["on"] = on
         return out
 
+    def _basalt_generated_path(value: str) -> bool:
+        """data/launch/basalt-*.json (このランチャーが生成した設定 JSON) を指すか。"""
+        if not value:
+            return False
+        p = Path(os.path.expanduser(str(value)))
+        if not p.is_absolute():
+            p = root / p
+        return (p.parent == root / "data" / "launch"
+                and p.name.startswith("basalt-") and p.suffix == ".json")
+
     def _basalt_config_owned(prof: dict[str, Any]) -> bool:
         """このランチャーが管理してよい設定 JSON か (未設定 or data/launch の生成物)。
 
@@ -1241,10 +1253,11 @@ def create_app(root: Path) -> FastAPI:
         on = prof.get("on")
         if isinstance(on, dict) and on.get("config") is False:
             return False
-        if not cur:
-            return True
-        path = _basalt_config_path(str(prof["id"]))
-        return cur in (str(path), os.path.relpath(path, root))
+        return (not cur) or _basalt_generated_path(cur)
+
+    def _basalt_should_seed(prof: dict[str, Any]) -> bool:
+        """作成時に設定 JSON を作り直すか (未設定 / 生成物を引き継いだ複製・インポート)。"""
+        return _basalt_config_owned(prof)
 
     def _basalt_config_write(prof: dict[str, Any]) -> tuple[Path, str, dict[str, Any]]:
         """プロファイルの値から basalt_config.json (v2) を data/launch/ に書き、絶対パスを返す。

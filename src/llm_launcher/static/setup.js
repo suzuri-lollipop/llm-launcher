@@ -692,31 +692,21 @@ async function renderConfig() {
   let p = null;
   try {
     const j = W.job;
-    // このセットアップでモデルを取得した = 「新規インストール」の進入
-    const fresh = !!(j && j.kind === "download" && j.status === "done"
-                     && j.backend === W.backend);
     const profs = await api("/api/profiles");
-    // セットアップが作ったプロファイルだけを再利用する印。ユーザーの既存
-    // プロファイルを勝手に採用すると、名前も中身も上書きしてしまう
-    // (以前は同一バックエンドの既存プロファイルを無条件に拾っていた)。
-    const SETUP_NOTE = "初回セットアップで作成";
-    const mine = (profs || []).filter(x => x.backend === W.backend
-        && (x.note || "").trim() === SETUP_NOTE)
-      .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))[0] || null;
     if (W.cfgProfId) {
       // 戻る/次への往復では、このセットアップで作ったプロファイルを再利用
       p = (profs || []).find(x => x.id === W.cfgProfId) || null;
-    } else if (cfg && (fresh || !mine)) {
-      // このセットアップ用のプロファイルを新規作成する
-      // (ユーザーの既存プロファイルへ書き込むと、そのモデルが置き換わってしまう)
+    } else if (cfg) {
+      // セットアップのたびに専用プロファイルを新規作成する。
+      // 既存 (前回のセットアップで作ったものを含む) を再利用すると、その
+      // プロファイルの設定 (コンテキスト長 / 並列など) と JSON を上書きして
+      // しまい、設定違いのプロファイルを増やせなくなる。
       const nm = (j && j.repo_id) ? String(j.repo_id).split("/").pop()
                                   : specName(W.backend);
       p = await api("/api/profiles", { method: "POST",
         body: { name: nm, backend: W.backend, values: {}, simple_visible: true,
-                note: SETUP_NOTE } });
+                note: "初回セットアップで作成" } });
       W.cfgProfNew = true;
-    } else {
-      p = mine;
     }
     if (p) W.cfgProfId = p.id;
   } catch { /* 取得失敗は調整画面へスキップ */ }
