@@ -106,6 +106,9 @@ def _plan(monkeypatch, root: Path) -> dict:
     monkeypatch.setattr(InstallManager, "_run_install", fake)
     monkeypatch.setattr("llm_launcher.installer.shutil.which",
                         lambda name: f"/usr/bin/{name}" if name == "cmake" else None)
+    # systemd / デスクトップ起動では PATH に無い nvcc を、インストーラが明示解決する
+    monkeypatch.setattr("llm_launcher.installer.find_nvcc",
+                        lambda: "/usr/local/cuda/bin/nvcc")
     mgr = _manager(root)
 
     async def go() -> None:
@@ -130,7 +133,9 @@ def test_plan_for_existing_submodule_skips_clone(monkeypatch, tmp_path: Path):
     assert "-e" not in install["argv"]
     # cmake は submodule 内を指す (cwd 基準の相対 argv)
     conf = next(s for s in steps if s["name"] == "cmake")
-    assert conf["argv"] == ["cmake", "-S", ".", "-B", "build", "-DCMAKE_BUILD_TYPE=Release"]
+    assert conf["argv"] == ["cmake", "-S", ".", "-B", "build",
+                            "-DCMAKE_BUILD_TYPE=Release",
+                            "-DCMAKE_CUDA_COMPILER=/usr/local/cuda/bin/nvcc"]
     assert conf["cwd"].endswith("module/basalt")
     # precheck / verify は import だけでなくエンジン実在も要求する
     for s in steps:
@@ -163,3 +168,26 @@ def test_plan_without_cmake_is_refused(monkeypatch, tmp_path: Path):
     from llm_launcher.installer import InstallError
     with pytest.raises(InstallError, match="cmake"):
         asyncio.run(go())
+
+
+def test_plan_without_cuda_is_refused(monkeypatch, tmp_path: Path):
+    """nvcc が無い環境では cmake に進む前に CUDA 13 が要ると明示して止める。"""
+    monkeypatch.setattr("llm_launcher.installer.shutil.which",
+                        lambda name: f"/usr/bin/{name}" if name == "cmake" else None)
+    monkeypatch.setattr("llm_launcher.installer.find_nvcc", lambda: "")
+    mgr = _manager(tmp_path)
+
+    async def go() -> None:
+        await mgr.start_install("basalt")
+
+    from llm_launcher.installer import InstallError
+    with pytest.raises(InstallError, match="nvcc"):
+        asyncio.run(go())
+
+
+def test_install_env_adds_cuda_bin_to_path(monkeypatch):
+    """launcher の PATH に CUDA bin が無くても、解決した nvcc のディレクトリを足す。"""
+    from llm_launcher.installer import install_env
+    monkeypatch.setattr("llm_launcher.installer.find_nvcc", lambda: "/opt/cuda/bin/nvcc")
+    env = install_env(environ={"PATH": "/usr/bin:/bin"})
+    assert env["PATH"].split(":") == ["/usr/bin", "/bin", "/opt/cuda/bin"]

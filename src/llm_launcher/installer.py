@@ -160,6 +160,48 @@ def find_uv() -> str:
     return ""
 
 
+# CUDA ツールキット (nvcc) の実在する場所。uv と同じ問題で、systemd / デスクトップ起動の
+# launcher には /usr/local/cuda/bin が PATH に無いことが多く、cmake の CUDA コンパイラ
+# 検出は PATH 依存 ("No CMAKE_CUDA_COMPILER could be found.")。見つけたパスは
+# CMAKE_CUDA_COMPILER として明示的に渡す (PATH を汚さず、どの nvcc を使うかも決まる)。
+_CUDA_FALLBACK_DIRS = ("/usr/local/cuda", "/opt/cuda", "/usr/lib/nvidia-cuda-toolkit", "/usr/local/cuda-13.3", "/usr/local/cuda-13.2")
+
+
+def _nvcc_candidates() -> list[Path]:
+    """nvcc を探す候補 (テストから差し替え可)。CUDACXX / CUDA_HOME の明示指定が最優先。"""
+    out: list[Path] = []
+    cudacxx = (os.environ.get("CUDACXX") or "").strip()
+    if cudacxx:
+        p = Path(cudacxx).expanduser()
+        out.append(p if p.name == "nvcc" else p / "bin" / "nvcc")
+    for var in ("CUDA_HOME", "CUDA_PATH"):
+        base = (os.environ.get(var) or "").strip()
+        if base:
+            out.append(Path(base).expanduser() / "bin" / "nvcc")
+    found = shutil.which("nvcc")
+    if found:
+        out.append(Path(found))
+    out += [Path(d).expanduser() / "bin" / "nvcc" for d in _CUDA_FALLBACK_DIRS]
+    try:
+        # /usr/local/cuda-<ver>/bin/nvcc (新しい版を先に)
+        for p in sorted(Path("/usr/local").glob("cuda-*/bin/nvcc"), reverse=True):
+            out.append(p)
+    except OSError:
+        pass
+    return out
+
+
+def find_nvcc() -> str:
+    """CUDA の nvcc の絶対パス (見つからなければ "")。"""
+    for cand in _nvcc_candidates():
+        try:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+        except OSError:
+            continue
+    return ""
+
+
 def install_tool() -> str:
     """依存インストールに使うツール表示 (既定は uv pip、uv が本当に無い環境だけ venv の pip)。
 
@@ -208,6 +250,14 @@ def install_env(*, environ: dict[str, str] | None = None) -> dict[str, str]:
         env[low] = val
         env[low.upper()] = val
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    # nvcc のディレクトリを PATH に足す (BASALT の cmake だけでなく、エンジンビルドが
+    # 呼ぶ cicc / ptxas 等も同じ bin にある)。既に PATH にある環境は触らない。
+    nvcc = find_nvcc()
+    if nvcc:
+        bin_dir = str(Path(nvcc).parent)
+        parts = [p for p in (env.get("PATH") or "").split(os.pathsep) if p]
+        if bin_dir not in parts:
+            env["PATH"] = os.pathsep.join(parts + [bin_dir])
     return env
 
 
@@ -504,11 +554,19 @@ class InstallManager:
             if not shutil.which("cmake"):
                 raise InstallError("cmake が見つかりません (Basalt のエンジンビルドに必要です。"
                                    "CMake 3.24+ をインストールしてから実行してください)")
+            # cmake の CUDA コンパイラ検出は PATH 依存で、systemd / デスクトップ起動の
+            # launcher には /usr/local/cuda/bin が無いことが多い → 見つけた nvcc を明示する
+            nvcc = find_nvcc()
+            if not nvcc:
+                raise InstallError("CUDA の nvcc が見つかりません (Basalt のエンジンビルドには "
+                                   "CUDA 13 が必要です。CUDA をインストールし、PATH か "
+                                   "CUDACXX / CUDA_HOME で場所を指定してください)")
             # 実行時点では clean で build/ が消えているかもしれないので、計画段階の実在チェック
             # では止めず cmake 側に再構築させる (構成は差分なし、ビルドは no-op で速い)
             steps.append({"name": "cmake",
                           "argv": ["cmake", "-S", ".", "-B", "build",
-                                   "-DCMAKE_BUILD_TYPE=Release"],
+                                   "-DCMAKE_BUILD_TYPE=Release",
+                                   f"-DCMAKE_CUDA_COMPILER={nvcc}"],
                           "cwd": str(module_dir)})
             steps.append({"name": "cmake-build",
                           "argv": ["cmake", "--build", "build",
@@ -520,7 +578,7 @@ class InstallManager:
                             backend_name=BACKENDS.get(backend_id, {}).get("name", backend_id),
                             module_path=module_rel, tool=tool, uv_path=uv_path,
                             extras=extras_str, clean=bool(clean), needs_clone=needs_clone,
-                            ref=branch)
+                            ref=branch, cuda=(find_nvcc() if spec.get("cmake") else ""))
         job["steps"] = [s["name"] for s in steps]
         self._tasks[job["id"]] = asyncio.create_task(self._run_install(job, spec, steps))
         return self._public(job)
@@ -623,6 +681,8 @@ class InstallManager:
         if job.get("uv_path"):
             ver = await asyncio.to_thread(_uv_version, str(job["uv_path"]))
             self._append_log(job, f"uv: {job['uv_path']} ({ver or '--version 取得できず'})")
+        if job.get("cuda"):
+            self._append_log(job, f"CUDA: {job['cuda']} (CMAKE_CUDA_COMPILER として明示)")
         switched = False   # ブランチ切替が起きたら依存を入れ直す (precheck スキップを効かせない)
         try:
             if job.get("clean") and (module_dir / ".venv").exists():
