@@ -97,6 +97,18 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
         "requirements": "requirements.txt",
         "cmake": True,                   # cmake configure + build の 2 step を install 後に挟む
         "engine_bin": "bin/basalt",      # ビルド成果物。precheck / verify はこれも要求する
+        # インストール完了時に置く雛形 (既にあれば触らない)。手動起動の既定パスでもある
+        "config_seed": {
+            "file": "basalt_config.json",
+            "doc": {
+                "version": 2,
+                "models": [{"model": "models/Qwen3.8-FN-NVFP4-DQ6_K.basalt",
+                            "gpu": "0", "kv": "int8"}],
+                "engine": {"resident-experts": True},
+                "server": {"host": "0.0.0.0", "port": 8080},
+            },
+            "note": "モデル pack のダウンロード後に model / gpu / kv を環境に合わせてください",
+        },
     },
 }
 
@@ -335,6 +347,29 @@ def seed_launch_json(module_dir: Path) -> str | None:
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
     return ("起動 JSON テンプレート freetoken-launch.json を作成しました "
             "(--model-path を編集すれば ./setup.sh と profile の起動 JSON パスが同じ構成で起動します)")
+
+
+def seed_basalt_config(module_dir: Path, spec: dict[str, Any]) -> str | None:
+    """Basalt のインストール完了時に basalt_config.json (v2) の雛形を置く。
+
+    ユーザーが編集した JSON を壊さないよう、存在しないときだけ書く。置き場所は
+    upstream の Quick start と同じ module/basalt/basalt_config.json なので、
+    `cd module/basalt && bin/basalt serve --config basalt_config.json` がそのまま動く。
+    プロファイルから作る設定 JSON (data/launch/basalt-<id>.json) とは別物で、
+    こちらは手動起動・最初の 1 枚岩用のテンプレート。
+    """
+    seed = spec.get("config_seed")
+    if not seed:
+        return None
+    path = module_dir / str(seed["file"])
+    if path.exists():
+        return None
+    try:
+        path.write_text(json.dumps(seed["doc"], ensure_ascii=False, indent=2) + "\n", "utf-8")
+    except OSError as e:  # noqa: BLE001 — 雛形は補助なのでインストール自体は成功させる
+        return f"{seed['file']} を作成できませんでした: {e}"
+    note = str(seed.get("note") or "")
+    return f"{seed['file']} の雛形を作成しました" + (f" ({note})" if note else "")
 
 
 def record_launch_json_model(root: Path, spec: dict, model_dir: Path) -> str | None:
@@ -715,6 +750,9 @@ class InstallManager:
                             note = seed_launch_json(module_dir)
                             if note:
                                 self._append_log(job, note)
+                        note = seed_basalt_config(module_dir, spec)
+                        if note:
+                            self._append_log(job, note)
                         job["status"] = "done"
                         job["result"] = {"already_installed": True}
                         return
@@ -742,6 +780,9 @@ class InstallManager:
                 note = seed_launch_json(module_dir)
                 if note:
                     self._append_log(job, note)
+            note = seed_basalt_config(module_dir, spec)
+            if note:
+                self._append_log(job, note)
             job["status"] = "done"
             job["result"] = {"installed": True}
         except _Cancelled:

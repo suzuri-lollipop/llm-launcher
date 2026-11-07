@@ -8,9 +8,12 @@ Basalt は Strata 系フォークの Blackwell 向け MoE エンジンで、
   3. セットアップタブ (📦) のインストールは FreeToken 系と違い
      clone (submodule 取得済みならスキップ) → .venv → pip install -r requirements.txt
      → cmake configure + build → verify (import serve.server + bin/basalt 実在)
+  4. 設定 JSON: プロファイル作成時に basalt_config.json (v2) が data/launch/ に生成され、
+     セットアップ完了時には module/basalt/basalt_config.json の雛形が置かれる
 の順で走る。module/basalt が未クローンの環境ではテーブル系テストを skip する。
 """
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -70,13 +73,14 @@ def test_required_and_default_off_fields():
 
 def test_render_argv_builds_serve_command():
     b = backends.BACKENDS["basalt"]
-    profile = {"values": {"model": "models/Q.basalt", "config": "c.json", "host": "0.0.0.0",
+    # --model 直接指定のモード (config なし)
+    profile = {"values": {"model": "models/Q.basalt", "host": "0.0.0.0",
                           "port": "8090", "api_key": "k1"},
-               "on": {"config": True, "gpu": False, "parallel": False}}
+               "on": {"gpu": False, "parallel": False}}
     argv = backends.render_argv(b, profile, python="py",
                                 binary="/r/module/basalt/bin/basalt", root=Path("/r"))
     assert argv[:3] == ["/r/module/basalt/bin/basalt", "serve", "--model"]
-    assert ["--config", "c.json"] in (argv[i:i + 2] for i in range(len(argv) - 1))
+    assert argv[3] == "models/Q.basalt"
     assert argv[argv.index("--port") + 1] == "8090"
     assert "--gpu" not in argv
 
@@ -191,3 +195,115 @@ def test_install_env_adds_cuda_bin_to_path(monkeypatch):
     monkeypatch.setattr("llm_launcher.installer.find_nvcc", lambda: "/opt/cuda/bin/nvcc")
     env = install_env(environ={"PATH": "/usr/bin:/bin"})
     assert env["PATH"].split(":") == ["/usr/bin", "/bin", "/opt/cuda/bin"]
+
+
+# ------------------------------------------------------------ 設定 JSON (basalt_config.json)
+
+def _profile(**values) -> dict:
+    return {"id": "p_test", "backend": "basalt", "values": values, "on": None}
+
+
+def test_config_json_maps_each_section():
+    prof = _profile(model="models/Q.basalt", host="0.0.0.0", port="8080", gpu="0,1",
+                    parallel="4", slot_full_context="on", vision="dynamic",
+                    alias="qwen", lazy="on", max_payload_mib="64", idle_sleep="600",
+                    api_key="secret")
+    cfg = backends.basalt_config_for(prof, root=Path("/r"))
+    assert cfg["version"] == 2
+    entry = cfg["models"][0]
+    # パスは config ファイル基準の相対解決になるため絶対化する
+    assert entry["model"] == "/r/models/Q.basalt"
+    # --gpu / --parallel / --vision / --alias は basalt の分類どおりモデル側
+    assert entry["gpu"] == "0,1"
+    assert entry["parallel"] == 4
+    assert entry["slot-full-context"] is True
+    assert entry["vision"] == "dynamic"
+    assert entry["alias"] == "qwen"
+    assert entry["idle-sleep"] == 600.0
+    # host / port / --lazy / --max-payload-mib はサーバー共有の設定
+    assert cfg["server"] == {"host": "0.0.0.0", "port": "8080",
+                             "lazy": True, "max-payload-mib": 64}
+    # api-key は config に書けない (CLI のみ)
+    assert "api-key" not in json.dumps(cfg)
+
+
+def test_config_json_honours_off_fields_and_requires_model():
+    prof = _profile(model="models/Q.basalt", gpu="0", host="0.0.0.0", port="8080")
+    prof["on"] = {"gpu": False}
+    cfg = backends.basalt_config_for(prof, root=Path("/r"))
+    assert "gpu" not in cfg["models"][0]
+    with pytest.raises(ValueError, match="モデル"):
+        backends.basalt_config_for(_profile(host="0.0.0.0", port="8080"), root=Path("/r"))
+
+
+def test_api_creates_config_json_with_the_profile(tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    from llm_launcher import app as app_mod
+
+    (tmp_path / "data").mkdir(parents=True)
+    client = TestClient(app_mod.create_app(tmp_path))
+    r = client.post("/api/profiles", json={
+        "name": "B", "backend": "basalt",
+        "values": {"model": "models/Q.basalt", "gpu": "0",
+                   "host": "127.0.0.1", "port": "8091"}})
+    assert r.status_code == 201, r.text
+    prof = r.json()
+    cfg_path = Path(prof["values"]["config"])
+    assert prof["on"]["config"] is True and cfg_path.is_file()
+    assert cfg_path.parent == tmp_path / "data" / "launch"
+    doc = json.loads(cfg_path.read_text("utf-8"))
+    assert doc["models"][0]["model"].endswith("models/Q.basalt")
+    assert doc["models"][0]["gpu"] == "0"
+
+    got = client.get(f"/api/profiles/{prof['id']}/config-json").json()
+    assert got["exists"] is True and got["config"]["version"] == 2
+
+    # 値を変えて再作成 → ファイルが追従する
+    prof["values"]["port"] = "8092"
+    assert client.put(f"/api/profiles/{prof['id']}", json=prof).status_code == 200
+    assert client.post(f"/api/profiles/{prof['id']}/config-json").status_code == 201
+    doc = json.loads(cfg_path.read_text("utf-8"))
+    assert doc["server"]["port"] == "8092"
+
+
+def test_api_refuses_config_json_without_model(tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    from llm_launcher import app as app_mod
+
+    (tmp_path / "data").mkdir(parents=True)
+    client = TestClient(app_mod.create_app(tmp_path))
+    prof = client.post("/api/profiles", json={
+        "name": "mock", "backend": "basalt", "values": {"port": "8090"}}).json()
+    assert not prof["values"].get("config")          # 自動生成はされない
+    r = client.post(f"/api/profiles/{prof['id']}/config-json")
+    assert r.status_code == 400 and "モデル" in r.json()["detail"]
+
+
+def test_install_seeds_basalt_config_template(tmp_path: Path):
+    from llm_launcher.installer import seed_basalt_config
+
+    mod = tmp_path / "basalt"
+    mod.mkdir()
+    note = seed_basalt_config(mod, INSTALL_SPECS["basalt"])
+    assert note and "basalt_config.json" in note
+    doc = json.loads((mod / "basalt_config.json").read_text("utf-8"))
+    assert doc["version"] == 2 and doc["models"][0]["model"].endswith(".basalt")
+    # ユーザーが編集した既存ファイルは上書きしない
+    (mod / "basalt_config.json").write_text('{"version": 2, "models": [{"model": "x"}]}')
+    assert seed_basalt_config(mod, INSTALL_SPECS["basalt"]) is None
+    assert json.loads((mod / "basalt_config.json").read_text())["models"][0]["model"] == "x"
+
+
+def test_config_mode_drops_model_entry_flags():
+    """--config があるときは models / engine は JSON が正 (--model などを二重に送らない)。"""
+    b = backends.BACKENDS["basalt"]
+    profile = {"values": {"model": "models/Q.basalt", "config": "/c.json", "gpu": "0,1",
+                          "parallel": "4", "host": "127.0.0.1", "port": "8090"},
+               "on": None}
+    argv = backends.render_argv(b, profile, python="py", binary="/bin/basalt", root=Path("/r"))
+    assert ["--config", "/c.json"] == argv[argv.index("--config"):argv.index("--config") + 2]
+    for flag in ("--model", "--gpu", "--parallel"):
+        assert flag not in argv
+    assert argv[argv.index("--port") + 1] == "8090"

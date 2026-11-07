@@ -26,9 +26,9 @@ from pydantic import BaseModel, Field, ValidationError, model_validator
 from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv,
-                       backend_for, fork_dir, fork_model_root, launch_json_path,
-                       port_from_argv, python_candidates, resolve_port, sections_order,
-                       supported_models)
+                       backend_for, basalt_config_for, fork_dir, fork_model_root,
+                       launch_json_path, port_from_argv, python_candidates, resolve_port,
+                       sections_order, supported_models)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
@@ -1013,6 +1013,18 @@ def create_app(root: Path) -> FastAPI:
         data["id"] = new_id("p")
         data["created_at"] = now()
         data["updated_at"] = now()
+        # Basalt はモデルが入っていれば保存と同時に設定 JSON も作る (フォームの値をそのまま
+        # 反映した v2 config)。モデル未設定 (mock 用途) は作らず、後から作成ボタンで補える。
+        if data.get("backend") == "basalt" and not str((data.get("values") or {}).get("config") or "").strip():
+            try:
+                _path, rel, _cfg = _basalt_config_write(data)
+            except ValueError:
+                rel = ""
+            if rel:
+                data.setdefault("values", {})["config"] = rel
+                if not isinstance(data.get("on"), dict):
+                    data["on"] = {}
+                data["on"]["config"] = True
         profiles_store.mutate(lambda lst: lst.append(data))
         return data
 
@@ -1176,6 +1188,66 @@ def create_app(root: Path) -> FastAPI:
             return False
         profiles_store.mutate(_set)
         return {"ok": True, "path": str(path), "sh": str(sh), "launch": launch}
+
+    # ------------------------------------------------- Basalt の設定 JSON (v2)
+    def _basalt_config_profile(profile_id: str) -> dict[str, Any]:
+        prof = manager.find_profile(profile_id)
+        if not prof:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        if prof.get("backend") != "basalt":
+            raise HTTPException(400, "このバックエンドは basalt の設定 JSON に対応していません")
+        return prof
+
+    def _basalt_config_path(profile_id: str) -> Path:
+        return root / "data" / "launch" / f"basalt-{profile_id}.json"
+
+    def _basalt_config_write(prof: dict[str, Any]) -> tuple[Path, str, dict[str, Any]]:
+        """プロファイルの値から basalt_config.json (v2) を data/launch/ に書き、絶対パスを返す。
+
+        返すパスはそのままプロファイルの --config 値にする (launcher の cwd に依存しない)。
+        ValueError は「モデル未設定 / 数値の書式誤り」などで、API 側は 400 に変換する。
+        """
+        cfg = basalt_config_for(prof, root=root)
+        path = _basalt_config_path(str(prof["id"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return path, str(path), cfg
+
+    @app.get("/api/profiles/{profile_id}/config-json")
+    async def get_config_json(profile_id: str) -> dict[str, Any]:
+        prof = _basalt_config_profile(profile_id)
+        path = _basalt_config_path(profile_id)
+        if not path.is_file():
+            return {"ok": True, "exists": False, "path": str(path),
+                    "current": str((prof.get("values") or {}).get("config") or "")}
+        try:
+            doc = json.loads(path.read_text("utf-8"))
+        except ValueError as e:
+            raise HTTPException(400, f"設定 JSON を解析できません: {e}")
+        return {"ok": True, "exists": True, "path": str(path), "config": doc,
+                "current": str((prof.get("values") or {}).get("config") or "")}
+
+    @app.post("/api/profiles/{profile_id}/config-json", status_code=201)
+    async def create_config_json(profile_id: str) -> dict[str, Any]:
+        """現在のフォーム値から basalt の設定 JSON を作り直し、プロファイルの --config に繋ぐ。"""
+        prof = _basalt_config_profile(profile_id)
+        try:
+            path, rel, cfg = _basalt_config_write(prof)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        def _set(lst: list) -> bool:
+            for p in lst:
+                if p.get("id") == profile_id:
+                    p.setdefault("values", {})["config"] = rel
+                    if not isinstance(p.get("on"), dict):
+                        p["on"] = {}
+                    p["on"]["config"] = True
+                    p["updated_at"] = now()
+                    return True
+            return False
+        profiles_store.mutate(_set)
+        return {"ok": True, "path": str(path), "config": cfg}
 
     @app.post("/api/preview")
     async def preview_command(body: ProfileBody) -> dict[str, Any]:

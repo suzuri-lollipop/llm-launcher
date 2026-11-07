@@ -1145,6 +1145,105 @@ def replace_arg(argv: list[str], flag: str, value: str) -> list[str]:
     return out + [flag, value]
 
 
+# ---------------------------------------------------------------------------
+# Basalt の設定 JSON (basalt_config.json / v2)
+# ---------------------------------------------------------------------------
+
+# serve/config.py の分類に合わせる: "server" はサーバー共有の設定だけ、"engine"/モデル項目は
+# モデル側の設定 (--parallel / --gpu / --vision などもモデル項目)。api-key は config に
+# 書けない (コマンドラインのみ) ので生成しない。
+_BASALT_SERVER_KEYS = frozenset({
+    "host", "port", "lazy", "max_payload_mib", "allowed_host", "cors_origin",
+    "image_url_host", "image_dir", "image_remote_only", "open", "script",
+    "mock_engine", "tokenizer", "debug", "request_lines",
+})
+_BASALT_MODEL_KEYS = frozenset({
+    "alias", "gpu", "vision", "parallel", "slot_full_context", "idle_sleep",
+    "idle_unload", "min_free_vram_mib", "fit_max_tokens",
+})
+_BASALT_INT_KEYS = frozenset({"parallel", "min_free_vram_mib", "max_payload_mib"})
+_BASALT_FLOAT_KEYS = frozenset({"idle_unload", "idle_sleep"})
+_BASALT_LIST_KEYS = frozenset({"allowed_host", "cors_origin", "image_url_host", "image_dir"})
+_BASALT_PATH_KEYS = frozenset({"model", "tokenizer", "image_dir"})
+# --config があるときに CLI から送らないモデル項目 (JSON の models / engine が正)
+_BASALT_CONFIG_DRIVEN_SKIP = frozenset({"model"}) | _BASALT_MODEL_KEYS
+
+
+def _basalt_abs(value: str, root: Path) -> str:
+    """config 内のパスは **ファイルの位置** 基準で解決されるため、絶対パスで書く。"""
+    p = os.path.expanduser(value.strip())
+    if not p:
+        return ""
+    return p if os.path.isabs(p) else str((root / p).resolve())
+
+
+def basalt_config_for(profile: dict[str, Any], *, root: Path) -> dict[str, Any]:
+    """プロファイルの値から basalt の設定 JSON ({"version":2,"server","engine","models"}) を組む。
+
+    - フォームの ON/OFF (profile["on"]) と空値を尊重する (render_argv と同じ規則)
+    - --parallel / --gpu / --vision / --alias などは basalt の分類どおり models 側に入れる
+    - api-key は config に書けない (CLI のみ) ので含めない
+    - model / tokenizer / image-dir は config ファイル基準の相対解決になるため絶対パス化
+    モデル未設定 (mock 用のダミーも無い) は ValueError — 中身の無い JSON を作らない。
+    """
+    backend = BACKENDS["basalt"]
+    values: dict[str, Any] = profile.get("values") or {}
+    on = profile.get("on")
+    if not isinstance(on, dict):
+        on = None
+
+    model = str(values.get("model") or "").strip()
+    if not model:
+        raise ValueError("モデル (.basalt ファイル) が未設定のため設定 JSON を作成できません")
+
+    cfg: dict[str, Any] = {"version": 2, "models": [], "server": {}}
+
+    def enabled(f: dict[str, Any]) -> bool:
+        key = f["key"]
+        if f["type"] == "bool":
+            # チェックボックスの表現 ("on" / "1" / "true" など) を render_argv と同じ規則で判定
+            return str(values.get(key) or "").strip().lower() in TRUTHY
+        if on is not None and not f.get("required"):
+            if not bool(on.get(key, f.get("default_on", True))):
+                return False
+        return bool(str(values.get(key) or "").strip())
+
+    entry: dict[str, Any] = {"model": _basalt_abs(model, root)}
+    for f in backend["fields"]:
+        key = f["key"]
+        if key in ("model", "config", "api_key"):
+            continue
+        if not enabled(f):
+            continue
+        name = key.replace("_", "-")
+        if f["type"] == "bool":
+            (cfg["server"] if key in _BASALT_SERVER_KEYS else entry)[name] = True
+            continue
+        raw = str(values.get(key) or "").strip()
+        if key in _BASALT_INT_KEYS:
+            try:
+                val: Any = int(float(raw))
+            except ValueError:
+                raise ValueError(f"{f['label']} は整数で入力してください: {raw}") from None
+        elif key in _BASALT_FLOAT_KEYS:
+            try:
+                val = float(raw)
+            except ValueError:
+                raise ValueError(f"{f['label']} は数値で入力してください: {raw}") from None
+        elif key in _BASALT_LIST_KEYS:
+            val = [_basalt_abs(raw, root) if key in _BASALT_PATH_KEYS else raw]
+        elif key in _BASALT_PATH_KEYS:
+            val = _basalt_abs(raw, root)
+        else:
+            val = raw
+        target = cfg["server"] if key in _BASALT_SERVER_KEYS else entry
+        target[name] = val
+    cfg["models"].append(entry)
+    if not cfg["server"]:
+        cfg.pop("server")
+    return cfg
+
+
 def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str,
                 binary: str, root: Path) -> list[str]:
     """バックエンド + プロファイルから最終 argv を組み立てる。"""
@@ -1181,8 +1280,16 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
         if not resolved.strip():
             raise ValueError("起動コマンドが空です")
         argv = shlex.split(resolved)
+        # Basalt の設定 JSON (--config) があるときは models / engine 側の値は JSON が正。
+        # --model などモデル項目を CLI でも送ると basalt serve ラッパが --model の
+        # ファイル実在チェックで止まり、JSON の models と二重指定にもなるため送らない
+        cfg_active = (backend.get("id") == "basalt"
+                      and bool(str(values.get("config") or "").strip())
+                      and (on is None or bool(on.get("config", True))))
         for field in ([] if profile.get("custom_only") else backend.get("fields", [])):
             key = field["key"]
+            if cfg_active and key in _BASALT_CONFIG_DRIVEN_SKIP:
+                continue
             # 送信 ON/OFF: on dict が明示されたプロファイルのみ尊重 (無い=旧来動作=値があれば送信)
             if on is not None and field["type"] != "bool" and not field.get("required"):
                 if not bool(on.get(key, field.get("default_on", True))):
