@@ -944,6 +944,15 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "default_port": "8080",
         "binaries": ["basalt"],
         "build_candidates": ["module/basalt/bin/basalt"],
+        # セットアップ ② / 初回ウィザードの「対応モデル一覧」。docs/models/index.md の表は
+        # 先頭列が "Packs" でモデル名にならない (parse_supported_models が拾う形ではない) ため、
+        # 公式の 2 リポジトリを明示する。pack は .basalt ファイル / 量子化違いも同 repo 内。
+        "model_list": [
+            {"name": "Qwen3.8-Flash-Next (Basalt packs)",
+             "repo_id": "jesdga/Qwen3.8-Flash-Next-Basalt"},
+            {"name": "DeepSeek-V4.1-Flash (Basalt pack)",
+             "repo_id": "jesdga/DeepSeek-V4.1-Flash-1017-Basalt"},
+        ],
     },
 }
 
@@ -1087,26 +1096,28 @@ def parse_supported_models(text: str) -> list[dict[str, Any]]:
 
 
 def supported_models(root: Path, backend: dict[str, Any]) -> list[dict[str, Any]]:
-    """model_list_doc を持つバックエンドの対応モデル一覧。未 clone / 文書なしは空。
+    """対応モデル一覧: backend の model_list_doc (docs 表) か、静的な model_list から。
+    未 clone / 文書なし / 表が空なら model_list に落ちる。
     (mtime, size) でキャッシュするので /api/installs のポーリングでも安価。"""
+    static = [dict(m) for m in (backend.get("model_list") or [])]
     rel = str(backend.get("model_list_doc") or "")
     if not rel:
-        return []
+        return static
     path = root / str(backend.get("module_path") or "") / rel
     try:
         st = path.stat()
     except OSError:
-        return []
+        return static
     key = str(path)
     hit = _models_doc_cache.get(key)
     if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
-        return hit[2]
+        return hit[2] or static
     try:
         parsed = parse_supported_models(path.read_text("utf-8", errors="replace"))
     except OSError:
-        return []
+        return static
     _models_doc_cache[key] = (st.st_mtime_ns, st.st_size, parsed)
-    return parsed
+    return parsed or static
 
 
 def launch_json_path(root: Path, profile: dict[str, Any]) -> Path | None:

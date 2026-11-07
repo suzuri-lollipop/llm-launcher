@@ -307,3 +307,12 @@ def test_config_mode_drops_model_entry_flags():
     for flag in ("--model", "--gpu", "--parallel"):
         assert flag not in argv
     assert argv[argv.index("--port") + 1] == "8090"
+
+
+def test_supported_model_list_for_setup_wizard():
+    """セットアップ ② / 初回ウィザードの対応モデル一覧 (docs 表は使わず公式 repo を明示)。"""
+    models = backends.supported_models(ROOT, backends.BACKENDS["basalt"])
+    assert [m["repo_id"] for m in models] == [
+        "jesdga/Qwen3.8-Flash-Next-Basalt",
+        "jesdga/DeepSeek-V4.1-Flash-1017-Basalt"]
+    assert all(m["name"] for m in models)
