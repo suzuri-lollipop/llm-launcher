@@ -316,3 +316,6 @@ def test_supported_model_list_for_setup_wizard():
         "jesdga/Qwen3.8-Flash-Next-Basalt",
         "jesdga/DeepSeek-V4.1-Flash-1017-Basalt"]
     assert all(m["name"] for m in models)
+    # repo 全体 (Qwen は 1 TB / 57 files) を落とさないよう既定 pack を include で指定する
+    assert models[0]["include"] == ["Qwen3.8-FN-NVFP4-DQ6_K.basalt"]
+    assert models[1]["include"] == ["DeepSeek-V4.1-Flash-1017-UD-IQ1_M.basalt"]

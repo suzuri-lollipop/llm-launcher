@@ -396,6 +396,7 @@ function mdSync() {
 async function renderModel() {
   const sp = spec();
   const ms = (sp && sp.supported_models) || [];
+  W.mdList = ms;                                    // クリック時に include (取得ファイル) を引く
   try {
     const hm = await api("/api/hf-models");
     mdLocal = (hm.models || []).filter(m => m.has_weights && m.repo_id);
@@ -443,13 +444,17 @@ $("#md-start").addEventListener("click", async () => {
   }
   const repo = $("#md-repo").value.trim() || $("#md-sel").value;
   if (!repo) return;
+  /* 一覧から選んだモデルは既定ファイル (pack 1 個) だけ取得する。repo 全体 (1 TB) を
+     落とさないための allow_patterns。repo id を手入力したときは指定なし = 全体 */
+  const entry = (W.mdList || []).find(m => m.repo_id === repo) || null;
+  const patterns = (entry && entry.include) || [];
   const sp = spec();
   btn.disabled = true; btn.textContent = "開始中…";
   try {
     const kb = parseInt($("#md-speed").value, 10) || 0;
     const job = await api("/api/installs/download", { method: "POST",
       body: { repo_id: repo, revision: "", backend: (sp && sp.model_data) ? sp.id : "",
-              allow_patterns: [], max_kbps: kb } });
+              allow_patterns: patterns, max_kbps: kb } });
     W.kind = "download"; W.job = job;
     W.cancelAt = 0; W.cleanupShown = false;   // 中断/掃除の状態を新しいジョブ用にリセット
     // 新しいセットアップ (モデル取得) を始めたので、稼働設定用の

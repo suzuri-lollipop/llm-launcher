@@ -947,11 +947,14 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         # セットアップ ② / 初回ウィザードの「対応モデル一覧」。docs/models/index.md の表は
         # 先頭列が "Packs" でモデル名にならない (parse_supported_models が拾う形ではない) ため、
         # 公式の 2 リポジトリを明示する。pack は .basalt ファイル / 量子化違いも同 repo 内。
+        # include = 既定で落とすファイル (repo 全体は 1 TB / 57 files なので pack 1 個に絞る)
         "model_list": [
-            {"name": "Qwen3.8-Flash-Next (Basalt packs)",
-             "repo_id": "jesdga/Qwen3.8-Flash-Next-Basalt"},
-            {"name": "DeepSeek-V4.1-Flash (Basalt pack)",
-             "repo_id": "jesdga/DeepSeek-V4.1-Flash-1017-Basalt"},
+            {"name": "Qwen3.8-Flash-Next (NVFP4-DQ6_K pack)",
+             "repo_id": "jesdga/Qwen3.8-Flash-Next-Basalt",
+             "include": ["Qwen3.8-FN-NVFP4-DQ6_K.basalt"]},
+            {"name": "DeepSeek-V4.1-Flash (UD-IQ1_M pack)",
+             "repo_id": "jesdga/DeepSeek-V4.1-Flash-1017-Basalt",
+             "include": ["DeepSeek-V4.1-Flash-1017-UD-IQ1_M.basalt"]},
         ],
     },
 }

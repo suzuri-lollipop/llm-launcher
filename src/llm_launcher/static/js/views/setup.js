@@ -114,6 +114,9 @@ async function insStart() {
 function dlPickModel() {                 // 対応モデル一覧 → repo id に反映 (保存先が model_data 系なら従う)
   const v = inputVal("#dl-model"); if (!v) return;
   $("#dl-repo").value = v;
+  // 一覧エントリの include (例: basalt の pack 1 個) をファイル絞り込みへ入れる
+  const ent = (S.ins.installable || []).flatMap(e => e.supported_models || []).find(m => m.repo_id === v);
+  if (ent && ent.include && ent.include.length) $("#dl-patterns").value = ent.include.join(", ");
   const sp = insSpec($("#ins-backend").value);
   if (sp && sp.model_data && inputVal("#dl-dest") !== sp.id) {
     const dd = $("#dl-dest");
