@@ -696,20 +696,27 @@ async function renderConfig() {
     const fresh = !!(j && j.kind === "download" && j.status === "done"
                      && j.backend === W.backend);
     const profs = await api("/api/profiles");
+    // セットアップが作ったプロファイルだけを再利用する印。ユーザーの既存
+    // プロファイルを勝手に採用すると、名前も中身も上書きしてしまう
+    // (以前は同一バックエンドの既存プロファイルを無条件に拾っていた)。
+    const SETUP_NOTE = "初回セットアップで作成";
+    const mine = (profs || []).filter(x => x.backend === W.backend
+        && (x.note || "").trim() === SETUP_NOTE)
+      .sort((a, b) => (b.updated_at || 0) - (a.updated_at || 0))[0] || null;
     if (W.cfgProfId) {
       // 戻る/次への往復では、このセットアップで作ったプロファイルを再利用
       p = (profs || []).find(x => x.id === W.cfgProfId) || null;
-    } else if (!p && cfg && (fresh || !(profs || []).some(x => x.backend === W.backend))) {
-      // セットアップ時のプロファイルは必ず新規作成する
-      // (既存プロファイルへ書き込むと、そのプロファイルのモデルが
-      //  置き換わってしまうため)。起動 JSON を指定した形になるのは保存時。
-      const nm = (fresh && j.repo_id) ? String(j.repo_id).split("/").pop()
-                                      : specName(W.backend);
+    } else if (cfg && (fresh || !mine)) {
+      // このセットアップ用のプロファイルを新規作成する
+      // (ユーザーの既存プロファイルへ書き込むと、そのモデルが置き換わってしまう)
+      const nm = (j && j.repo_id) ? String(j.repo_id).split("/").pop()
+                                  : specName(W.backend);
       p = await api("/api/profiles", { method: "POST",
-        body: { name: nm, backend: W.backend, values: {}, simple_visible: true } });
+        body: { name: nm, backend: W.backend, values: {}, simple_visible: true,
+                note: SETUP_NOTE } });
       W.cfgProfNew = true;
     } else {
-      p = (profs || []).find(x => x.backend === W.backend) || null;
+      p = mine;
     }
     if (p) W.cfgProfId = p.id;
   } catch { /* 取得失敗は調整画面へスキップ */ }
