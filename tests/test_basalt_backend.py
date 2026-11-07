@@ -433,3 +433,20 @@ def test_gen_fields_only_basalt_is_lazy():
 
     tables = build(ROOT, {"basalt"})
     assert set(tables) == {"basalt"} and tables["basalt"]["--port"]["type"] == "int"
+
+
+def test_profile_delete_removes_generated_config(tmp_path: Path):
+    """削除したプロファイルの生成 JSON が data/launch に残らないこと。"""
+    from fastapi.testclient import TestClient
+
+    from llm_launcher import app as app_mod
+
+    (tmp_path / "data").mkdir(parents=True)
+    client = TestClient(app_mod.create_app(tmp_path))
+    prof = client.post("/api/profiles", json={
+        "name": "B", "backend": "basalt",
+        "values": {"model": "m.basalt", "host": "127.0.0.1", "port": "8090"}}).json()
+    path = Path(prof["values"]["config"])
+    assert path.is_file()
+    assert client.delete(f"/api/profiles/{prof['id']}").status_code == 200
+    assert not path.exists()

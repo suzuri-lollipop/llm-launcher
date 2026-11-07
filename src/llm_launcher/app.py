@@ -1069,7 +1069,14 @@ def create_app(root: Path) -> FastAPI:
 
         def _del(lst: list) -> bool:
             before = len(lst)
+            gone = [p for p in lst if p["id"] == profile_id]
             lst[:] = [p for p in lst if p["id"] != profile_id]
+            # 生成した basalt の設定 JSON は孤立ファイルとして残さない
+            # (data/launch/basalt-<id>.json のみ。ユーザーの手書き JSON には触らない)
+            for p in gone:
+                if p.get("backend") == "basalt":
+                    with contextlib.suppress(OSError):
+                        _basalt_config_path(profile_id).unlink(missing_ok=True)
             return len(lst) < before
         if not profiles_store.mutate(_del):
             raise HTTPException(404, "プロファイルが見つかりません")
