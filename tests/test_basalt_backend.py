@@ -319,3 +319,56 @@ def test_supported_model_list_for_setup_wizard():
     # repo 全体 (Qwen は 1 TB / 57 files) を落とさないよう既定 pack を include で指定する
     assert models[0]["include"] == ["Qwen3.8-FN-NVFP4-DQ6_K.basalt"]
     assert models[1]["include"] == ["DeepSeek-V4.1-Flash-1017-UD-IQ1_M.basalt"]
+
+
+def test_context_and_kv_flow_into_config_not_argv():
+    """コンテキスト長 / KV 形式はエンジン設定なので JSON の models[] に書く。"""
+    b = backends.BACKENDS["basalt"]
+    assert {"max_context", "kv"} <= {f["key"] for f in b["fields"]}
+    prof = {"values": {"model": "m.basalt", "max_context": "32768", "kv": "int8",
+                       "parallel": "2", "gpu": "0",
+                       "host": "127.0.0.1", "port": "8080"}, "on": None}
+    entry = backends.basalt_config_for(prof, root=Path("/r"))["models"][0]
+    assert entry["max-context"] == 32768
+    assert entry["kv"] == "int8"
+    assert entry["parallel"] == 2
+    # config モードでは CLI にモデル項目を送らない (engine flags need --model で落ちるため)
+    prof["values"]["config"] = "/c.json"
+    argv = backends.render_argv(b, prof, python="p", binary="/bin/basalt", root=Path("/r"))
+    for flag in ("--model", "--max-context", "--kv", "--parallel", "--gpu"):
+        assert flag not in argv
+
+
+def test_profile_update_regenerates_generated_config(tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    from llm_launcher import app as app_mod
+
+    (tmp_path / "data").mkdir(parents=True)
+    client = TestClient(app_mod.create_app(tmp_path))
+    prof = client.post("/api/profiles", json={
+        "name": "B", "backend": "basalt",
+        "values": {"model": "m.basalt", "host": "127.0.0.1", "port": "8090",
+                   "parallel": "1"}}).json()
+    path = Path(prof["values"]["config"])
+    assert json.loads(path.read_text())["models"][0]["parallel"] == 1
+    # 保存するだけで JSON が追従する (ボタンを押し直さなくてよい)
+    prof["values"].update({"max_context": "32768", "kv": "int8", "parallel": "4"})
+    assert client.put(f"/api/profiles/{prof['id']}", json=prof).status_code == 200
+    entry = json.loads(path.read_text())["models"][0]
+    assert entry["max-context"] == 32768 and entry["kv"] == "int8" and entry["parallel"] == 4
+
+
+def test_calibration_is_not_offered_for_basalt(tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    from llm_launcher import app as app_mod
+    from llm_launcher.calibrate import CAL_BACKENDS
+
+    assert "basalt" not in CAL_BACKENDS
+    (tmp_path / "data").mkdir(parents=True)
+    client = TestClient(app_mod.create_app(tmp_path))
+    prof = client.post("/api/profiles", json={
+        "name": "B", "backend": "basalt", "values": {"model": "m.basalt"}}).json()
+    r = client.post("/api/calibrations", json={"profile_id": prof["id"]})
+    assert r.status_code == 400 and "キャリブレーション" in r.json()["detail"]

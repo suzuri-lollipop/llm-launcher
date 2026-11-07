@@ -1036,6 +1036,19 @@ def create_app(root: Path) -> FastAPI:
             for i, p in enumerate(lst):
                 if p["id"] == profile_id:
                     merged = {**p, **data, "updated_at": now()}
+                    # Basalt: 生成済みの設定 JSON を使っているプロファイルは、保存のたびに
+                    # フォーム値 (コンテキスト長 / KV / 並列 / GPU …) を JSON へ反映する。
+                    # 手書き JSON (別パス) や config を明示 OFF にしたプロファイルは触らない。
+                    if merged.get("backend") == "basalt" and _basalt_config_owned(merged):
+                        try:
+                            _p, rel, _c = _basalt_config_write(_basalt_ready(merged))
+                        except ValueError:
+                            rel = ""
+                        if rel:
+                            merged.setdefault("values", {})["config"] = rel
+                            if not isinstance(merged.get("on"), dict):
+                                merged["on"] = {}
+                            merged["on"]["config"] = True
                     lst[i] = merged
                     return merged
             raise HTTPException(404, "プロファイルが見つかりません")
@@ -1200,6 +1213,38 @@ def create_app(root: Path) -> FastAPI:
 
     def _basalt_config_path(profile_id: str) -> Path:
         return root / "data" / "launch" / f"basalt-{profile_id}.json"
+
+    def _basalt_ready(prof: dict[str, Any]) -> dict[str, Any]:
+        """生成用のコピー: on に載っていない (= 呼び出し側が部分的な on を送った) 項目でも、
+        値が入っていれば有効として扱う (render_argv の旧来動作と同じ)。明示 OFF は尊重する。
+        """
+        out = dict(prof)
+        vals = dict(out.get("values") or {})
+        on = out.get("on")
+        if isinstance(on, dict):
+            on = dict(on)
+            for f in BACKENDS["basalt"]["fields"]:
+                k = f["key"]
+                if k not in on and str(vals.get(k) or "").strip():
+                    on[k] = True
+            out["on"] = on
+        return out
+
+    def _basalt_config_owned(prof: dict[str, Any]) -> bool:
+        """このランチャーが管理してよい設定 JSON か (未設定 or data/launch の生成物)。
+
+        手書き JSON を指しているプロファイルや、config を明示 OFF にしたものは触らない
+        (保存のたびに上書きしてユーザーの編集を壊さないため)。
+        """
+        v = prof.get("values") or {}
+        cur = str(v.get("config") or "").strip()
+        on = prof.get("on")
+        if isinstance(on, dict) and on.get("config") is False:
+            return False
+        if not cur:
+            return True
+        path = _basalt_config_path(str(prof["id"]))
+        return cur in (str(path), os.path.relpath(path, root))
 
     def _basalt_config_write(prof: dict[str, Any]) -> tuple[Path, str, dict[str, Any]]:
         """プロファイルの値から basalt_config.json (v2) を data/launch/ に書き、絶対パスを返す。

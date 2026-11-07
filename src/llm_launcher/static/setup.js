@@ -671,6 +671,20 @@ const RUNCFG = {
   "maya": { regen: false,
     par: { key: "parallel", label: "並列推論数",
            hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
+  /* basalt: コンテキスト / KV / 並列は設定 JSON (models[]) が正。保存で自動再生成する。
+     調整 (キャリブレーション) は無いので s-cal は自動でスキップされる */
+  "basalt": { regen: "config-json", model: "model",
+    ctx: { key: "max_context", label: "コンテキスト長",
+           hint: "プロンプト+生成で共有します。並列数を増やすと 1 スロットあたりは コンテキスト÷並列 になります",
+           opts: [["8192", "8K", "既定"], ["32768", "32K", "推奨"],
+                  ["131072", "128K", ""], ["262144", "256K", ""]], cur: CF_TOK },
+    kv: { key: "kv", label: "KVキャッシュ形式",
+          hint: "fp16=品質優先 / int8=VRAM半減 / q4_0・k8v4=さらに圧縮",
+          opts: [["fp16", "fp16", "既定"], ["int8", "int8", "推奨"],
+                 ["q4_0", "q4_0", ""], ["k8v4", "k8v4", ""]], cur: v => v },
+    par: { key: "parallel", label: "並列推論数",
+           hint: "同時に処理するリクエスト数 (1-8)。コンテキスト長はこの数で分割されます",
+           opts: CF_PAR, cur: CF_NUM } },
 };
 async function renderConfig() {
   W.cfgSkip = true;
@@ -803,7 +817,8 @@ $("#cf-go").addEventListener("click", async () => {
   // リロードで W.job を失ってもインストール履歴 (jobs) から復元する。新規
   // プロファイルでモデルなしを保存すると --model-path 無しで起動不能になる
   // ため、解決できなければ保存せず前に戻す (2026-10-30 の実害の再発防止)。
-  if (cfg.model && !String((p.values || {}).model_path || "").trim()) {
+  const modelKey = cfg.model === true ? "model_path" : (cfg.model || "model_path");
+  if (cfg.model && !String((p.values || {})[modelKey] || "").trim()) {
     let mp = "";
     const j = W.job;
     if (j && j.kind === "download" && j.status === "done" && j.backend === W.backend)
@@ -818,8 +833,8 @@ $("#cf-go").addEventListener("click", async () => {
       } catch { /* 履歴が取れなければ空のまま */ }
     }
     if (mp) {
-      vals.model_path = mp;
-      if (on) on.model_path = true;
+      vals[modelKey] = mp;
+      if (on) on[modelKey] = true;
       chosen.push("モデル " + mp.split("/").pop());
     } else if (W.cfgProfNew) {
       err.textContent = "モデルがまだ決まっていません。前に戻ってモデルをダウンロードしてください";
@@ -838,8 +853,10 @@ $("#cf-go").addEventListener("click", async () => {
   try {
     await api(`/api/profiles/${p.id}`, { method: "PUT", body });
     if (cfg.regen) {
-      // 調整と起動は起動 JSON を正として読むため、保存後は必ず再生成する
-      await api(`/api/profiles/${p.id}/launch-json`, { method: "POST" });
+      // 調整と起動は JSON を正として読むため、保存後は必ず再生成する
+      // (basalt は basalt_config.json、それ以外は従来の起動 JSON)
+      await api(`/api/profiles/${p.id}/${cfg.regen === "config-json" ? "config-json" : "launch-json"}`,
+                { method: "POST" });
     }
     p.name = newName;
     await refreshProf(p); // config (起動JSON) 込みの最新を次のステップへ渡す
@@ -903,7 +920,8 @@ $("#nt-go").addEventListener("click", async () => {
     await api(`/api/profiles/${p.id}`, { method: "PUT", body });
     const cfg = RUNCFG[W.backend] || {};
     if (cfg.regen) {
-      await api(`/api/profiles/${p.id}/launch-json`, { method: "POST" });
+      await api(`/api/profiles/${p.id}/${cfg.regen === "config-json" ? "config-json" : "launch-json"}`,
+                { method: "POST" });
     }
     await refreshProf(p); // 再生成後の config 込み最新を後続ステップへ
     W.summary.push({ ok: true, t: "接続設定を保存しました (" + chosen.join(" · ") + ")" });
@@ -924,12 +942,21 @@ async function renderCal() {
     const [c, st] = await Promise.all([api("/api/calibrations").catch(() => null),
                                        api("/api/state").catch(() => null)]);
     const supported = (c && c.supported) || [];
-    const profs = ((st && st.profiles) || []).filter(p => supported.includes(p.backend));
-    ok = canCal && profs.length > 0;
+    // このバックエンドに調整が無い (basalt 等) とき、他バックエンドのプロファイルを
+    // 巻き込んで実行しないよう対象をこのバックエンドに限定する
+    const calOff = !supported.includes(W.backend);
+    const profs = ((st && st.profiles) || []).filter(p => supported.includes(p.backend)
+      && p.backend === W.backend);
+    ok = canCal && !calOff && profs.length > 0;
     W.calProfiles = profs;
+    if (calOff) {   // 調整が無いバックエンド (basalt 等) は調整画面を出さずに完了へ
+      W.summary.push({ ok: true, t: "このバックエンドはキャリブレーション非対応のため、調整はスキップしました" });
+      renderDone(); go("s-done"); return;
+    }
     $("#ca-time").textContent = (profs.find(p => (p.backend || "").includes("freetoken"))
       ? "FreeToken は目安 3〜4 時間かかります" : "目安: 10〜30 分 (バックエンドにより変わります)");
     if (!canCal) $("#ca-sub").textContent = "調整はキャリブレーション権限のあるアカウントで実行できます。";
+    else if (calOff) $("#ca-sub").textContent = "このバックエンドはキャリブレーションに対応していません (調整なしで完了できます)。";
     else if (!profs.length) $("#ca-sub").textContent = "調整対象のプロファイルがまだありません。プロファイルを作成してから、ダッシュボードの「キャリブレーション」で実行してください。";
   } catch { ok = false; }
   runOpt.disabled = !ok;

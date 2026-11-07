@@ -689,6 +689,13 @@ def build_basalt() -> dict[str, Any]:
                "(slot-full-context で各スロットに全長。KV cache は expert cache から出る)"),
         F("--slot-full-context", "各スロットに full context", section="parallel", default_on=False,
           help="--parallel と併用。全スロットに --max-context 全体を与える (KV cache は N 倍)"),
+        F("--max-context", "コンテキスト長 (トークン)", placeholder="空=モデル既定 (8192)",
+          ftype="int",
+          help="プロンプト+生成で共有する長さ。--parallel N と併用すると N 分割され、"
+               "slot-full-context で各スロットに全長を与える。設定 JSON の models に書かれる"),
+        F("--kv", "KV キャッシュ形式", placeholder="空=モデル既定 (fp16)",
+          choices=["fp16", "int8", "q4_0", "k8v4"],
+          help="fp16=品質優先 / int8=VRAM 半減 / q4_0・k8v4=さらに圧縮。設定 JSON の models に書かれる"),
         F("--lazy", "遅延ロード (初回リクエストで起動)", section="sched", default_on=False,
           help="API は未ロードで待ち受け、最初のリクエストでロード (sidecar ビジョンは降ろす)"),
         F("--idle-unload", "アイドル自動アンロード秒", section="sched", ftype="float",
@@ -772,7 +779,8 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     # Basalt: 正解を basalt_config.json (config) が既に持っている項目 / 空なら上流既定に任せる項目は既定 OFF
     "basalt": {"config", "alias", "gpu", "tokenizer", "vision", "parallel", "idle_unload",
                "idle_sleep", "min_free_vram_mib", "max_payload_mib", "allowed_host",
-               "cors_origin", "image_url_host", "image_dir", "script"},
+               "cors_origin", "image_url_host", "image_dir", "script",
+               "max_context", "kv"},
 }
 
 # 常に送信する (無効化できない) 項目
@@ -1173,9 +1181,10 @@ _BASALT_SERVER_KEYS = frozenset({
 })
 _BASALT_MODEL_KEYS = frozenset({
     "alias", "gpu", "vision", "parallel", "slot_full_context", "idle_sleep",
-    "idle_unload", "min_free_vram_mib", "fit_max_tokens",
+    "idle_unload", "min_free_vram_mib", "fit_max_tokens", "max_context", "kv",
 })
-_BASALT_INT_KEYS = frozenset({"parallel", "min_free_vram_mib", "max_payload_mib"})
+_BASALT_INT_KEYS = frozenset({"parallel", "min_free_vram_mib", "max_payload_mib",
+                              "max_context"})
 _BASALT_FLOAT_KEYS = frozenset({"idle_unload", "idle_sleep"})
 _BASALT_LIST_KEYS = frozenset({"allowed_host", "cors_origin", "image_url_host", "image_dir"})
 _BASALT_PATH_KEYS = frozenset({"model", "tokenizer", "image_dir"})
