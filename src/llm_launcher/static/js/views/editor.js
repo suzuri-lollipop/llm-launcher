@@ -134,7 +134,8 @@ function hfPickerHtml(f) {
     const tag = m.source === "data" ? "[データ] " : "";
     if (isGguf) {
       for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
-      if (!(m.gguf || []).length && m.has_weights !== false)
+      for (const g of (m.basalt || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
+      if (!(m.gguf || []).length && !(m.basalt || []).length && m.has_weights !== false)
         opts.push({v: m.snapshot, label: `${tag}${m.repo_id} · (ggufなし・ディレクトリ指定)`});
     } else {
       opts.push({v: m.snapshot, label: `${tag}${m.repo_id}${m.revision ? " · rev " + m.revision : ""}`});

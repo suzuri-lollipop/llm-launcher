@@ -431,43 +431,62 @@ def _choices(node: ast.AST, defaults: dict, consts: dict | None = None) -> list[
     return result
 
 
-def build(root: Path) -> dict[str, dict[str, Any]]:
-    tables = {
-        "freetoken": gen_freetoken(root),
-        "sglang": gen_sglang(root),
-        "vllm": gen_vllm(root),
-        "llamacpp": gen_llamacpp(root),
-    }
+def build(root: Path, only: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    """正表を生成する。only (バックエンド ID の集合) を渡したときは該当ジェネレータだけ走る。
+
+    浅い submodule checkout (--depth 1) では vllm / sglang のジェネレータが参照ファイルを
+    見つけられず落ちるため、`--only basalt` や `--only freetoken-fork` が他のバックエンドの
+    成否に巻き込まれないようにする (README の「1 バックエンドだけ再生成」の実現)。
+    """
+    want = only or set()
+
+    def need(name: str) -> bool:
+        return not want or name in want
+
+    tables: dict[str, dict[str, Any]] = {}
+    if need("freetoken"):
+        tables["freetoken"] = gen_freetoken(root)
+    if need("sglang"):
+        tables["sglang"] = gen_sglang(root)
+    if need("vllm"):
+        tables["vllm"] = gen_vllm(root)
+    if need("llamacpp"):
+        tables["llamacpp"] = gen_llamacpp(root)
     # Strata (module/strata): submodule 取得済みなら serve/server.py の argparse から生成
-    if (_repo(root, "strata") / "serve" / "server.py").exists():
-        tables["strata"] = gen_strata(root)
-    else:
-        print("strata: module/strata が未クローンのため skip", flush=True)
+    if need("strata"):
+        if (_repo(root, "strata") / "serve" / "server.py").exists():
+            tables["strata"] = gen_strata(root)
+        else:
+            print("strata: module/strata が未クローンのため skip", flush=True)
     # Project Maya (module/maya): submodule 取得済みなら maya.py の argparse から生成
-    if (_repo(root, "maya") / "maya.py").exists():
-        tables["maya"] = gen_maya(root)
-    else:
-        print("maya: module/maya が未クローンのため skip", flush=True)
+    if need("maya"):
+        if (_repo(root, "maya") / "maya.py").exists():
+            tables["maya"] = gen_maya(root)
+        else:
+            print("maya: module/maya が未クローンのため skip", flush=True)
     # Basalt (module/basalt): submodule 取得済みなら serve/config.py の build_parser から生成
-    if (_repo(root, "basalt") / "serve" / "config.py").exists():
-        tables["basalt"] = gen_basalt(root)
-    else:
-        print("basalt: module/basalt が未クローンのため skip", flush=True)
+    if need("basalt"):
+        if (_repo(root, "basalt") / "serve" / "config.py").exists():
+            tables["basalt"] = gen_basalt(root)
+        else:
+            print("basalt: module/basalt が未クローンのため skip", flush=True)
     # フォーク (module/fork/<name>): clone 済みなら fork ソースから正表を生成。
     # ディレクトリ名は大小文字を無視して解決 (git clone 既定のリポジトリ名 Strata / FreeToken にも対応)。
     # 未 clone 時は skip し、backends.py の TABLE_FALLBACK で基底表が流用される。
-    ft = _fork_dir(root, "freetoken")
+    ft = _fork_dir(root, "freetoken") if need("freetoken-fork") else None
     if ft and (ft / "python/freetoken/server/args.py").exists():
         tables["freetoken-fork"] = gen_freetoken(root, str(ft.relative_to(root / "module")))
     else:
-        print("freetoken-fork: module/fork/freetoken が未クローンのため skip", flush=True)
+        if need("freetoken-fork"):
+            print("freetoken-fork: module/fork/freetoken が未クローンのため skip", flush=True)
     # Strata (fork) (module/fork/strata): フォーク clone の serve/server.py から正表を生成。
     # (deepseek/ ツールキットと同じ clone。DeepSeek 専用バックエンドは廃止 = フォークへ合流予定のため)
-    sf = _fork_dir(root, "strata")
+    sf = _fork_dir(root, "strata") if need("strata-fork") else None
     if sf and (sf / "serve" / "server.py").exists():
         tables["strata-fork"] = gen_strata(root, str(sf.relative_to(root / "module")))
     else:
-        print("strata-fork: module/fork/strata が未クローンのため skip", flush=True)
+        if need("strata-fork"):
+            print("strata-fork: module/fork/strata が未クローンのため skip", flush=True)
     return tables
 
 
@@ -478,13 +497,13 @@ def main() -> None:
     ap.add_argument("--only", default="", help="生成するバックエンド (カンマ区切り)。空=全て")
     a = ap.parse_args()
     root = Path(a.root).resolve()
-    tables = build(root)
     want = {x.strip() for x in a.only.split(",") if x.strip()}
+    tables = build(root, want or None)
     if want:
         unknown = want - set(tables)
         if unknown:
-            raise SystemExit(f"未知のバックエンド: {', '.join(sorted(unknown))} "
-                             f"(生成可能: {', '.join(sorted(tables))})")
+            raise SystemExit(f"未知のバックエンド、または未クローンで skip: {', '.join(sorted(unknown))} "
+                             f"(今回生成: {', '.join(sorted(tables)) or 'なし'})")
         tables = {k: v for k, v in tables.items() if k in want}
     outdir = root / a.out
     outdir.mkdir(parents=True, exist_ok=True)

@@ -458,6 +458,7 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
         chosen = next((s for s in snaps if wanted and s.name.startswith(wanted)), snaps[0])
         revision = next((k for k, v in refs.items() if chosen.name.startswith(v)), None) or (wanted or "")[:10] or "main"
         gguf: list[dict[str, Any]] = []
+        basalt: list[dict[str, Any]] = []
         has_weights = False
         try:
             for f in sorted(chosen.iterdir()):
@@ -465,11 +466,13 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
                     continue
                 size = f.stat().st_size
                 suf = f.suffix.lower()
-                if suf in (".safetensors", ".bin", ".pt", ".gguf") and size > 1 << 20:
+                if suf in (".safetensors", ".bin", ".pt", ".gguf", ".basalt") and size > 1 << 20:
                     has_weights = True
                 if suf == ".gguf":
                     gguf.append({"name": f.name, "size": size})
-                if len(gguf) >= max_files:
+                if suf == ".basalt":        # Basalt の pack (単一ファイル = モデル正体)
+                    basalt.append({"name": f.name, "size": size})
+                if len(gguf) + len(basalt) >= max_files:
                     break
         except OSError:
             pass
@@ -479,6 +482,7 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
             "revision": revision,
             "has_weights": has_weights,
             "gguf": gguf,
+            "basalt": basalt,
         }))
     entries.sort(key=lambda t: t[0], reverse=True)
     result["models"] = [m for _, m in entries]

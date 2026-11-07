@@ -53,8 +53,8 @@ def port_in_use(port: int, host: str = "0.0.0.0") -> bool:
 # その間 RSS は解放されない。そこで「停止直後の起動」が重なると実 RAM を超えて
 # アリーナを二重確保し、OS ごと固まる。stop() は解放完了を待ち、start() は
 # 解放中のエンジンが残っている間は(force でない限り)起動を拒否する。
-STRATA_ENGINE_BACKENDS = {"strata", "strata-fork", "maya"}
-_STRATA_ENGINE_EXES = {"strata", "strata.exe"}
+STRATA_ENGINE_BACKENDS = {"strata", "strata-fork", "maya", "basalt"}
+_STRATA_ENGINE_EXES = {"strata", "strata.exe", "basalt", "basalt.exe"}
 
 
 def lingering_engine_pids() -> list[int]:

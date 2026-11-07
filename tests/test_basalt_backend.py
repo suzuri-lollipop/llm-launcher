@@ -395,3 +395,41 @@ def test_duplicated_profile_gets_its_own_config(tmp_path: Path):
     assert client.put(f"/api/profiles/{dup['id']}", json=dup).status_code == 200
     assert json.loads(Path(src["values"]["config"]).read_text())["models"][0]["parallel"] == 2
     assert json.loads(Path(dup["values"]["config"]).read_text())["models"][0]["parallel"] == 8
+
+
+# ------------------------------------------------------------ 見落とし修正の回帰
+
+def test_basalt_is_strata_family_for_stop_drain():
+    """basalt もエンジン子プロセス (basalt --serve) が arena をピン留めする。
+    stop の解放待ち / start のメモリガード (STRATA_ENGINE_BACKENDS) に含まれること。"""
+    from llm_launcher import process
+
+    assert "basalt" in process.STRATA_ENGINE_BACKENDS
+    assert "basalt" in process._STRATA_ENGINE_EXES
+
+
+def test_hf_cache_scan_recognizes_basalt_packs(tmp_path: Path):
+    """.basalt pack を has_weights として認識し、ファイル一覧 (basalt) を出すこと。
+    これが無いと「ダウンロード済みのモデルを使う」や編集画面の HF ピッカーから消える。"""
+    from llm_launcher.app import scan_hf_cache
+
+    repo = tmp_path / "models--jesdga--Qwen3.8-Flash-Next-Basalt"
+    snap = repo / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("abc123")
+    (snap / "Qwen3.8-FN-NVFP4-DQ6_K.basalt").write_bytes(b"x" * ((1 << 20) + 1))
+    (snap / "README.md").write_text("docs")
+    m = next(x for x in scan_hf_cache(tmp_path)["models"]
+             if x["repo_id"] == "jesdga/Qwen3.8-Flash-Next-Basalt")
+    assert m["has_weights"] is True
+    assert [f["name"] for f in m["basalt"]] == ["Qwen3.8-FN-NVFP4-DQ6_K.basalt"]
+
+
+@pytestmark_table
+def test_gen_fields_only_basalt_is_lazy():
+    """--only basalt は basalt ジェネレータだけ走る (浅い checkout の vllm 等で落ちない)。"""
+    from llm_launcher.gen_fields import build
+
+    tables = build(ROOT, {"basalt"})
+    assert set(tables) == {"basalt"} and tables["basalt"]["--port"]["type"] == "int"

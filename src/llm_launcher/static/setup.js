@@ -32,7 +32,8 @@ async function api(path, opts = {}) {
 
 /* ---------------------------------------------------------------- 状態 */
 const INS_STEPS = { clone: "リポジトリを取得 (clone)", branch: "ブランチ切替", venv: "実行環境を作成",
-                    precheck: "インストール内容を確認", verify: "動作確認 (import)" };
+                    precheck: "インストール内容を確認", cmake: "エンジンを設定 (cmake)",
+                    "cmake-build": "エンジンをビルド (cmake)", verify: "動作確認 (import)" };
 const CAL_STEPS = { prepare: "調整の準備", auto: "最適構成を自動で探す", lookup: "キャッシュを引く",
                     sweep: "実際に測る (実測)", create: "プロファイルを更新", adjust: "調整を反映",
                     restart: "サーバーを起動し直す" };
@@ -222,12 +223,16 @@ function renderReview() {
   const rows = [
     ["ソフト", `${esc(sp.name)} <span class="mono">${esc(sp.module_path)}</span>`],
     ["バージョン", W.ref ? esc(W.ref) : "既定"],
-    ["実行内容", `1. リポジトリを取得 (git clone)<br>2. 実行環境を作成 (.venv)<br>3. 依存パッケージを導入 (${esc(toolLabel())})`],
+    ["実行内容", `1. リポジトリを取得 (git clone)<br>2. 実行環境を作成 (.venv)<br>`
+      + `3. 依存パッケージを導入 (${sp.requirements ? `${toolLabel()} -r ${esc(sp.requirements)}` : esc(toolLabel())})`
+      + (sp.cmake ? "<br>4. ネイティブエンジンをビルド (cmake → bin/basalt)" : "")],
     ["この後の予定", doing],
   ];
   $("#rv-rows").innerHTML = rows.map(([k, v]) =>
     `<div class="row-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
-  $("#rv-preview").textContent = `git clone → .venv → ${toolLabel()} -e ".[${sp.extras || "accel"}]"`;
+  $("#rv-preview").textContent = `git clone → .venv → `
+    + (sp.requirements ? `${toolLabel()} -r ${sp.requirements}` : `${toolLabel()} -e ".[${sp.extras || "accel"}]"`)
+    + (sp.cmake ? " → cmake configure + build" : "");
   $("#rv-start").disabled = false;
   $("#rv-start").textContent = "インストール";
   go("s-review");
@@ -828,6 +833,22 @@ $("#cf-go").addEventListener("click", async () => {
         const dj = done[done.length - 1];
         if (dj) mp = String((dj.result && dj.result.path) || dj.local_dir || "");
       } catch { /* 履歴が取れなければ空のまま */ }
+    }
+    if (mp && W.backend === "basalt" && !mp.endsWith(".basalt")) {
+      /* HF ダウンロードの result.path はスナップショット DIR。basalt の --model は
+         .basalt ファイル正体なので、一覧の include (既定 pack) かキャッシュスキャンで
+         ファイルへ解決する (解決できなければ DIR のまま = 起動時に正直なエラー) */
+      const ent = (W.mdList || []).find(m => m.repo_id === String((W.job || {}).repo_id || ""));
+      const fname = (ent && ent.include && ent.include[0]) || "";
+      if (fname) mp = mp.replace(/\/+$/, "") + "/" + fname;
+      else {
+        try {
+          const hm = await api("/api/hf-models");
+          const snap = (hm.models || []).find(m => m.snapshot === mp);
+          const f = snap && (snap.basalt || [])[0];
+          if (f) mp = mp.replace(/\/+$/, "") + "/" + f.name;
+        } catch { /* スキャン失敗は DIR のまま */ }
+      }
     }
     if (mp) {
       vals[modelKey] = mp;
