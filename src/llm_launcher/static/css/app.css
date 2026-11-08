@@ -368,3 +368,12 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
 .ic{width:1.05em;height:1.05em;fill:currentColor;flex:none;vertical-align:-.15em}
 .sprite{position:absolute;width:0;height:0;overflow:hidden}
 button .ic{margin-right:1px}
+@media(max-width:560px){
+  .par-tools{gap:6px}
+  .par-sel{flex:1 1 180px;max-width:none}
+  .par-rate{width:100%;justify-content:flex-end;margin-left:0}
+  .par-chart svg{height:140px}
+  .par-chart-empty{min-height:140px}
+  .par-srow{grid-template-columns:84px 56px minmax(0,1fr)}
+  .par-srow .par-gen,.par-srow .par-ctx,.par-srow .par-acc{display:none}
+}
