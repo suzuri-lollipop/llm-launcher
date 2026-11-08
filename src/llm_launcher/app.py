@@ -36,6 +36,7 @@ from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         clone_exists, current_ref, install_tool)
 from . import oom
+from . import strata_setup
 from . import rbac
 from . import sysinfo
 from .oom import MemoryGuardError
@@ -231,6 +232,15 @@ class InstallBody(BaseModel):
     extras: str | None = None
     # clone / 切替先のブランチ (未指定ならバックエンド既定)。spec の refs 一覧内の名前だけ通る
     ref: str = ""
+
+
+class StrataModelBody(BaseModel):
+    """Strata ②: 純正 setup.py を非対話 (--yes / --no-start) で走らせる選択。
+    family / model / context は submodule が単一の源の一覧 (strata_setup) で検証される。"""
+    family: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=64)
+    context: int = 131072
+    vision: str = ""      # "" = 渡さない (非対応パック), でなければ yes|no|gpu|cpu
 
 
 class ModelDownloadBody(BaseModel):
@@ -2087,6 +2097,33 @@ def create_app(root: Path) -> FastAPI:
         return {"jobs": installs.list_jobs(), "active": installs.active_id,
                 "installable": _installable_public(), "cache_dir": str(hf_hub_cache_dir()),
                 "tool": install_tool()}
+
+    @app.get("/api/installs/strata-model")
+    async def strata_model_options() -> dict[str, Any]:
+        """Strata ② の選択肢: 純正 setup.py の表 (family/model/context/PC の RAM・ディスク)
+        と、すでに設定済みの strata-<model>.json。表の単一の源は submodule (strata_setup)。
+        静的パスは {jid} より前に登録すること (FastAPI は登録順マッチ)。"""
+        mod = root / INSTALL_SPECS["strata"]["module_path"]
+        # 表の読み出しは subprocess (初回 ~1s) — イベントループを止めない
+        out = dict(await asyncio.to_thread(strata_setup.load_options, mod))
+        out["configs"] = await asyncio.to_thread(strata_setup.installed_configs, mod)
+        out["venv_ready"] = (mod / ".venv" / "bin" / "python").is_file()
+        return out
+
+    @app.post("/api/installs/strata-model", status_code=201)
+    async def strata_model_start(body: StrataModelBody, request: Request) -> dict[str, Any]:
+        """Strata のモデル構成 (純正 setup.py を --yes --no-start で非対話実行)。
+        インストールと同じ install 権限・同じ履歴 / 中断 / ログのジョブ。"""
+        try:
+            # build_argv の表読み出し (初回のみ subprocess ~1s) をループ外で温めておく
+            await asyncio.to_thread(strata_setup.load_options,
+                                    root / INSTALL_SPECS["strata"]["module_path"])
+            return installs.start_strata_model(body.model_dump(),
+                                               actor=current_user(request))
+        except ActiveJobError as e:
+            raise HTTPException(409, str(e))
+        except InstallError as e:
+            raise HTTPException(400, str(e))
 
     @app.get("/api/installs/{jid}")
     async def get_install(jid: str) -> dict[str, Any]:

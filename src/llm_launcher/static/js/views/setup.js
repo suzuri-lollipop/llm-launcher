@@ -22,7 +22,7 @@ const INS_ST = {queued: ["info", "待機"], running: ["warn", "実行中"], done
                 failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "中断 (launcher 再起動)"]};
 const INS_STEPS = {clone: "clone", branch: "ブランチ切替", venv: "venv 作成", precheck: "確認",
                    install: "uv pip install", cmake: "cmake 設定", "cmake-build": "cmake ビルド",
-                   engine: "エンジン受信", verify: "import 確認"};
+                   engine: "エンジン受信", model: "モデル準備 (Strata)", verify: "import 確認"};
 /* install ステップの実体は uv があれば uv pip、無い環境だけ venv の pip。
    手順名はサーバーが返す tool (実行する argv と同じ判定) で出す。 */
 const insToolLabel = tool => tool === "pip" ? "pip install" : "uv pip install";
@@ -217,6 +217,8 @@ const insTitle = r => insKind(r) === "calibrate"
   ? `<svg class=ic aria-hidden=true><use href=#i-target /></svg> ${esc(r.profile_name || r.profile_id)} <span class="muted mono" style="font-size:12px">${esc(r.backend_name || r.backend)}</span>`
   : insKind(r) === "download" ? `<svg class=ic aria-hidden=true><use href=#i-download /></svg> ${esc(r.repo_id)}`
   : `<svg class=ic aria-hidden=true><use href=#i-box /></svg> ${esc(insName(r.backend))}`
+    + (r.phase === "model"
+        ? ` <span class="muted" style="font-size:12px">モデル準備${r.model ? ": " + esc(r.model) : ""}</span>` : "")
     + (r.ref ? ` <span class="muted mono" style="font-size:12px">${esc(r.ref)}</span>` : "");
 /* ---- セットアップ③: <svg class=ic aria-hidden=true><use href=#i-target /></svg> タブと同じ選択・同じ実行コア (calRun) を使う薄い UI ---- */
 const scProfiles = () => calUiOn() ? (((S.state || {}).profiles || []).filter(p => calSupports(p.backend))) : [];

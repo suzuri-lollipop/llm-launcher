@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backends import BACKENDS, fork_dir, fork_model_root
+from . import strata_setup
 from .store import JsonStore, new_id, now
 
 # ログはデータベース (installs.json) に保持する。インストール実行では行が増えるので
@@ -655,6 +656,99 @@ class InstallManager:
         self._tasks[job["id"]] = asyncio.create_task(self._run_install(job, spec, steps))
         return self._public(job)
 
+    # ------------------------------------------------------------ Strata モデル構成 (②)
+
+    def start_strata_model(self, opts: dict[str, Any],
+                           actor: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Strata のセットアップ ②: 純正 setup.py を `--yes --no-start` の非対話で
+        走らせて、モデルのダウンロード → 準備 → strata-<model>.json 生成までを UI から
+        完結させる。
+
+        選定の表もダウンロード (再開対応・SHA-256・MTP ドラフト層) も純正実装そのもので、
+        ここは family/model/context/vision を submodule の表ホワイトリストで検証し、
+        argv を組み立てるだけ (strata_setup)。setup.py の全質問は --yes で既定確定し、
+        マルチ GPU の role も推奨構成がそのまま通る (対話プロンプトには到達しない)。
+        .venv とエンジンは ① で導入済みなので、setup.py のその手順は即スキップされる。
+        """
+        spec = INSTALL_SPECS["strata"]
+        self._check_free()
+        module_dir = (self.root / spec["module_path"]).resolve()
+        venvpy = module_dir / ".venv" / "bin" / "python"
+        if not (module_dir / "setup.py").is_file() or not venvpy.is_file():
+            raise InstallError("Strata の実行環境 (.venv) がまだありません。"
+                               "先に ① インストールを実行してください")
+        try:
+            argv, config_name = strata_setup.build_argv(module_dir, opts or {})
+        except ValueError as e:
+            raise InstallError(str(e)) from None
+        fam = str((opts or {}).get("family") or "")
+        model = str((opts or {}).get("model") or "")
+        job = self._new_job("install", actor, backend="strata",
+                            backend_name=BACKENDS["strata"]["name"],
+                            module_path=spec["module_path"], tool="", uv_path="",
+                            extras="", clean=False, needs_clone=False, ref="", cuda="",
+                            phase="model", model=f"{fam}/{model}",
+                            config_name=config_name)
+        job["steps"] = ["model"]
+        job["started_ts"] = time.time()   # 完了時の config 新生成判定の基準時刻
+        self._tasks[job["id"]] = asyncio.create_task(
+            self._run_model(job, module_dir, [str(venvpy), *argv]))
+        return self._public(job)
+
+    async def _run_model(self, job: dict[str, Any], module_dir: Path,
+                         argv: list[str]) -> None:
+        """単一 step の Strata モデル構成ジョブ (ダウンロードは数時間〜なのでログのみ)。"""
+        job["status"] = "running"
+        self._save()
+        self._append_log(job, proxy_log_line())
+        self._append_log(job, "Strata 純正 setup.py を --yes (非対話) で実行します — "
+                              "モデルのダウンロードは再開対応です (中断しても続きから)")
+        try:
+            rc, out = await self._run_step(job, {"name": "model", "argv": argv,
+                                                 "cwd": str(module_dir),
+                                                 "stdin_null": True})
+            if job["id"] in self._cancel:
+                job["status"] = "cancelled"
+                self._append_log(job, "中断しました — Strata のダウンロードは再開対応なので、"
+                                      "もう一度実行すると続きから進みます")
+            elif rc != 0:
+                tail = [ln.rstrip() for ln in (out or "").splitlines() if ln.strip()][-30:]
+                if tail:
+                    self._append_log(job, f"----- model 失敗時の出力末尾 (exit {rc}) -----")
+                    for ln in tail:
+                        self._append_log(job, ln)
+                first = next((ln for ln in tail if "error" in ln.lower()),
+                             tail[0] if tail else "")
+                raise InstallError(f"Strata のモデル設定が失敗しました (exit {rc})"
+                                   + (f" — {first[:200]}" if first else ""))
+            else:
+                cfg = module_dir / str(job.get("config_name") or "")
+                if not cfg.is_file():
+                    # 純正の命名が変わった環境対応: 実行中に作られた最新の config を拾う
+                    started = job.get("started_ts") or 0
+                    fresh = [c for c in strata_setup.installed_configs(module_dir)
+                             if c["mtime"] >= started - 5.0]
+                    cfg = Path(fresh[0]["file"]) if fresh else None
+                if cfg is None:
+                    job["status"] = "done"
+                    job["result"] = {"installed": True, "config": ""}
+                    self._append_log(job, "完了しましたが strata-<model>.json が"
+                                          "見つかりません (ログ末尾と module/strata を確認してください)")
+                else:
+                    job["status"] = "done"
+                    job["result"] = {"installed": True, "config": str(cfg)}
+                    self._append_log(job, f"モデル設定完了: {cfg.name}")
+        except InstallError as e:
+            job["status"] = "failed"
+            job["error"] = str(e)
+            self._append_log(job, f"失敗: {e}")
+        except Exception as e:  # noqa: BLE001
+            job["status"] = "failed"
+            job["error"] = f"{type(e).__name__}: {e}"
+            self._append_log(job, f"失敗: {job['error']}")
+        finally:
+            self._finish(job)
+
     def _venv_ensure(self, job: dict[str, Any], module_dir: Path) -> str:
         """スレッドで走る .venv 確保。setup.sh と同じ規則: 動く venv は絶対に消さない。
 
@@ -1220,6 +1314,7 @@ class InstallManager:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *step["argv"], cwd=step["cwd"], env=env,
+                stdin=subprocess.DEVNULL if step.get("stdin_null") else None,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
             )

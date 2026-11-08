@@ -891,9 +891,9 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "repo": "https://github.com/Niko1221/Strata",
         "module_path": "module/strata", "kind": "python",
         "desc": "MoE エキスパートを RAM/SSD に階層化して consumer GPU で大型モデルを動かすエンジン"
-                " (OpenAI/Anthropic 互換)。初回はセットアップタブ (📦) か module/strata で setup.sh を"
-                "実行して .venv・依存・エンジンを入れ、モデル選択と strata-<model>.json 生成は"
-                " setup.sh の対話手順で作る (セットアップ済みなら setup.sh はそこだけ通す)。",
+                " (OpenAI/Anthropic 互換)。初回はセットアップタブ (📦) で .venv・依存・エンジンを入れ、"
+                "モデル設定 (選択・ダウンロード・strata-<model>.json 生成) はセットアップ画面 ② が"
+                "純正 setup.py を非対話で走らせて完結させる。手動なら module/strata で setup.sh も可。",
         # serve/server.py は __file__ から自リポジトリを解決するので cwd 依存ではない
         "default_command": "{python} {root}/module/strata/serve/server.py",
         # serve はリポジトリ直下のパッケージ (未 install) → submodule を cwd に実 import して判定
