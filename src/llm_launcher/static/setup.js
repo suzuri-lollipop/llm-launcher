@@ -638,7 +638,7 @@ function cfParNow() {
 /* 見出し下の補足 1 行。perUser は「1人あたり × 並列 = 合計KV」を生きた値で示す */
 function cfSyncHints() {
   const cfg = RUNCFG[W.backend] || {};
-  for (const id of ["ctx", "kv", "tp", "par"]) {
+  for (const id of ["ctx", "kv", "tp", "par", "vis"]) {
     const sec = cfg[id]; const hint = document.querySelector(`#cf-${id}-hint`);
     if (!sec || !hint) continue;
     hint.textContent = sec.hint || "";
@@ -696,7 +696,10 @@ const RUNCFG = {
                  ["q4_0", "q4_0", ""], ["k8v4", "k8v4", ""]], cur: v => v },
     par: { key: "parallel", label: "並列推論数",
            hint: "同時に処理するリクエスト数 (1-8)。コンテキスト長はこの数で分割されます",
-           opts: CF_PAR, cur: CF_NUM } },
+           opts: CF_PAR, cur: CF_NUM },
+    vis: { key: "vision", label: "画像入力 (ビジョン)",
+           hint: "dynamic=エンジン内で読む (推奨・常駐VRAMなし)。off にすると画像リクエストはエラーになります",
+           opts: [["dynamic", "dynamic", "推奨"], ["off", "off", ""], ["cpu", "cpu", ""]], cur: v => v } },
 };
 async function renderConfig() {
   W.cfgSkip = true;
@@ -741,7 +744,7 @@ async function renderConfig() {
     const rec = cfg.par.opts.find(o => (o[2] || "").includes("推奨")) || cfg.par.opts[0] || ["1"];
     return parseInt(rec[0], 10) || 1;
   })();
-  for (const id of ["ctx", "kv", "tp", "par"]) {
+  for (const id of ["ctx", "kv", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     const stored = String(v[sec.key] ?? "");
     const perNum = sec.perUser ? Math.round(Number(stored) / parInit) : NaN;
@@ -806,7 +809,7 @@ $("#cf-go").addEventListener("click", async () => {
   const on = p.on ? { ...p.on } : null;
   const chosen = [];
   const par = cfParNow();   // 一人あたり項目が合計を書き込むときに使う並列数 (フォームの選択)
-  for (const id of ["ctx", "kv", "tp", "par"]) {
+  for (const id of ["ctx", "kv", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     const el = document.querySelector(`#cf-groups select#cf-${id}`);
     if (!el || !el.value) continue;

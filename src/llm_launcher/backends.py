@@ -678,8 +678,10 @@ def build_basalt() -> dict[str, Any]:
           help='{"server": {...}, "engine": {...}, "models": [{"model": FILE}]} 形式。'
                "コンテキスト長・expert 階層など本体設定はこの args 側 (コマンドラインが優先)"),
         F("--alias", "API のモデル名 (alias)", help="空 = モデルファイルに保存された名前"),
-        F("--vision", "ビジョンエンコーダ", placeholder="off / dynamic / cpu / GPU番号",
-          help="画像入力: off / dynamic (メイン GPU の expert-cache 枠を間借り) / cpu / sidecar を常駐させる GPU 番号"),
+        F("--vision", "ビジョンエンコーダ (画像入力)", default="dynamic",
+          placeholder="dynamic / off / cpu / GPU番号",
+          help="dynamic = エンジン内実行 (expert-cache 枠を間借り、常駐 VRAM なし・既定) / off = 画像拒否 / "
+               "cpu = 低速だが VRAM 不使用 / GPU番号 = サイドカーをそのカードに常駐。未設定のまま保存すると画像は使えない"),
         F("--tokenizer", "トークナイザ DIR",
           help="空 = リポジトリの pack/full/tokenizer (mock エンジン用。通常は触らない)"),
         F("--gpu", "GPU 指定", section="parallel", placeholder="0 / 0,1 / auto",
@@ -777,7 +779,7 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     "maya": {"config", "gpu", "gpus", "parallel", "vram_reserve_mib", "calibrate",
              "backend", "env"},
     # Basalt: 正解を basalt_config.json (config) が既に持っている項目 / 空なら上流既定に任せる項目は既定 OFF
-    "basalt": {"config", "alias", "gpu", "tokenizer", "vision", "parallel", "idle_unload",
+    "basalt": {"config", "alias", "gpu", "tokenizer", "parallel", "idle_unload",
                "idle_sleep", "min_free_vram_mib", "max_payload_mib", "allowed_host",
                "cors_origin", "image_url_host", "image_dir", "script",
                "max_context", "kv"},
@@ -1188,6 +1190,10 @@ _BASALT_INT_KEYS = frozenset({"parallel", "min_free_vram_mib", "max_payload_mib"
 _BASALT_FLOAT_KEYS = frozenset({"idle_unload", "idle_sleep"})
 _BASALT_LIST_KEYS = frozenset({"allowed_host", "cors_origin", "image_url_host", "image_dir"})
 _BASALT_PATH_KEYS = frozenset({"model", "tokenizer", "image_dir"})
+# 値が空でも JSON に焼き込む既定 (上流既定と意図的に違うものだけ — vision は
+# basalt 本体の既定 off でも画像が死にるので dynamic)。max-payload-mib 等の
+# 正表由来の既定は上流と同じ値なので書かない。
+_BASALT_ADOPT_DEFAULTS = frozenset({"vision"})
 # --config があるときに CLI から送らないモデル項目 (JSON の models / engine が正)
 _BASALT_CONFIG_DRIVEN_SKIP = frozenset({"model"}) | _BASALT_MODEL_KEYS
 
@@ -1221,28 +1227,32 @@ def basalt_config_for(profile: dict[str, Any], *, root: Path) -> dict[str, Any]:
 
     cfg: dict[str, Any] = {"version": 2, "models": [], "server": {}}
 
-    def enabled(f: dict[str, Any]) -> bool:
+    def enabled(f: dict[str, Any]) -> tuple[bool, str]:
+        """(この項目を JSON に書くか, 書く値)。値が空でもフォーム既定 (vision=dynamic など) を採用する。"""
         key = f["key"]
         if f["type"] == "bool":
             # チェックボックスの表現 ("on" / "1" / "true" など) を render_argv と同じ規則で判定
-            return str(values.get(key) or "").strip().lower() in TRUTHY
+            return (str(values.get(key) or "").strip().lower() in TRUTHY, "true")
         if on is not None and not f.get("required"):
             if not bool(on.get(key, f.get("default_on", True))):
-                return False
-        return bool(str(values.get(key) or "").strip())
+                return (False, "")
+        raw = str(values.get(key) or "").strip()
+        if not raw and key in _BASALT_ADOPT_DEFAULTS:
+            raw = str(f.get("default") or "").strip()
+        return (bool(raw), raw)
 
     entry: dict[str, Any] = {"model": _basalt_abs(model, root)}
     for f in backend["fields"]:
         key = f["key"]
         if key in ("model", "config", "api_key"):
             continue
-        if not enabled(f):
+        ok, raw = enabled(f)
+        if not ok:
             continue
         name = key.replace("_", "-")
         if f["type"] == "bool":
             (cfg["server"] if key in _BASALT_SERVER_KEYS else entry)[name] = True
             continue
-        raw = str(values.get(key) or "").strip()
         if key in _BASALT_INT_KEYS:
             try:
                 val: Any = int(float(raw))

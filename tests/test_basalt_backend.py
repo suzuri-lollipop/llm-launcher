@@ -335,7 +335,7 @@ def test_context_and_kv_flow_into_config_not_argv():
     # config モードでは CLI にモデル項目を送らない (engine flags need --model で落ちるため)
     prof["values"]["config"] = "/c.json"
     argv = backends.render_argv(b, prof, python="p", binary="/bin/basalt", root=Path("/r"))
-    for flag in ("--model", "--max-context", "--kv", "--parallel", "--gpu"):
+    for flag in ("--model", "--max-context", "--kv", "--parallel", "--gpu", "--vision"):
         assert flag not in argv
 
 
@@ -450,3 +450,17 @@ def test_profile_delete_removes_generated_config(tmp_path: Path):
     assert path.is_file()
     assert client.delete(f"/api/profiles/{prof['id']}").status_code == 200
     assert not path.exists()
+
+
+def test_generated_config_defaults_vision_dynamic():
+    """basalt 本体の既定は vision=off (= 画像拒否) なので、生成 JSON は dynamic を焼く。
+    ユーザーが明示的に off / cpu を選んだときはそれを尊重する。"""
+    base = {"model": "m.basalt", "host": "0.0.0.0", "port": "1919"}
+    entry = backends.basalt_config_for({"values": base, "on": None}, root=Path("/r"))["models"][0]
+    assert entry["vision"] == "dynamic"
+    entry = backends.basalt_config_for({"values": {**base, "vision": "off"}, "on": None},
+                                       root=Path("/r"))["models"][0]
+    assert entry["vision"] == "off"
+    entry = backends.basalt_config_for({"values": {**base, "vision": "1"}, "on": None},
+                                       root=Path("/r"))["models"][0]
+    assert entry["vision"] == "1"
