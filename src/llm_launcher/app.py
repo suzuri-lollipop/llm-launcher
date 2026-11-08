@@ -1412,6 +1412,184 @@ def create_app(root: Path) -> FastAPI:
         except KeyError:
             raise HTTPException(404, "セッションが見つかりません")
 
+    @app.get("/api/sessions/{sid}/parallel")
+    async def session_parallel(sid: str) -> dict[str, Any]:
+        """ダッシュボードのデコード速度グラフ用: 稼働中サーバーの /metrics を中継する。
+
+        Strata / Maya 系の JSON /metrics だけを対象にする。ブラウザから直接叩くと
+        CORS や API キーで失敗するため、起動中のポートへ launcher 同一オリジンで
+        プロキシし、グラフに必要な値だけを正規化して返す。
+        """
+        s = manager.sessions.get(sid)
+        if not s:
+            raise HTTPException(404, "セッションが見つかりません")
+        if not s.get("ready"):
+            raise HTTPException(503, "サーバーは起動中です")
+        port = s.get("port")
+        if not port:
+            raise HTTPException(400, "このセッションはポートを解決できていません")
+        if s.get("backend") not in ("strata", "strata-fork", "maya", "basalt"):
+            raise HTTPException(400, "このバックエンドは JSON /metrics の並列内訳に対応していません")
+        key = api_key_from_argv(s.get("argv") or [])
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+
+        def _fetch() -> dict[str, Any]:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/metrics", headers=headers)
+            with urllib.request.urlopen(req, timeout=2.0) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+
+        try:
+            data = await asyncio.to_thread(_fetch)
+        except urllib.error.HTTPError as e:
+            raise HTTPException(e.code, f"サーバーの /metrics が HTTP {e.code} を返しました")
+        except urllib.error.URLError as e:
+            raise HTTPException(502, f"サーバーの /metrics に接続できません: {e.reason}")
+        except OSError as e:
+            raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
+        except ValueError as e:
+            raise HTTPException(502, f"サーバーの /metrics を JSON として読み取れません: {e}")
+        except Exception as e:                                  # noqa: BLE001 — 内訳は補助情報なので常に 502
+            raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
+        if not isinstance(data, dict):
+            raise HTTPException(502, "サーバーの /metrics が JSON オブジェクトではありません")
+
+        live = data.get("live") if isinstance(data, dict) else None
+        live = live if isinstance(live, dict) else {}
+        slots: list[dict[str, Any]] = []
+        slot_total = queue_depth = None
+        raw_slots = live.get("slots")
+        if isinstance(raw_slots, dict):
+            # basalt 形式 (/metrics の live.slots が {total, active, queue_depth}):
+            # 行の詳細は GET /slots の slot_table。リクエストは (1 本でも) ここで
+            # スロットに割り当て済みなので、そのまま行になる。
+            slot_total = raw_slots.get("total") if isinstance(raw_slots.get("total"), (int, float)) else None
+            queue_depth = raw_slots.get("queue_depth")
+
+            def _fetch_slots() -> list[Any]:
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/slots", headers=headers)
+                with urllib.request.urlopen(req, timeout=2.0) as r:
+                    rows = json.loads(r.read().decode("utf-8", "replace"))
+                return rows if isinstance(rows, list) else []
+
+            try:
+                slot_rows = await asyncio.to_thread(_fetch_slots)
+            except Exception:                                     # noqa: BLE001 — 行が無ければ履歴だけで描く
+                slot_rows = []
+            for i, row in enumerate(slot_rows):
+                if not isinstance(row, dict):
+                    continue
+                busy = bool(row.get("is_processing"))
+                tok = row.get("tok_s")
+                offered, accepted = row.get("drafts_offered"), row.get("drafts_accepted")
+                accept = (round(accepted / offered * 100)
+                          if isinstance(offered, (int, float)) and offered > 20
+                          and isinstance(accepted, (int, float)) else None)
+                slots.append({
+                    "slot": row["id"] if isinstance(row.get("id"), int) else i,
+                    "state": (row.get("state") or "decoding") if busy else "idle",
+                    "tok_s": tok if isinstance(tok, (int, float)) else 0.0,
+                    "prompt_tokens": row.get("prompt_tokens"),
+                    "prompt_read": row.get("prefill_done"),
+                    "generated": row.get("generated"),
+                    "elapsed_s": None,
+                    "held_tokens": row.get("ctx_used"),
+                    "n_ctx": row.get("n_ctx"),
+                    "accept": accept,
+                })
+        elif isinstance(raw_slots, list):
+            # Strata の slots_view (list 形式)
+            for i, item in enumerate(raw_slots):
+                if not isinstance(item, dict):
+                    continue
+                slot = item.get("slot", item.get("id", i))
+                tok = item.get("tok_s")
+                slots.append({
+                    "slot": int(slot) if isinstance(slot, int) else i,
+                    "state": item.get("state") or "idle",
+                    # basalt の slot_table と同じく待機行も 0.0 (グラフが途切れない)
+                    "tok_s": tok if isinstance(tok, (int, float)) else 0.0,
+                    "prompt_tokens": item.get("prompt_tokens"),
+                    "prompt_read": item.get("prompt_read"),
+                    "generated": item.get("generated"),
+                    "elapsed_s": item.get("elapsed_s"),
+                    "held_tokens": item.get("held_tokens"),
+                    "n_ctx": None,
+                    "accept": None,
+                })
+        # basalt の slot_table 意味づけ: 稼働中のリクエストは (1 本でも) スロット行を
+        # 使う。Strata のエンジンは単独経路では batch スロットを占有しないので、
+        # サービス側で最初の空きスロットに割り当てる (basalt がそうやっている)。
+        outside = live.get("outside_slots")
+        state_now = live.get("state") or ""
+        if (slots and isinstance(outside, (int, float)) and outside == 1
+                and state_now in ("reading", "generating", "decoding", "writing")):
+            taken = {s["slot"] for s in slots if s["state"] != "idle"}
+            free = next((i for i in range(len(slots)) if i not in taken), None)
+            if free is not None:
+                row = slots[free]
+                reading = state_now == "reading"
+                tok_now = live.get("tok_s")
+                row["state"] = "reading" if reading else "generating"
+                row["tok_s"] = tok_now if not reading and isinstance(tok_now, (int, float)) else 0.0
+                row["generated"] = live.get("generated")
+                row["prompt_tokens"] = live.get("prompt_tokens")
+                row["elapsed_s"] = live.get("elapsed_s")
+        engine = data.get("engine") if isinstance(data.get("engine"), dict) else {}
+        history = data.get("history") if isinstance(data.get("history"), dict) else {}
+
+        def _tail60(seq: Any) -> list[Any]:
+            if not isinstance(seq, list):
+                return []
+            return [v if isinstance(v, (int, float)) else None for v in seq[-60:]]
+
+        history_tok = _tail60(history.get("tok_s"))
+        slot_hist = history.get("slot_tok_s")
+        slot_hist = [_tail60(a) for a in slot_hist if isinstance(a, list)] if isinstance(slot_hist, list) else []
+        parallel = live.get("parallel")
+        if not isinstance(parallel, (int, float)):
+            parallel = slot_total
+        if not isinstance(parallel, (int, float)):
+            parallel = live.get("active")
+        if not isinstance(parallel, (int, float)):
+            parallel = len(slots) if slots else None
+        running = live.get("running")
+        if not isinstance(running, (int, float)):
+            running = live.get("active")
+        if not isinstance(running, (int, float)) and isinstance(raw_slots, dict):
+            running = raw_slots.get("active")
+        queued = live.get("queued")
+        if not isinstance(queued, (int, float)):
+            queued = queue_depth
+        fetched_at = data.get("time") if isinstance(data, dict) else None
+        if not isinstance(fetched_at, (int, float)):
+            fetched_at = time.time()
+        return {
+            "sid": sid,
+            "backend": s.get("backend"),
+            "backend_name": s.get("backend_name"),
+            "fetched_at": fetched_at,
+            "server": {
+                "model": engine.get("model_label") or engine.get("model") or "",
+                "max_context": engine.get("max_context"),
+            },
+            "live": {
+                "state": live.get("state") or "",
+                "tok_s": live.get("tok_s"),
+                "tok_s_mean": live.get("tok_s_mean"),
+                "prefill_tok_s_mean": live.get("prefill_tok_s_mean"),
+                "parallel": parallel,
+                "running": running,
+                "active": live.get("active"),
+                "writing": live.get("writing"),
+                "waiting": live.get("waiting"),
+                "admitting": live.get("admitting"),
+                "outside_slots": live.get("outside_slots"),
+                "queued": queued,
+            },
+            "history": {"tok_s": history_tok, "slot_tok_s": slot_hist},
+            "slots": slots,
+        }
+
     # ----------------------------------------------------------- backends
 
     @app.put("/api/backends/{bid}")

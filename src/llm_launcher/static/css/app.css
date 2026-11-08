@@ -261,6 +261,51 @@ button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
 #home-live .mini{flex-wrap:wrap}
 #home-live .lact{display:flex;align-items:center;gap:6px;width:100%;justify-content:flex-end;flex-wrap:wrap;margin-top:-2px}
 #home-live .lact .upt{white-space:nowrap}
+/* デコード速度: basalt の Speed カード (1 秒サンプル / スロット毎の折れ線) を
+   白地のカードに合わせたもの。SVG の目盛り線は縦位置だけを共有する。 */
+.par-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;min-width:0}
+.par-lab{font-size:12px;color:var(--sub);font-weight:600;white-space:nowrap}
+.par-sel{width:auto;flex:0 1 auto;max-width:300px;min-height:34px;padding:5px 10px;font-size:12.5px;margin:0}
+.par-rate{display:flex;align-items:baseline;gap:4px;white-space:nowrap;margin-left:auto}
+.par-rate b{font-size:22px;font-weight:800;color:var(--acc);font-variant-numeric:tabular-nums;line-height:1}
+.par-unit{font-size:12px;font-weight:700;color:var(--text)}
+.par-sub{font-size:11.5px;color:var(--sub)}
+.par-chart-wrap{margin-top:10px;min-width:0}
+.par-meta{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--sub);min-width:0;margin:2px 0 4px}
+.par-meta span:nth-child(2){margin-left:auto;white-space:nowrap}
+.par-chart{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r2);padding:8px 10px 4px;position:relative}
+.par-chart svg{display:block;width:100%;height:180px}
+.par-chart-empty{min-height:180px;display:flex;align-items:center;justify-content:center;gap:8px;
+  background:var(--bg2);border:1px solid var(--line);border-radius:var(--r2);color:var(--sub);font-size:12.5px}
+.par-axis{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);padding:0 2px;margin-top:4px}
+.par-note{margin-top:10px;padding:8px 10px;border:1px dashed var(--line);border-radius:var(--r2);
+  color:var(--sub);font-size:12px;line-height:1.55;background:var(--bg2);overflow-wrap:anywhere}
+.par-note.err{border-color:#f0bbb7;background:#fce8e6;color:var(--err)}
+.par-slots{margin-top:10px;border-top:1px solid var(--line);padding-top:4px}
+/* basalt の Slots タブ: Slot N+状態 | tok/s | Last 60 s (スロット毎の独立グラフ) |
+   Output tok | Context | Accept。待機行は値だけを薄くし、グリッドの形を変えない */
+.par-srow{display:grid;grid-template-columns:104px 74px minmax(0,1fr) 88px 112px 64px;gap:10px;
+  align-items:center;padding:7px 2px;font-size:12.5px;min-width:0}
+.par-srow.par-head{font-size:11.5px;color:var(--sub);font-weight:700;padding:4px 2px}
+.par-srow.par-head .par-num,.par-srow.par-head .par-ctx{text-align:right}
+.par-srow + .par-srow{border-top:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.par-srow span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.par-num{font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;text-align:right}
+.par-num.mut,.par-ctx.mut{color:var(--sub)}
+.par-slotid{display:flex;flex-direction:column;line-height:1.25;min-width:0}
+.par-slotid .nm{font-weight:700}
+.par-slotid i{font-style:normal;font-size:11px;color:var(--sub)}
+.par-slotid i.ok{color:var(--ok);font-weight:700}
+.par-slotid i.warn{color:var(--warn);font-weight:700}
+.par-sk{min-width:0;height:34px}
+.par-sk svg{display:block;width:100%;height:34px}
+.par-sk-empty{color:var(--sub);text-align:center;line-height:34px}
+.par-foot{margin-top:6px;font-size:11.5px;color:var(--sub);font-variant-numeric:tabular-nums}
+/* 折れ線終端のラベル (basalt の "All" / "s1") */
+.par-cl{position:absolute;right:6px;transform:translateY(-50%);font-size:10.5px;font-weight:700;pointer-events:none;
+  font-variant-numeric:tabular-nums;background:color-mix(in srgb,var(--bg2) 78%,transparent);border-radius:3px;padding:0 3px}
+.par-empty{margin-top:10px;padding:18px 14px;border:1.5px dashed var(--line);border-radius:var(--r2);
+  text-align:center;color:var(--sub);font-size:13px;line-height:1.55}
 /* ---------------- playground ---------------- */
 #pg-msgs{max-height:56vh;min-height:130px;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:2px 2px 6px}
 .pg-msg{max-width:86%;padding:9px 12px;border-radius:10px;border:1px solid var(--line);font-size:14px;overflow-wrap:break-word;word-break:normal}

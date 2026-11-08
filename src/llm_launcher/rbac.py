@@ -121,6 +121,8 @@ def required_cap(method: str, path: str) -> str | None:
     if p.startswith("/api/sessions"):
         if p.endswith("/log"):
             return "logs"
+        if p.endswith("/parallel"):
+            return "dashboard"         # ホームのデコード速度グラフ (ホスト詳細と同じ開示範囲)
         if m == "DELETE":
             return "history"          # 履歴レコードの削除
         return CORE                    # 起動 / 停止 / 再起動
