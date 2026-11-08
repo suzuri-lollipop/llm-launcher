@@ -14,8 +14,14 @@ strata-<model>.json 生成 → 起動」を一体でやる対話インストー�
     upstream 実装そのもの (コピーも再発明もしない)
   * エンジンが読む NVIDIA CUDA ランタイムホイール (cuBLAS ほか) も純正 pip_cuda_libs()。
     これが `.venv/bin/python -m pip` を前提にするので、launcher 側は .venv を標準 venv+pip
-    で作っている (spec["venv_pip"])
-  * 在れば再取得しない (get_prebuilt が "ready-made engine already installed" で即 return)
+    で作っている (spec["venv_pip"])。純正 main と同じく **release エンジンのときだけ**呼ぶ
+    (ローカルビルドのエンジンは BUILD.json の cuda_dirs = システム CUDA を読む)
+  * 在れば再取得しない。source=local (この PC で ./setup.sh がビルドしたエンジン) は
+    純正設計上 get_prebuilt が黙って None を返す (既製で置き換えず build_engine 側が
+    source とカードを見て決める) ので、**driver が先に engine/BUILD.json を読んで**
+    「ローカルビルドで archs が合っている = 満足」と正しく判定する。arch が足りないとき
+    は純正なら再ビルドするところ — ここはコンパイルしないので理由を出して setup.sh へ
+    導線する (受信失敗と誤読しないこと。2026-11-09 の clean 再インストールで実証)
 
 純正実装の関数名 (gpus / gpu_problem / get_prebuilt / pip_cuda_libs) への結合なので、
 upstream の bump で driver が落ちたらジョブログに正直に出る — そのときは
@@ -74,6 +80,27 @@ def main() -> int:
                     "実験的 CUDA 12 エンジン / ソースビルドは ./setup.sh 1 回が正です "
                     "(docs/OLDER_GPUS.md)")
     gpu = {"arch": archs[-1], "archs": archs}
+    # 純正 main と同じ優先: engine/ に動くエンジンが在れば受信もビルドも不要。
+    # source=local は get_prebuilt が無出力で None を返す純正設計 (既製で上書きせず
+    # build_engine 側が決める) なので、ここで読んで判定する — 誤って「受信失敗」にしない
+    eng_dir = S.engine_dir(13)
+    info = eng_dir / "BUILD.json"
+    if info.is_file() and (eng_dir / getattr(S, "EXE", "strata")).is_file():
+        try:
+            meta = json.loads(info.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            meta = {}
+        if meta.get("source") == "local" and meta.get("backend") != "hip":
+            have = S.arch_numbers(meta.get("archs"))
+            miss = [a for a in archs if have and a not in have
+                    and not (meta.get("ptx") and a > max(have))]
+            if miss:
+                return fail(f"ローカルビルドのエンジン (v{meta.get('version')}, archs {have or '?'}) に "
+                            f"sm_{max(miss)} のコードがありません",
+                            "./setup.sh を 1 回実行するとこの PC で作り直します (ウィザードはコンパイルしません)")
+            print(f"strata_engine: エンジンは在ります (ローカルビルド v{meta.get('version')}, "
+                  f"archs {have or '?'}, vision {meta.get('vision', '?')}) — 受信もビルドも不要です")
+            return 0
     url = (os.environ.get("STRATA_PREBUILT_URL") or "").strip() or S.PREBUILT_URL
     print(f"strata_engine: 既製エンジンを受信します ({url}) archs={archs} vision=gpu")
     eng = S.get_prebuilt(url, gpu, "gpu")

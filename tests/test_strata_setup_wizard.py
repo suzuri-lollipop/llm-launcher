@@ -23,6 +23,8 @@ Strata の純正 setup.sh / setup.py は対話インストーラだが、機械�
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import subprocess
 import sys
 import time
@@ -157,6 +159,91 @@ def test_driver_fails_honestly_when_setup_py_is_not_stratas(tmp_path: Path):
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 1
     assert r.stdout.startswith("strata_engine:")
+
+
+# driver が純正名を持つ API の面 (gpus / gpu_problem / engine_dir / arch_numbers /
+# get_prebuilt / pip_cuda_libs / CUDA13_MIN_ARCH / PREBUILT_URL / EXE) を最小で模す stub。
+# engine/BUILD.json の source と env の切替で経路を選ぶ — 純正 get_prebuilt の
+# 「source=local は黙って None (ビルド側が譲られる)」を誤読しないことをここで押さえる。
+STUB_SETUP = '''
+import json, os, sys
+from pathlib import Path
+CUDA13_MIN_ARCH = 75
+PREBUILT_URL = "https://example.invalid/"
+EXE = "strata"
+def gpus(): return [{"index": 0, "name": "Fake PRO 4000", "arch": int(os.environ.get("STUB_GPU", "120"))}]
+def gpu_problem(g): return None
+def engine_dir(toolkit=13): return Path.cwd() / "engine"
+def arch_numbers(v): return [int(x) for x in (v or []) if str(x).isdigit()]
+def get_prebuilt(url, gpu, vision, updating=False, toolkit=13):
+    if os.environ.get("STUB_TRAP"):
+        raise SystemExit("get_prebuilt ran")
+    if os.environ.get("STUB_NONE"):
+        return None
+    e = Path("engine"); e.mkdir(exist_ok=True)
+    (e / EXE).write_bytes(b"#!/bin/sh\\n")
+    (e / "BUILD.json").write_text(json.dumps({"source": "release", "version": "0.1.57",
+                                              "archs": gpu["archs"]}))
+    return e
+def pip_cuda_libs(toolkit=13):
+    if os.environ.get("STUB_TRAP_CUDA"):
+        raise SystemExit("pip_cuda_libs ran")
+    Path("cuda_stamp").write_text("done")
+'''
+
+
+def _stub_repo(tmp_path: Path, build_json: dict | None) -> Path:
+    (tmp_path / "serve").mkdir()
+    (tmp_path / "serve" / "server.py").write_text("", encoding="utf-8")
+    (tmp_path / "setup.py").write_text(STUB_SETUP, encoding="utf-8")
+    if build_json is not None:
+        eng = tmp_path / "engine"
+        eng.mkdir()
+        (eng / "BUILD.json").write_text(json.dumps(build_json), encoding="utf-8")
+        (eng / "strata").write_bytes(b"#!/bin/sh\n")
+    return tmp_path
+
+
+def _run_driver(cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
+    e = dict(os.environ, **env)
+    return subprocess.run([sys.executable, str(DRIVER)], cwd=cwd, env=e,
+                          capture_output=True, text=True, timeout=60)
+
+
+def test_driver_accepts_local_engine_matching_arch(tmp_path: Path):
+    """./setup.sh でビルド済みのエンジン (source=local, archs=120) は「在る」で満足 —
+    get_prebuilt はこのとき呼ばれない (純正はビルド側へ譲す設計。trap で証明)。"""
+    _stub_repo(tmp_path, {"source": "local", "version": "0.1.57", "archs": [120], "vision": "gpu"})
+    r = _run_driver(tmp_path, {"STUB_TRAP": "1", "STUB_TRAP_CUDA": "1"})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "ローカルビルド" in r.stdout
+    assert "受信もビルドも不要" in r.stdout
+
+
+def test_driver_names_arch_gap_of_local_engine(tmp_path: Path):
+    """ローカルビルドのエンジンにこの GPU のコードが無いときは再ビルド導線 —
+    「受信失敗」と誤読せず、コンパイルしない立場を正直に出す。"""
+    _stub_repo(tmp_path, {"source": "local", "version": "0.1.57", "archs": [75]})
+    r = _run_driver(tmp_path, {"STUB_GPU": "120", "STUB_TRAP": "1"})
+    assert r.returncode == 1
+    assert "sm_120" in r.stdout and "setup.sh" in r.stdout
+
+
+def test_driver_fails_honestly_without_any_engine(tmp_path: Path):
+    """初回 (engine/ なし) で get_prebuilt が None (リリースに無い/不通) → rc 1 + setup.sh 案内。"""
+    _stub_repo(tmp_path, None)
+    r = _run_driver(tmp_path, {"STUB_NONE": "1"})
+    assert r.returncode == 1
+    assert "受信できませんでした" in r.stdout
+
+
+def test_driver_runs_pip_cuda_libs_only_for_release_engine(tmp_path: Path):
+    """受信経路 (release) は純正 main と同じく CUDA ホイールを入れる。local では呼ばない。"""
+    _stub_repo(tmp_path, None)
+    r = _run_driver(tmp_path, {})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "cuda_stamp").is_file()
+    assert "エンジン:" in r.stdout
 
 
 # ---------------------------------------------------------------- API / ウィザード文言
