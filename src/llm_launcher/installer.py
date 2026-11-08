@@ -54,10 +54,14 @@ LOG_TAIL = 400
 # 大きいと UI の進捗が鈍くなり、小さいとログが膨らむ。
 PROGRESS_MIN_INTERVAL = 1.0
 
-# UI からインストールできるバックエンド。strata / maya は setup.sh / maya.sh 側が
-# 対話プロンプトを含むため UI 化していない (導線を壊さない範囲で今後追加する)。
+# UI からインストールできるバックエンド。maya は maya.sh 側が対話プロンプトを含むため
+# UI 化していない (導線を壊さない範囲で今後追加する)。
 # requirements / cmake / engine_bin を持つ spec は FreeToken 系と打って変わって
 # 「pip のパッケージ化が無い + ネイティブビルド込み」の形 (Basalt) に対応する。
+# strata は純正 setup.sh / setup.py が対話インストーラなので、機械部分だけを薄い driver
+# (strata_engine.py) で UI に乗せた: .venv + requirements.txt + 公式リリースからの
+# 既製エンジン受信 (engine_fetch)。モデル選択・ダウンロード・strata-<model>.json 生成は
+# 引き続き setup.sh 1 回の手動領域 (エンジンも venv も在ればそこは素通りする)。
 INSTALL_SPECS: dict[str, dict[str, Any]] = {
     "freetoken-fork": {
         "clone": "https://github.com/suzuri-lollipop/FreeToken",
@@ -109,6 +113,28 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
             },
             "note": "モデル pack のダウンロード後に model / gpu / kv を環境に合わせてください",
         },
+    },
+    # Strata (https://github.com/Niko1221/Strata): サブモジュールだが .venv は無く、エンジン
+    # (engine/strata) も GPU ごとに公式リリースから受信する / コンパイルする (純正 setup.py の
+    # 対話手順)。UI 化するのは機械部分だけ: clone (submodule 取得済みならスキップ) →
+    # .venv → pip install -r requirements.txt → strata_engine.py が純正 setup.py の
+    # get_prebuilt() で既製エンジン + NVIDIA CUDA ホイールを入れる → verify
+    # (serve.server import + engine/strata 実行可)。純正 setup.py の pip_install は
+    # `.venv/bin/python -m pip` を前提にするため .venv は uv ではなく標準 venv+pip で作る
+    # (venv_pip)。GPU が古い / アーキが既製に無い場合はコンパイル領域なので setup.sh 1 回へ
+    # 正直に導線する (ジョブログに理由が出る)。
+    "strata": {
+        "clone": "https://github.com/Niko1221/Strata",
+        "ref": "",
+        "refs": [],
+        "fork_name": "",
+        "module_path": "module/strata",
+        "check": "serve.server",         # submodule を cwd にした実 import (検出と同じ)
+        "extras": "",                    # -e . ではなく requirements.txt 側で入れる
+        "requirements": "requirements.txt",
+        "venv_pip": True,                # 標準 venv+pip (upstream setup.py が -m pip を使う)
+        "engine_fetch": True,            # strata_engine.py で既製エンジンを受信する step
+        "engine_bin": "engine/strata",   # precheck / verify はこれも要求する
     },
 }
 
@@ -548,8 +574,12 @@ class InstallManager:
 
         if needs_clone and not spec["clone"]:
             raise InstallError(f"{module_rel} がありません")
-        tool = install_tool()
-        uv_path = find_uv()
+        # venv_pip spec (Strata) は uv が在っても標準 venv+pip で作る: upstream の pip_install が
+        # `.venv/bin/python -m pip` を前提にするため、uv_path を空にして venv 作成・install・
+        # 表示 (job["tool"]) をまとめて pip に寄せる (表示と実行が同じ判定から出ることは崩さない)
+        venv_pip = bool(spec.get("venv_pip"))
+        uv_path = "" if venv_pip else find_uv()
+        tool = "uv" if uv_path else "pip"
         venvpy = str(module_dir / ".venv" / "bin" / "python")
         # requirements 系 spec (Basalt) は verify でもネイティブエンジンの実在を要求する。
         # precheck が通らない = 依存 or エンジンのどれかが欠けている、ということで
@@ -585,6 +615,13 @@ class InstallManager:
         else:
             install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off", *spec_args]
         steps.append({"name": "install", "argv": install_argv, "cwd": str(module_dir)})
+        if spec.get("engine_fetch"):
+            # Strata: 純正 setup.py の get_prebuilt() を薄い driver から呼んで既製エンジンを
+            # 受信する (engine/strata + CUDA ホイール)。GPU が既製に無い環境は driver が
+            # 理由を出して失敗し、setup.sh 1 回へ導線する (ここでコンパイルはしない)
+            steps.append({"name": "engine",
+                          "argv": [venvpy, str(Path(__file__).parent / "strata_engine.py")],
+                          "cwd": str(module_dir)})
         if spec.get("cmake"):
             if not shutil.which("cmake"):
                 raise InstallError("cmake が見つかりません (Basalt のエンジンビルドに必要です。"

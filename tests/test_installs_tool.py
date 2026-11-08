@@ -181,9 +181,9 @@ def test_api_reports_the_real_install_tool(monkeypatch, tmp_path: Path):
 # --------------------------------------------------------- セットアップ画面の配線
 
 @pytest.mark.parametrize("probe, why", [
-    ("toolLabel()", "セットアップ画面: tool → 表示文言の対応 (1 箇所だけ)"),
-    ('tool: inst.tool || "uv"', "refresh で API の tool を取り込む"),
-    ('${toolLabel()} -e', "手順プレビューが実ツールの文言を作る"),
+    ("toolLabelFor", "セットアップ画面: tool → 表示文言の対応 (1 箇所だけ)"),
+    ("tool: inst.tool || \"uv\"", "refresh で API の tool を取り込む"),
+    ('${toolLabel(sp)} -e', "手順プレビューが実ツールの文言を作る (venv_pip 対応で spec.tool 優先)"),
 ])
 def test_setup_screen_labels_install_with_the_real_tool(probe: str, why: str):
     assert probe in SETUP, why

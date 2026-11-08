@@ -33,7 +33,8 @@ async function api(path, opts = {}) {
 /* ---------------------------------------------------------------- 状態 */
 const INS_STEPS = { clone: "リポジトリを取得 (clone)", branch: "ブランチ切替", venv: "実行環境を作成",
                     precheck: "インストール内容を確認", cmake: "エンジンを設定 (cmake)",
-                    "cmake-build": "エンジンをビルド (cmake)", verify: "動作確認 (import)" };
+                    "cmake-build": "エンジンをビルド (cmake)", engine: "エンジンを受信 (公式リリース)",
+                    verify: "動作確認 (import)" };
 const CAL_STEPS = { prepare: "調整の準備", auto: "最適構成を自動で探す", lookup: "キャッシュを引く",
                     sweep: "実際に測る (実測)", create: "プロファイルを更新", adjust: "調整を反映",
                     restart: "サーバーを起動し直す" };
@@ -56,9 +57,13 @@ const W = {
 };
 const spec = id => (W.installs.installable || []).find(e => e.id === (id ?? W.backend)) || null;
 const specName = id => (spec(id) || {}).name || id || "";
-const toolLabel = () => W.installs.tool === "pip" ? "pip install" : "uv pip install";
+/* install ステップの実体は uv があれば uv pip、無い環境だけ venv の pip。venv_pip の
+   バックエンド (Strata) は uv が在っても pip を使うので、spec / ジョブが返す tool を優先する
+   (UI の手順名は実際に走る argv と同じ判定から出す)。 */
+const toolLabelFor = t => (t || W.installs.tool) === "pip" ? "pip install" : "uv pip install";
+const toolLabel = sp => toolLabelFor((sp || spec() || {}).tool);
 const stepLabel = (name, kind) => kind === "install"
-  ? (name === "install" ? toolLabel() : (INS_STEPS[name] || name))
+  ? (name === "install" ? toolLabelFor((W.job || {}).tool) : (INS_STEPS[name] || name))
   : (CAL_STEPS[name] || name);
 
 /* ---------------------------------------------------------------- 画面遷移 */
@@ -224,15 +229,17 @@ function renderReview() {
     ["ソフト", `${esc(sp.name)} <span class="mono">${esc(sp.module_path)}</span>`],
     ["バージョン", W.ref ? esc(W.ref) : "既定"],
     ["実行内容", `1. リポジトリを取得 (git clone)<br>2. 実行環境を作成 (.venv)<br>`
-      + `3. 依存パッケージを導入 (${sp.requirements ? `${toolLabel()} -r ${esc(sp.requirements)}` : esc(toolLabel())})`
-      + (sp.cmake ? "<br>4. ネイティブエンジンをビルド (cmake → bin/basalt)" : "")],
+      + `3. 依存パッケージを導入 (${sp.requirements ? `${toolLabel(sp)} -r ${esc(sp.requirements)}` : esc(toolLabel(sp))})`
+      + (sp.cmake ? "<br>4. ネイティブエンジンをビルド (cmake → bin/basalt)" : "")
+      + (sp.engine_fetch ? "<br>4. ネイティブエンジンを受信 (公式リリース → engine/strata)" : "")],
     ["この後の予定", doing],
   ];
   $("#rv-rows").innerHTML = rows.map(([k, v]) =>
     `<div class="row-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   $("#rv-preview").textContent = `git clone → .venv → `
-    + (sp.requirements ? `${toolLabel()} -r ${sp.requirements}` : `${toolLabel()} -e ".[${sp.extras || "accel"}]"`)
-    + (sp.cmake ? " → cmake configure + build" : "");
+    + (sp.requirements ? `${toolLabel(sp)} -r ${sp.requirements}` : `${toolLabel(sp)} -e ".[${sp.extras || "accel"}]"`)
+    + (sp.cmake ? " → cmake configure + build" : "")
+    + (sp.engine_fetch ? " → エンジン受信 (公式リリース)" : "");
   $("#rv-start").disabled = false;
   $("#rv-start").textContent = "インストール";
   go("s-review");
@@ -309,13 +316,22 @@ async function pollTick() {
     finishJob();
   }
 }
+/* インストール完了後の追い書き: Strata は .venv / 依存 / エンジンまでをここで入れるが、
+   モデルの選択・ダウンロード・strata-<model>.json 生成は Strata 側の対話手順 (setup.sh 1 回)。
+   .venv とエンジンが在れば setup.sh のその手順は素通りなので、導線としては短い。 */
+const INSTALL_NOTES = {
+  strata: "次は module/strata で ./setup.sh を 1 回実行して、モデルの選択・ダウンロードと "
+    + "strata-<model>.json の作成を済ませてください (.venv / 依存 / エンジンは導入済みなので "
+    + "setup.sh のそれら手順はそのまま素通りします)。",
+};
 function finishJob() {
   const r = W.job || {};
   if (W.kind === "install") {
     if (r.status === "done") {
       W.summary.push({ ok: true, t: `${specName(r.backend)} をインストールしました` });
       $("#ok-title").textContent = `${specName(r.backend)} のインストールが完了しました`;
-      $("#ok-sub").textContent = "次はモデルのダウンロードです。まだモデルが無い場合はダウンロードしてください。";
+      $("#ok-sub").textContent = INSTALL_NOTES[r.backend]
+        || "次はモデルのダウンロードです。まだモデルが無い場合はダウンロードしてください。";
       go("s-installed");
     } else {
       renderProgress();

@@ -2062,9 +2062,14 @@ def create_app(root: Path) -> FastAPI:
                  "current_ref": current_ref(root, spec), "cloned": clone_exists(root, spec),
                  "module_path": spec["module_path"], "extras": spec["extras"],
                  # requirements 系 (pyproject の無いリポジトリ) / cmake ビルド有無は
-                 # セットアップタブのプレビュー文言組み立てに使う (Basalt 対応)
+                 # セットアップタブのプレビュー文言組み立てに使う (Basalt 対応)。
+                 # engine_fetch = Strata の既製エンジン受信 step (strata_engine.py)。
+                 # tool = このバックエンドで実際に走る install ツール表示: venv_pip spec
+                 # (Strata) は uv が在っても pip を使うので、UI の手順名をジョブ実体と揃える
                  "requirements": spec.get("requirements", ""),
                  "cmake": bool(spec.get("cmake")),
+                 "engine_fetch": bool(spec.get("engine_fetch")),
+                 "tool": "pip" if spec.get("venv_pip") else install_tool(),
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
                                 if BACKENDS[bid].get("model_data") else ""),
                  # 対応モデル一覧: clone 内の docs/models.md (model_list_doc) を読んだ既知の正常構成。
