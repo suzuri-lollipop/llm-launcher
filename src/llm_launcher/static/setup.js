@@ -1158,6 +1158,11 @@ $("#nt-go").addEventListener("click", async () => {
 $("#nt-skip").addEventListener("click", () => { renderCal(); go("s-cal"); });
 
 /* ---------------------------------------------------------------- 3: 調整 */
+function calPick(profs) {
+  const mine = W.calProfile && profs.find(x => x.id === W.calProfile.id);
+  if (mine) return mine;
+  return profs.slice().sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0))[0] || null;
+}
 async function renderCal() {
   const runOpt = $$("#ca-list input").find(i => i.value === "run");
   const canCal = W.me && (W.me.role === "admin" || !W.me.auth_enabled || (W.me.perms || {}).calibrate);
@@ -1173,6 +1178,11 @@ async function renderCal() {
       && p.backend === W.backend);
     ok = canCal && !calOff && profs.length > 0;
     W.calProfiles = profs;
+    /* ⑤ の対象は ③ で作り/編集したプロファイル (W.calProfile)。re-load で
+       W.calProfile を失ったときは「最近更新した自バックエンドのプロファイル」に
+       倒す — 一覧先頭 (最古) を選んで他人のプロファイルを触る事故防止
+       (2026-11-09: 旧プロファイル p_6acf49a3ad87 を掴んで config 整合チェックに弾かれた) */
+    W.calPick = calPick(profs);
     if (calOff) {   // 調整が無いバックエンド (basalt 等) は調整画面を出さずに完了へ
       W.summary.push({ ok: true, t: "このバックエンドはキャリブレーション非対応のため、調整はスキップしました" });
       renderDone(); go("s-done"); return;
@@ -1182,6 +1192,8 @@ async function renderCal() {
     if (!canCal) $("#ca-sub").textContent = "調整はキャリブレーション権限のあるアカウントで実行できます。";
     else if (calOff) $("#ca-sub").textContent = "このバックエンドはキャリブレーションに対応していません (調整なしで完了できます)。";
     else if (!profs.length) $("#ca-sub").textContent = "調整対象のプロファイルがまだありません。プロファイルを作成してから、ダッシュボードの「キャリブレーション」で実行してください。";
+    else $("#ca-sub").textContent = "調整 (キャリブレーション) はこの機械向けの性能調整です。実行中は GPU を独占します。"
+      + "対象: " + (W.calPick ? W.calPick.name : "(未選択)");
   } catch { ok = false; }
   runOpt.disabled = !ok;
   $$("#ca-list .opt").forEach(o => { if (o.contains(runOpt)) o.style.opacity = ok ? "" : ".45"; });
@@ -1198,9 +1210,11 @@ $$("#ca-list input").forEach(i => i.addEventListener("change", syncCalSel));
 $("#ca-go").addEventListener("click", async () => {
   const run = $$("#ca-list input").find(i => i.checked)?.value === "run";
   if (!run) { renderDone(); go("s-done"); return; }
-  const sp = spec();
   const profs = W.calProfiles || [];
-  const p = profs.find(x => x.backend === W.backend) || profs.find(x => (sp || {}).name && x.backend === (sp.id)) || profs[0];
+  /* 対象は renderCal が決めた W.calPick (③ で作ったプロファイル優先)。
+     profs[0] = 一覧の最古プロファイルで、Strata 側保存との config 整合チェックに
+     弾かれるか別設定を調整してしまう (2026-11-09 の事故) */
+  const p = W.calPick || calPick(profs) || profs[0];
   if (!p) { W.summary.push({ ok: false, t: "調整対象のプロファイルがなく、スキップしました" }); renderDone(); go("s-done"); return; }
   try {
     const job = await api("/api/calibrations", { method: "POST", body: { profile_id: p.id, restart_after: false } });

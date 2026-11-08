@@ -277,6 +277,10 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     assert "/api/installs/strata-model" in js
     assert "md-strata" in js
     assert 'model: "config"' in js         # RUNCFG.strata → values.config
+    # ⑤ は ③ で作ったプロファイル (W.calPick) を調整する — 一覧先頭 (最古) を
+    # 掴んで別プロファイルの config 整合チェックに弾かれる事故の回帰防止
+    assert "W.calPick" in js
+    assert "対象: " in js
     html = (static / "setup.html").read_text("utf-8")
     assert 'id="md-strata"' in html and 'id="md-strata-exist"' in html
     tab = (static / "js" / "views" / "setup.js").read_text("utf-8")
