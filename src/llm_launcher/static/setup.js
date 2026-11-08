@@ -448,12 +448,23 @@ function mdStFillSizes() {
   $("#md-vision-opt").classList.toggle("sel", $("#md-vision").checked);
   mdStHint();
 }
+function mdStRecCtx() {
+  const d = mdStModels()[W.mdStModel] || {};
+  return Number(d.rec_context) || 131072;
+}
 function mdStFillCtx() {
   const st = W.mdStrata || {};
-  const cs = (st.contexts || []).length ? st.contexts : [8192, 32768, 65536, 131072, 204800, 262144];
-  if (!cs.includes(W.mdStCtx)) W.mdStCtx = cs.includes(131072) ? 131072 : cs[Math.floor(cs.length / 2)];
+  const fam = (st.families || {})[W.mdStFam] || {};
+  const maxc = Number(fam.max_context) || 524288;
+  const cs = ((st.contexts || []).length ? st.contexts : [8192, 32768, 65536, 131072, 204800, 262144])
+    .filter(c => c <= maxc);
+  // 既定は純正の推奨 (own_path_context / ram_ctx)。家族・サイズを変えたら推奨へ戻る
+  const rec = mdStRecCtx();
+  if (!cs.includes(W.mdStCtx) || W.mdStCtxRec !== rec) W.mdStCtx = cs.includes(rec) ? rec : 131072;
+  W.mdStCtxRec = rec;
   $("#md-ctx").innerHTML = cs.map(c => `<option value="${c}"${c === W.mdStCtx ? " selected" : ""}>`
-    + `${c >= 1024 ? Math.round(c / 1024) + "K" : c}${c === W.mdStCtx ? " (既定)" : ""}</option>`).join("");
+    + `${c >= 1024 ? Math.round(c / 1024) + "K" : c}${c === rec ? " (推奨)" : c > rec ? " (大)" : ""}</option>`).join("");
+  mdStHint();   // 推奨と選択の差はヒントに出す (サイズ変更後は ctx が後から変わるためここで再計算)
 }
 function mdStHint() {
   const st = W.mdStrata || {};
@@ -465,6 +476,12 @@ function mdStHint() {
   if (d.download_gb) parts.push(`ダウンロード ${d.download_gb} GB`);
   if (d.ram_gb) parts.push(`RAM ${d.ram_gb} GB 推奨`);
   if (pc.disk_free_gb) parts.push(`モデル保存先 (${pc.data_dir || "Strata-data"}) の空き ${pc.disk_free_gb} GB`);
+  /* 純正の対話と同じ立場: 推奨より大きいコンテキストは「注記して従う」。
+     24GB クラスで 512K はエンジン起動時の KV 確保に失敗しうる (2026-11-09 実測) */
+  const rec = mdStRecCtx();
+  if (W.mdStCtx > rec) {
+    parts.push(`※ コンテキスト ${Math.round(W.mdStCtx / 1024)}K はこの PC 向け推奨 ${Math.round(rec / 1024)}K より大きい — 起動時に VRAM/RAM 不足で失敗することがあります`);
+  }
   $("#md-strata-hint").textContent = parts.join(" ・ ");
 }
 function mdSync() {
@@ -561,7 +578,7 @@ $("#md-repo").addEventListener("input", mdSync);
 $("#md-family").addEventListener("change", () => {
   W.mdStFam = $("#md-family").value; W.mdStModel = ""; mdStFillSizes(); mdSync(); });
 $("#md-size").addEventListener("change", () => { W.mdStModel = $("#md-size").value; mdStFillSizes(); mdStFillCtx(); mdSync(); });
-$("#md-ctx").addEventListener("change", () => { W.mdStCtx = parseInt($("#md-ctx").value, 10); mdSync(); });
+$("#md-ctx").addEventListener("change", () => { W.mdStCtx = parseInt($("#md-ctx").value, 10); mdStHint(); mdSync(); });
 $("#md-vision").addEventListener("change", () => {
   $("#md-vision-opt").classList.toggle("sel", $("#md-vision").checked); mdSync(); });
 $("#md-strata-exist").addEventListener("change", mdSync);
@@ -612,8 +629,11 @@ async function mdStartStrata(btn) {
   }
   btn.disabled = true; btn.textContent = "開始中…";
   try {
+    /* vision ON = --vision を渡さない = 純正のマシン既定 (own-path 系は VRAM が
+       24GB 未満なら CPU エンコーダ、以上で GPU エンコーダ。2026-11-09: 24.4GB 未満
+       のこの PC で --vision gpu を送るのは推奨外)。OFF = 明示の "no" */
     const vision = ($("#md-vision-opt").style.display === "none") ? ""
-                 : ($("#md-vision").checked ? "gpu" : "no");
+                 : ($("#md-vision").checked ? "" : "no");
     const job = await api("/api/installs/strata-model", { method: "POST",
       body: { family: W.mdStFam, model: W.mdStModel,
               context: parseInt($("#md-ctx").value, 10) || 131072, vision } });

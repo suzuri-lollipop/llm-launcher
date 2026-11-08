@@ -281,6 +281,9 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     # 掴んで別プロファイルの config 整合チェックに弾かれる事故の回帰防止
     assert "W.calPick" in js
     assert "対象: " in js
+    # ② のコンテキスト既定 = 純正の推奨 (own_path_context / ram_ctx) + 大選択の注記
+    assert "rec_context" in js and "(推奨)" in js
+    assert "rec_context" in (static.parent / "strata_setup.py").read_text("utf-8")
     html = (static / "setup.html").read_text("utf-8")
     assert 'id="md-strata"' in html and 'id="md-strata-exist"' in html
     tab = (static / "js" / "views" / "setup.js").read_text("utf-8")
@@ -359,6 +362,14 @@ def test_build_argv_against_real_submodule():
     opts = strata_setup.load_options(mod)
     assert opts.get("available") is True
     assert opts.get("contexts"), "CONTEXTS が読めない"
+    # 推奨コンテキスト / 上限 / VRAM は純正の式・実測がそのまま乗っている (UI の既定用)
+    pc = opts.get("pc") or {}
+    assert pc.get("ram_gb") and pc.get("vram_gb") is not None
+    q = (opts.get("families") or {}).get("qwen") or {}
+    assert q.get("max_context") == max(opts["contexts"])
+    m = next(iter((q.get("models") or {}).values()), {})
+    if "rec_context" in m:
+        assert m["rec_context"] in opts["contexts"]
     argv, cfg = strata_setup.build_argv(mod, {"family": "qwen", "model": "Q2_0",
                                               "context": 131072, "vision": "no"})
     assert argv[:2] == ["setup.py", "--family"] and argv[-3:] == ["--yes", "--no-start", "--no-browser"]

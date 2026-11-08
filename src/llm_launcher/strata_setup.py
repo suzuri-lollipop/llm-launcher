@@ -55,6 +55,11 @@ try:
 except Exception:
     pc["ram_gb"] = None
 try:
+    usable = [g for g in S.gpus() if S.gpu_problem(g) is None]
+    pc["vram_gb"] = round(max([float(g.get("vram_gb") or 0.0) for g in usable], default=0.0), 1)
+except Exception:
+    pc["vram_gb"] = None
+try:
     data = S.home().parent / "Strata-data"
     probe = data if data.exists() else data.parent
     free = shutil.disk_usage(str(probe)).free / 2**30
@@ -62,6 +67,24 @@ try:
     pc["disk_free_gb"] = round(free, 1)
 except Exception:
     pass
+# 推奨コンテキストは純正の式そのもの (own-path / multi-file 系は own_path_context、
+# flash-next 系は min(128K, ram_ctx))。UI は既定を推奨にして、より大きい選択に注記を出す
+# — 純正の対話質問の「(recommended for your GPU)」と同じ立場 (大きくても注記して従う)。
+ram = pc.get("ram_gb") or 0.0
+vram = pc.get("vram_gb") or 0.0
+multi = getattr(S, "MULTI_FILE_FAMILIES", {})
+own = getattr(S, "PREVIEW_FAMILIES", {})
+for fid, f in fams.items():
+    raw = getattr(S, "FAMILIES", {}).get(fid) or own.get(fid) or multi.get(fid) or {}
+    f["max_context"] = 262144 if fid in multi else (max(S.CONTEXTS) if getattr(S, "CONTEXTS", []) else 524288)
+    for m in f["models"]:
+        try:
+            if fid in own or fid in multi:
+                f["models"][m]["rec_context"] = int(S.own_path_context(raw, vram))
+            else:
+                f["models"][m]["rec_context"] = int(min(131072, S.ram_ctx(m, ram, False)))
+        except Exception:
+            pass
 print(json.dumps({"families": fams, "contexts": list(getattr(S, "CONTEXTS", [])), "pc": pc}))
 """
 
