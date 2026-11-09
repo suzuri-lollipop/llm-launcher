@@ -452,6 +452,46 @@ def test_strata_model_api(tmp_path: Path):
                        json={"family": "", "model": "Q2_0"}).status_code == 422
 
 
+def test_installed_configs_weights_status(tmp_path: Path):
+    """「JSON が在る」だけでは起動能否は分からない — config が参照する重みの
+    実在 (単一ファイル / マルチシャード / --pack ディレクトリ / tokenizer) を検証する。"""
+    mod = tmp_path / "module" / "strata"
+    mod.mkdir(parents=True)
+    wdir = tmp_path / "data" / "models"
+    wdir.mkdir(parents=True)
+    (wdir / "solo.gguf").write_bytes(b"x" * (2**30 // 4))       # 0.25 GiB
+    for n in (1, 2):
+        (wdir / f"M-0000{n}-of-00003.gguf").write_bytes(b"x")   # 3 枚のうち 2 枚だけ
+    pack = tmp_path / "data" / "packs" / "pk1"
+    (pack / "sub").mkdir(parents=True)
+    (pack / "sub" / "a.gguf").write_bytes(b"x")
+    tok = tmp_path / "data" / "tok"
+    tok.mkdir()
+
+    def cfg(name: str, data: dict) -> None:
+        (mod / name).write_text(json.dumps(data), encoding="utf-8")
+
+    cfg("strata-solo.json", {"exe": "e", "args": ["--native", str(wdir / "solo.gguf")],
+                             "tokenizer": str(tok)})
+    cfg("strata-shards.json", {"exe": "e", "args": ["--native", str(wdir / "M-00001-of-00003.gguf")],
+                               "tokenizer": str(tok)})
+    cfg("strata-pack.json", {"exe": "e", "args": ["--pack", str(pack)], "tokenizer": str(tok)})
+    cfg("strata-norefs.json", {"exe": "e", "args": [], "tokenizer": str(tok)})
+    cfg("strata-gone.json", {"exe": "e", "args": ["--native", str(wdir / "gone.gguf")],
+                             "tokenizer": str(tok)})
+    cfg("strata-notok.json", {"exe": "e", "args": ["--native", str(wdir / "solo.gguf")],
+                              "tokenizer": str(tmp_path / "data" / "no-tok")})
+    got = {c["name"]: c["weights"] for c in strata_setup.installed_configs(mod)}
+    assert got["strata-solo.json"]["ok"] is True
+    assert got["strata-solo.json"]["size_gb"] == 0.3 or got["strata-solo.json"]["size_gb"] > 0
+    assert got["strata-shards.json"]["ok"] is False
+    assert "M-00003-of-00003.gguf" in got["strata-shards.json"]["missing"]
+    assert got["strata-pack.json"]["ok"] is True
+    assert got["strata-norefs.json"]["ok"] is None       # 判断しない (UI は素通し)
+    assert got["strata-gone.json"]["ok"] is False
+    assert got["strata-notok.json"]["ok"] is False       # tokenizer ディレクトリ欠損
+
+
 def test_strata_model_api_lists_installed_configs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from fastapi.testclient import TestClient
 

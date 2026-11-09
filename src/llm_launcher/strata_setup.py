@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -132,6 +133,61 @@ def load_options(module_dir: Path) -> dict[str, Any]:
     return out
 
 
+_SHARD_RE = re.compile(r"^(.*-)(\d{5})-of-(\d{5})(\.\w+)$")
+_PACK_SUFFIXES = (".gguf", ".bin", ".safetensors")
+
+
+def weights_status(data: dict) -> dict:
+    """config JSON が参照する重みの実在チェック — 「一覧に JSON が並んでいる」だけでは
+    起動能否は分からない (削除/移動済み・シャード欠損がある)。参照パターンは純正 config の
+    3 種: --native/--model/--gguf/-m のファイル (マルチシャードは -0000X-of-0000N の
+    兄弟も)、--pack のディレクトリ、vision.model/mmproj。tokenizer ディレクトリも見る。
+    ok=None は「参照が見付からない config」= 判断しない (UI は重み表示なしで通す)。"""
+    args = data.get("args") or []
+    refs: list[Path] = []
+    for i, a in enumerate(args[:-1]):
+        if str(a) in ("--native", "--model", "--gguf", "-m", "--pack"):
+            refs.append(Path(str(args[i + 1])))
+    v = data.get("vision") or {}
+    for k in ("model", "mmproj"):
+        p = Path(str(v.get(k) or ""))
+        if v.get(k) and p not in refs:
+            refs.append(p)
+    missing: list[str] = []
+    present = 0
+    total = 0.0
+    tok = str(data.get("tokenizer") or "")
+    if tok and not Path(tok).is_dir():
+        missing.append("tokenizer")        # 早期 return しない — 重み側の欠損も並べて出す
+    if not refs:
+        return {"ok": None if not missing else False, "size_gb": None, "missing": missing}
+    for p in refs:
+        if p.is_dir():
+            files = [f for f in p.rglob("*") if f.is_file() and f.suffix in _PACK_SUFFIXES]
+            if files:
+                present += 1
+                total += sum(f.stat().st_size for f in files) / 2**30
+            else:
+                missing.append(p.name)
+        elif p.is_file():
+            present += 1
+            total += p.stat().st_size / 2**30
+            m = _SHARD_RE.match(p.name)
+            if m:
+                for n in range(1, int(m.group(3)) + 1):
+                    sib = p.with_name(f"{m.group(1)}{n:05d}-of-{m.group(3)}{m.group(4)}")
+                    if sib == p:
+                        continue
+                    if sib.is_file():
+                        total += sib.stat().st_size / 2**30
+                    else:
+                        missing.append(sib.name)
+        else:
+            missing.append(p.name)
+    return {"ok": present > 0 and not missing, "size_gb": round(total, 1) if total else None,
+            "missing": missing[:8]}
+
+
 def installed_configs(module_dir: Path) -> list[dict[str, Any]]:
     """既に設定済みの strata-<model>.json (純正 setup が作った / 前回この画面で作った)。"""
     out = []
@@ -146,6 +202,7 @@ def installed_configs(module_dir: Path) -> list[dict[str, Any]]:
             continue
         out.append({"file": str(p), "name": p.name,
                     "model_name": str(data.get("model_name") or p.stem[len("strata-"):] or ""),
+                    "weights": weights_status(data),
                     "mtime": p.stat().st_mtime})
     out.sort(key=lambda x: -x["mtime"])
     return out

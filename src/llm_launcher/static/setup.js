@@ -502,9 +502,15 @@ function mdSync() {
       $("#md-dest").textContent = "ダウンロードと設定は Strata 本体の手順が走ります — 中断しても続きから再開できます";
     } else {
       btn.textContent = "このモデルで続ける";
-      btn.disabled = !$("#md-strata-exist").value;
       const c = (st.configs || []).find(x => x.file === $("#md-strata-exist").value);
-      $("#md-dest").textContent = c ? `設定ファイル: ${c.file}` : "";
+      const w = (c && c.weights) || {};
+      btn.disabled = !c || w.ok === false;
+      if (w.ok === false) {
+        $("#md-dest").textContent = "重みがディスク上にありません (" + (w.missing || []).slice(0, 3).join(", ")
+          + ((w.missing || []).length > 3 ? " ほか" : "") + ") — 「Strata にモデルを入れさせる」で再取得するか、この JSON を削除してください";
+      } else {
+        $("#md-dest").textContent = c ? `設定ファイル: ${c.file}` + (w.size_gb ? ` · 重み ${w.size_gb} GB` : "") : "";
+      }
     }
     return;
   }
@@ -594,8 +600,14 @@ async function renderModelStrata() {
     || '<option value="">(Strata のモデル一覧が読めません)</option>';
   mdStFillSizes(); mdStFillCtx();
   const cfgs = st.configs || [];
-  $("#md-strata-exist").innerHTML = cfgs.map((c, i) => `<option value="${esc(c.file)}"${i === 0 ? " selected" : ""}>`
-    + `${esc((c.model_name || c.name) + " — " + c.name)}</option>`).join("")
+  /* 一覧には JSON 名だけでなく「重みが実際に在るか / サイズ」を出す —
+     config だけ残って重みが削除済みの項目を選ばないために (server が実在検証) */
+  $("#md-strata-exist").innerHTML = cfgs.map((c, i) => {
+    const w = c.weights || {};
+    const tag = w.ok === false ? " · 重み欠損" : (w.size_gb ? " · 重み " + w.size_gb + " GB" : "");
+    return `<option value="${esc(c.file)}"${i === 0 ? " selected" : ""}>`
+      + `${esc((c.model_name || c.name) + " — " + c.name + tag)}</option>`;
+  }).join("")
     || '<option value="">(設定済みモデルがありません)</option>';
   /* 設定済み 0 件ならその択を不可にしてダウンロード択に寄せる */
   const localR = $$("#md-modes input").find(i => i.value === "local");
@@ -615,7 +627,7 @@ async function mdStartStrata(btn) {
   const st = W.mdStrata || {};
   if (mdMode() === "local") {
     const c = (st.configs || []).find(x => x.file === $("#md-strata-exist").value);
-    if (!c) return;
+    if (!c || (c.weights || {}).ok === false) return;   // 重み欠損はボタン側で既に不可 (二重ガード)
     /* 設定済み config は「完了済みのモデル構成ジョブ」に化かして
        稼働設定の values.config 解決をそのまま通す */
     W.kind = "install";
