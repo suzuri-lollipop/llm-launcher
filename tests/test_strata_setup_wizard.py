@@ -285,10 +285,11 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     assert "rec_context" in js and "(推奨)" in js
     assert "rec_context" in (static.parent / "strata_setup.py").read_text("utf-8")
     html = (static / "setup.html").read_text("utf-8")
-    assert 'id="md-strata"' in html
-    # 「設定済み JSON を選ぶ」択は廃止 — 一覧はモデルだけ (config JSON は内部の成果物)
-    assert 'id="md-strata-exist"' not in html
-    assert "取得済み" in js                 # サイズ選択肢の重み実在バッジ
+    assert 'id="md-strata"' in html and 'id="md-strata-exist"' in html
+    # ダウンロード済みモデル: ダウンロード択ではグレー (済み表記)、既定択は「ダウンロード済みの
+    # モデルを使う」でモデル名を並べる — JSON 名は UI に出さない (2026-11-09 の指摘)
+    assert "ダウンロード済み" in js
+    assert "strata-<model>.json をそのまま" not in js   # JSON 選択導線の回帰禁止
     tab = (static / "js" / "views" / "setup.js").read_text("utf-8")
     assert "モデル準備" in tab             # 📦 履歴の step / タイトル
 

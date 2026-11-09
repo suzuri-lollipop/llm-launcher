@@ -406,8 +406,8 @@ const mdMode = () => ($$("#md-modes input").find(i => i.checked) || {}).value ||
 const MD_LABELS = {
   other: [["モデルをダウンロードする", "対応モデルの一覧から選んで取得します"],
           ["ダウンロード済みのモデルを使う", "この PC にあるモデルから選びます (再取得しません)"]],
-  strata: [["Strata にモデルを入れさせる", "家系・サイズ・コンテキスト長を選ぶと、Strata 本体のセットアップ手順でダウンロードと設定作成まで走ります"],
-           ["設定済みの Strata モデルを使う", "すでに生成済みの strata-<model>.json をそのまま使います (再取得しません)"]],
+  strata: [["モデルをダウンロードする", "家系・サイズ・コンテキスト長を選ぶと、Strata 本体のセットアップ手順でダウンロードと設定作成まで走ります"],
+           ["ダウンロード済みのモデルを使う", "この PC に重みが在るモデルから選びます (再取得しません)"]],
 };
 function setMdModeLabels(isSt) {
   const L = isSt ? MD_LABELS.strata : MD_LABELS.other;
@@ -425,6 +425,10 @@ async function loadStrata() {
 function mdStModels() {
   return (((W.mdStrata || {}).families || {})[W.mdStFam] || {}).models || {};
 }
+function mdStFull(m) {
+  const h = (mdStModels()[m] || {}).have || {};
+  return !!(h.files && h.found >= h.files);
+}
 function mdStFillSizes() {
   const st = W.mdStrata || {};
   const ms = mdStModels();
@@ -434,18 +438,18 @@ function mdStFillSizes() {
   const fit = ids.filter(m => !(Number(ms[m].ram_gb) > ram))
                  .sort((a, b) => (ms[b].ram_gb || 0) - (ms[a].ram_gb || 0));
   const rec = fit[0] || ids[0] || "";
-  if (!ids.includes(W.mdStModel)) W.mdStModel = rec;
+  // ダウンロード択の一覧は「まだ無いモデル」から選ぶ — 済みのものはグレー表示 (選択不可)
+  if (!ids.includes(W.mdStModel) || mdStFull(W.mdStModel)) {
+    W.mdStModel = fit.find(m => !mdStFull(m)) || rec || "";
+  }
   $("#md-size").innerHTML = ids.map(m => {
     const d = ms[m] || {}; const bits = [];
-    const h = d.have || {};
-    if (h.files && h.found >= h.files) bits.push("取得済み" + (h.gb ? " " + h.gb + " GB" : ""));
-    else if (h.found) bits.push(`一部あり ${h.found}/${h.files}`);
-    if (d.download_gb) bits.push(`DL ${d.download_gb} GB`);
     if (d.ram_gb) bits.push(`RAM ${d.ram_gb} GB${ram && d.ram_gb > ram ? " ※この PC " + ram + " GB" : ""}`);
-    return `<option value="${esc(m)}"${m === W.mdStModel ? " selected" : ""}>`
-      + `${esc((d.label || m) + (bits.length ? " — " + bits.join(" / ") : "") + (m === rec ? " (この PC 推奨)" : ""))}</option>`;
+    if (!mdStFull(m) && d.download_gb) bits.push(`DL ${d.download_gb} GB`);
+    return `<option value="${esc(m)}"${m === W.mdStModel ? " selected" : ""}${mdStFull(m) ? " disabled" : ""}>`
+      + `${esc((d.label || m) + (mdStFull(m) ? " (ダウンロード済み" + (((d.have || {}).gb) ? " " + d.have.gb + " GB" : "") + ")" : "") + (bits.length ? " — " + bits.join(" / ") : "") + (m === rec && !mdStFull(m) ? " (この PC 推奨)" : ""))}</option>`;
   }).join("") || '<option value="">(サイズ一覧が空です)</option>';
-  // vision は対応パックだけ選択を出して既定 ON (GPU エンコーダ)。非対応は送信しない
+  // vision は対応パックだけ選択を出して既定 ON。非対応は送信しない
   const d = ms[W.mdStModel] || {};
   $("#md-vision-opt").style.display = d.vision ? "" : "none";
   $("#md-vision-opt").classList.toggle("sel", $("#md-vision").checked);
@@ -500,22 +504,27 @@ function mdSync() {
   $$("#md-modes .opt").forEach(o => {
     const i = o.querySelector("input"); o.classList.toggle("sel", i.checked); });
   if (W.backend === "strata") {
-    /* モデル選択一本: 「設定済み JSON を選ぶ」択は無い — 重みが在るモデルは同じ手順の
-       まま setup.py がダウンロードを素通りして config だけ作る (2026-11-09 の要望) */
-    const localOpt = $$("#md-modes .opt").find(o => (o.querySelector("input") || {}).value === "local");
-    if (localOpt) localOpt.style.display = "none";
-    const dlR = $$("#md-modes input").find(i => i.value === "dl");
-    if (dlR) dlR.checked = true;
+    /* 2 択は他バックエンドと同じ形: ダウンロード択 (済みのサイズはグレー) /
+       ダウンロード済みのモデルを使う (モデル名で並べ、JSON は一切見せない) */
     $("#md-adv").hidden = true;
     $("#md-repo").value = "";                        // repo id 直接入力は Strata では意味が無い
     ["#md-dl-field", "#md-local-field", "#md-speed-field"].forEach(s => $(s).classList.add("hidden"));
-    $("#md-strata").classList.remove("hidden");
+    $("#md-strata").classList.toggle("hidden", mode !== "dl");
+    $("#md-strata-exist-field").classList.toggle("hidden", mode !== "local");
     const btn = $("#md-start");
     const st = W.mdStrata || {};
-    const h = (mdStModels()[W.mdStModel] || {}).have || {};
-    btn.textContent = (h.files && h.found >= h.files) ? "モデル設定を作る" : "モデル設定を開始";
-    btn.disabled = !st.available || !st.venv_ready || !W.mdStFam || !W.mdStModel;
-    $("#md-dest").textContent = "ダウンロードと設定は Strata 本体の手順が走ります — 中断しても続きから再開できます";
+    if (mode === "dl") {
+      btn.textContent = "モデル設定を開始";
+      btn.disabled = !st.available || !st.venv_ready || !W.mdStFam || !W.mdStModel;
+      $("#md-dest").textContent = "ダウンロードと設定は Strata 本体の手順が走ります — 中断しても続きから再開できます";
+    } else {
+      btn.textContent = "このモデルで続ける";
+      btn.disabled = !$("#md-strata-exist").value;
+      const sel = (st.downloaded || []).find(x => x.key === $("#md-strata-exist").value);
+      $("#md-dest").textContent = sel
+        ? `重みはこの PC に在ります (${sel.gb || "?"} GB) — 再取得はありません`
+        : "";
+    }
     return;
   }
   setMdModeLabels(false);
@@ -526,6 +535,7 @@ function mdSync() {
   adv.hidden = mode !== "dl";
   if (mode !== "dl") $("#md-repo").value = "";       // 直接入力はダウンロード時のみ意味を持つ
   $("#md-strata").classList.add("hidden");
+  $("#md-strata-exist-field").classList.add("hidden");
   $("#md-dl-field").classList.toggle("hidden", mode !== "dl");
   $("#md-local-field").classList.toggle("hidden", mode !== "local");
   $("#md-speed-field").classList.toggle("hidden", mode !== "dl");
@@ -593,6 +603,7 @@ $("#md-size").addEventListener("change", () => { W.mdStModel = $("#md-size").val
 $("#md-ctx").addEventListener("change", () => { W.mdStCtx = parseInt($("#md-ctx").value, 10); mdStHint(); mdSync(); });
 $("#md-vision").addEventListener("change", () => {
   $("#md-vision-opt").classList.toggle("sel", $("#md-vision").checked); mdSync(); });
+$("#md-strata-exist").addEventListener("change", mdSync);
 async function renderModelStrata() {
   setMdModeLabels(true);
   W.mdStrata = null;          // 再入時は表も設定済み一覧も最新の取り直し (サーバー側に 60s キャッシュ)
@@ -604,15 +615,76 @@ async function renderModelStrata() {
     + `${esc(fams[f].title || f)}</option>`).join("")
     || '<option value="">(Strata のモデル一覧が読めません)</option>';
   mdStFillSizes(); mdStFillCtx();
+  /* ダウンロード済み一覧: 表から作る (モデル名 + サイズ + GB)。JSON 名は内部では
+     使うが UI には出さない — 「そのモデルが在る」だけがユーザーの情報 */
+  const dl = [];
+  for (const fid of famIds) {
+    const f = fams[fid];
+    for (const [m, d] of Object.entries(f.models || {})) {
+      if (mdStFullIn(f, m)) dl.push({ key: fid + "/" + m, fam: fid, model: m,
+                                      label: (f.title || fid) + " · " + (d.label || m),
+                                      gb: (d.have || {}).gb });
+    }
+  }
+  st.downloaded = dl;
+  $("#md-strata-exist").innerHTML = dl.map((x, i) => `<option value="${esc(x.key)}"${i === 0 ? " selected" : ""}>`
+    + `${esc(x.label + " — " + (x.gb || "?") + " GB")}</option>`).join("")
+    || '<option value="">(ダウンロード済みのモデルがありません)</option>';
+  const localR = $$("#md-modes input").find(i => i.value === "local");
+  localR.disabled = !dl.length;
+  $$("#md-modes .opt").forEach(o => { if (o.contains(localR)) o.style.opacity = dl.length ? "" : ".45"; });
+  if (localR.disabled && mdMode() === "local") {
+    $$("#md-modes input").find(i => i.value === "dl").checked = true;
+  }
   $("#md-err").classList.add("hidden");
   $("#md-sub").textContent = "Strata は家系・サイズ・コンテキスト長を選ぶだけです。Strata 本体のセットアップ手順がこのまま走り、"
-    + "ダウンロードから起動設定 (strata-<model>.json) の作成まで完了します。重みがこの PC に在るモデルは、"
-    + "受信を素通りして config の作成だけ走るので速いです。";
+    + "ダウンロードから起動設定 (strata-<model>.json) の作成まで完了します。ダウンロード済みのモデルは"
+    + "「ダウンロード済みのモデルを使う」から再取得なしで選べます。";
   mdSync();
+}
+function mdStFullIn(f, m) {
+  const h = ((f || {}).models || {})[m] || {};
+  const hv = h.have || {};
+  return !!(hv.files && hv.found >= hv.files);
 }
 /* ダウンロードの有無に関わらず同じ 1 経路: 純正 setup.py (再開対応・SHA-256 検証・
    既存ファイルは検証して素通り) をジョブとして走らせる。config JSON はその成果物 */
 async function mdStartStrata(btn) {
+  const st = W.mdStrata || {};
+  if (mdMode() === "local") {
+    const x = (st.downloaded || []).find(v => v.key === $("#md-strata-exist").value);
+    if (!x) return;
+    /* config JSON は内部の成果物 — 純正命名作法の config が在って重み ok ならそのまま採用、
+       重みが在るのに config が無い (削除/別経路) ときは同じジョブを走らせるだけで
+       setup.py が検証・受信素通り・config 作成をする (ダウンロードは起きない) */
+    const f = (st.families || {})[x.fam] || {};
+    const key = "strata-" + String((f.tag || "") + x.model).toLowerCase() + ".json";
+    const c = (st.configs || []).find(y => y.name === key && (y.weights || {}).ok === true);
+    if (c) {
+      W.kind = "install";
+      W.job = { id: "", kind: "install", phase: "model", status: "done", backend: "strata",
+                repo_id: "", config_name: c.name, model: x.fam + "/" + x.model,
+                result: { config: c.file } };
+      W.cfgProfId = null; W.cfgProfNew = false;
+      W.summary.push({ ok: true, t: `ダウンロード済みの ${x.label} を使用します` });
+      renderConfig(); go("s-config");
+      return;
+    }
+    btn.disabled = true; btn.textContent = "開始中…";
+    try {
+      const d = (f.models || {})[x.model] || {};
+      const job = await api("/api/installs/strata-model", { method: "POST",
+        body: { family: x.fam, model: x.model, context: d.rec_context || 131072, vision: "" } });
+      W.kind = "install"; W.job = job;
+      W.logCursor = 0; W.logText = "";
+      W.cfgProfId = null; W.cfgProfNew = false;
+      renderProgress(); go("s-progress"); startPoll();
+    } catch (e) {
+      $("#md-err").textContent = "開始できませんでした: " + e.message;
+      $("#md-err").classList.remove("hidden");
+    } finally { btn.textContent = "このモデルで続ける"; mdSync(); }
+    return;
+  }
   btn.disabled = true; btn.textContent = "開始中…";
   try {
     /* vision ON = --vision を渡さない = 純正のマシン既定 (own-path 系は VRAM が
