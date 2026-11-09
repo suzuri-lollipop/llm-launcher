@@ -459,6 +459,20 @@ function mdStRecCtx() {
   const d = mdStModels()[W.mdStModel] || {};
   return Number(d.rec_context) || 131072;
 }
+function mdStFillGpus() {
+  const st = W.mdStrata || {};
+  const fam = (st.families || {})[W.mdStFam] || {};
+  const cards = ((st.pc || {}).gpus || []).filter(g => g.usable);
+  const field = $("#md-gpu-field");
+  if (cards.length < 2) { field.classList.add("hidden"); W.mdStGpus = ""; return; }
+  field.classList.remove("hidden");
+  const opts = [["auto", "まかせる (Strata 推奨)"]];
+  cards.forEach(g => opts.push([String(g.index), `GPU ${g.index} のみ (${g.name} ${g.vram_gb} GB)`]));
+  if (fam.multi_gpu !== false) opts.push([cards.map(g => g.index).join(","),
+    `全カード共有 (${cards.map(g => g.index).join(", ")}) — モデルを分けて積む (layer split)`]);
+  if (!opts.some(o => o[0] === W.mdStGpus)) W.mdStGpus = "auto";
+  $("#md-gpu").innerHTML = opts.map(o => `<option value="${esc(o[0])}"${o[0] === W.mdStGpus ? " selected" : ""}>${esc(o[1])}</option>`).join("");
+}
 function mdStFillCtx() {
   const st = W.mdStrata || {};
   const fam = (st.families || {})[W.mdStFam] || {};
@@ -497,6 +511,10 @@ function mdStHint() {
   if (W.mdStCtx > rec) {
     parts.push(`※ コンテキスト ${Math.round(W.mdStCtx / 1024)}K はこの PC 向け推奨 ${Math.round(rec / 1024)}K より大きい — 起動時に VRAM/RAM 不足で失敗することがあります`);
   }
+  /* own-path 家系 (Qwen3.6) は純正が単一 GPU 宣言 — 2 枚在っても分割できない */
+  const cards = ((st.pc || {}).gpus || []).filter(g => g.usable);
+  if (cards.length >= 2 && (st.families || {})[W.mdStFam] && (st.families[W.mdStFam].multi_gpu === false))
+    parts.push("この家系は現在単一 GPU 専用です (純正: runs on one GPU so far)");
   $("#md-strata-hint").textContent = parts.join(" ・ ");
 }
 function mdSync() {
@@ -598,8 +616,9 @@ $("#md-local").addEventListener("change", mdSync);
 $("#md-repo").addEventListener("input", mdSync);
 /* Strata 面板の選択変更 */
 $("#md-family").addEventListener("change", () => {
-  W.mdStFam = $("#md-family").value; W.mdStModel = ""; mdStFillSizes(); mdSync(); });
-$("#md-size").addEventListener("change", () => { W.mdStModel = $("#md-size").value; mdStFillSizes(); mdStFillCtx(); mdSync(); });
+  W.mdStFam = $("#md-family").value; W.mdStModel = ""; mdStFillSizes(); mdStFillGpus(); mdSync(); });
+$("#md-size").addEventListener("change", () => { W.mdStModel = $("#md-size").value; mdStFillSizes(); mdStFillCtx(); mdStFillGpus(); mdSync(); });
+$("#md-gpu").addEventListener("change", () => { W.mdStGpus = $("#md-gpu").value; mdSync(); });
 $("#md-ctx").addEventListener("change", () => { W.mdStCtx = parseInt($("#md-ctx").value, 10); mdStHint(); mdSync(); });
 $("#md-vision").addEventListener("change", () => {
   $("#md-vision-opt").classList.toggle("sel", $("#md-vision").checked); mdSync(); });
@@ -614,7 +633,7 @@ async function renderModelStrata() {
   $("#md-family").innerHTML = famIds.map(f => `<option value="${esc(f)}"${f === W.mdStFam ? " selected" : ""}>`
     + `${esc(fams[f].title || f)}</option>`).join("")
     || '<option value="">(Strata のモデル一覧が読めません)</option>';
-  mdStFillSizes(); mdStFillCtx();
+  mdStFillSizes(); mdStFillCtx(); mdStFillGpus();
   /* ダウンロード済み一覧: 表から作る (モデル名 + サイズ + GB)。JSON 名は内部では
      使うが UI には出さない — 「そのモデルが在る」だけがユーザーの情報 */
   const dl = [];
@@ -694,7 +713,8 @@ async function mdStartStrata(btn) {
                  : ($("#md-vision").checked ? "" : "no");
     const job = await api("/api/installs/strata-model", { method: "POST",
       body: { family: W.mdStFam, model: W.mdStModel,
-              context: parseInt($("#md-ctx").value, 10) || 131072, vision } });
+              context: parseInt($("#md-ctx").value, 10) || 131072, vision,
+              gpus: (W.mdStGpus && W.mdStGpus !== "auto") ? W.mdStGpus : "" } });
     W.kind = "install"; W.job = job;
     W.logCursor = 0; W.logText = "";
     W.cfgProfId = null; W.cfgProfNew = false;

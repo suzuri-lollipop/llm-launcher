@@ -294,6 +294,9 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     # モデルを使う」でモデル名を並べる — JSON 名は UI に出さない (2026-11-09 の指摘)
     assert "ダウンロード済み" in js
     assert "strata-<model>.json をそのまま" not in js   # JSON 選択導線の回帰禁止
+    # GPU 数の選択 (対応家系のみ) と単一 GPU 家系の注記
+    assert "mdStFillGpus" in js and "multi_gpu" in js
+    assert 'id="md-gpu"' in html
     tab = (static / "js" / "views" / "setup.js").read_text("utf-8")
     assert "モデル準備" in tab             # 📦 履歴の step / タイトル
 
@@ -321,17 +324,23 @@ def test_wizard_profile_sends_real_engine():
 FAKE_TABLES = {
     "available": True,
     "families": {
-        "qwen": {"title": "Qwen3.8-Flash-Next", "about": "", "tag": "",
+        "qwen": {"title": "Qwen3.8-Flash-Next", "about": "", "tag": "", "multi_gpu": True,
                  "models": {"Q2_0": {"about": "", "label": "", "download_gb": 66.4,
                                      "ram_gb": 48, "vision": False}}},
+        "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "", "tag": "qwen36-", "multi_gpu": False,
+                   "models": {"UD-Q4_K_XL": {"about": "", "label": "", "download_gb": None,
+                                             "ram_gb": 32, "vision": False}}},
         "deepseek41": {"title": "DeepSeek-V4.1-Flash", "about": "",
-                       "tag": "deepseek-v4.1-flash-",
+                       "tag": "deepseek-v4.1-flash-", "multi_gpu": True,
                        "models": {"IST-DAS-2.00bpw": {"about": "", "label": "ISTA-DAS 2.00 bpw",
                                                       "download_gb": None, "ram_gb": 40,
                                                       "vision": False}}},
     },
     "contexts": [8192, 131072],
-    "pc": {"ram_gb": 128.0, "data_dir": "/x/Strata-data", "disk_free_gb": 400.0},
+    "pc": {"ram_gb": 128.0, "vram_gb": 24.0, "data_dir": "/x/Strata-data", "disk_free_gb": 400.0,
+           "gpus": [{"index": 0, "name": "RTX A", "vram_gb": 24.0, "usable": True},
+                    {"index": 1, "name": "RTX B", "vram_gb": 24.0, "usable": True},
+                    {"index": 2, "name": "GT", "vram_gb": 8.0, "usable": False}]},
 }
 
 
@@ -372,6 +381,34 @@ def test_build_argv_whitelist_and_rejection(monkeypatch, tmp_path: Path):
             strata_setup.build_argv(mod, bad)
 
 
+def test_build_argv_gpu_selection(monkeypatch, tmp_path: Path):
+    """GPU 指定: 単一カード = --gpu N / 複数 = --gpus "0,1" / all / auto=無し。
+    検出外 GPU と、単一 GPU 専一家系 (own-path) への複数指定は拒否する。"""
+    mod = tmp_path / "module" / "strata"
+    (mod / ".venv" / "bin").mkdir(parents=True)
+    (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
+    mod = _seed_tables(monkeypatch, mod)
+    base = {"family": "qwen", "model": "Q2_0", "context": 8192}
+    argv, _ = strata_setup.build_argv(mod, dict(base, gpus="1"))
+    assert argv[argv.index("--gpu") + 1] == "1" and "--gpus" not in argv
+    argv, _ = strata_setup.build_argv(mod, dict(base, gpus="0,1"))
+    assert argv[argv.index("--gpus") + 1] == "0,1"
+    argv, _ = strata_setup.build_argv(mod, dict(base, gpus="all"))
+    assert argv[argv.index("--gpus") + 1] == "all"
+    argv, _ = strata_setup.build_argv(mod, dict(base, gpus="auto"))
+    assert "--gpus" not in argv and "--gpu" not in argv
+    for bad in ("0,2", "2", "0,0", "9", "0; rm"):
+        with pytest.raises(ValueError):
+            strata_setup.build_argv(mod, dict(base, gpus=bad))
+    # qwen36 は multi_gpu=False (純正: runs on one GPU so far) — 単一カード指定は可、複数は拒否
+    b36 = {"family": "qwen36", "model": "UD-Q4_K_XL", "context": 8192}
+    argv, _ = strata_setup.build_argv(mod, dict(b36, gpus="0"))
+    assert "--gpu" in argv
+    for bad in ("0,1", "all"):
+        with pytest.raises(ValueError, match="単一 GPU"):
+            strata_setup.build_argv(mod, dict(b36, gpus=bad))
+
+
 def test_build_argv_without_submodule_tables_fails(tmp_path: Path):
     """表が読めない (未 clone) は argv を作らない — 対話 setup.sh へ戻すしかない状態。"""
     mod = tmp_path / "no-strata"
@@ -393,6 +430,12 @@ def test_build_argv_against_real_submodule():
     assert pc.get("ram_gb") and pc.get("vram_gb") is not None
     q = (opts.get("families") or {}).get("qwen") or {}
     assert q.get("max_context") == max(opts["contexts"])
+    # own-path (Qwen3.6): trained 262144 上限 & 単一 GPU 宣言が表に乗る
+    q36 = (opts.get("families") or {}).get("qwen36") or {}
+    if q36:
+        assert q36.get("max_context") == 262144
+        assert q36.get("multi_gpu") is False
+    assert isinstance(opts.get("pc", {}).get("gpus"), list)
     m = next(iter((q.get("models") or {}).values()), {})
     if "rec_context" in m:
         assert m["rec_context"] in opts["contexts"]

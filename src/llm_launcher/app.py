@@ -241,6 +241,7 @@ class StrataModelBody(BaseModel):
     model: str = Field(min_length=1, max_length=64)
     context: int = 131072
     vision: str = ""      # "" = 渡さない (非対応パック), でなければ yes|no|gpu|cpu
+    gpus: str = ""        # "" / "auto" = 純正既定, "0"|"1" = 単一カード, "0,1"|"all" = layer split
 
 
 class ModelDownloadBody(BaseModel):

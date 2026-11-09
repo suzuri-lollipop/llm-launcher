@@ -57,8 +57,14 @@ try:
 except Exception:
     pc["ram_gb"] = None
 try:
-    usable = [g for g in S.gpus() if S.gpu_problem(g) is None]
-    pc["vram_gb"] = round(max([float(g.get("vram_gb") or 0.0) for g in usable], default=0.0), 1)
+    cards = S.gpus()
+    pc["gpus"] = [{"index": int(g["index"]), "name": str(g["name"]),
+                   "vram_gb": round(float(g.get("vram_gb") or 0.0), 1),
+                   "usable": S.gpu_problem(g) is None} for g in cards]
+except Exception:
+    pc["gpus"] = []
+try:
+    pc["vram_gb"] = round(max([g["vram_gb"] for g in pc["gpus"] if g["usable"]], default=0.0), 1)
 except Exception:
     pc["vram_gb"] = None
 try:
@@ -103,7 +109,12 @@ ram = pc.get("ram_gb") or 0.0
 vram = pc.get("vram_gb") or 0.0
 for fid, f in fams.items():
     raw = getattr(S, "FAMILIES", {}).get(fid) or own.get(fid) or multi.get(fid) or {}
-    f["max_context"] = 262144 if fid in multi else (max(S.CONTEXTS) if getattr(S, "CONTEXTS", []) else 524288)
+    # own-path (Qwen3.6) と multi-file (DeepSeek) のメニュー上限は trained 262144
+    # (純正 install_own_path: "no rope scaling on this path yet" — 512K 選択は
+    # 純正が警告付きで従うだけで、そもそも KV が 24GB に収まらない)
+    f["max_context"] = 262144 if (fid in multi or fid in own) else (max(S.CONTEXTS) if getattr(S, "CONTEXTS", []) else 524288)
+    # own-path は純正が単一 GPU 宣言 ("runs on one GPU so far")。multi-file は tp 可
+    f["multi_gpu"] = fid not in own
     for m, d in f["models"].items():
         try:
             if fid in own or fid in multi:
@@ -293,6 +304,28 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
     argv = ["setup.py", "--family", fam, "--model", model, "--context", str(context)]
     if vision:   # vision 非対応パックは --vision を渡さない (upstream 側でも vision 質問自体が出ない)
         argv += ["--vision", vision]
+    gpus = str(opts.get("gpus") or "").strip().lower()
+    if gpus and gpus not in ("auto", ""):
+        usable = {int(g["index"]) for g in (data.get("pc") or {}).get("gpus") or [] if g.get("usable")}
+        if gpus == "all":
+            if len(usable) < 2:
+                raise ValueError("使える GPU が 2 枚無い環境で all は指定できません")
+            if not fams[fam].get("multi_gpu", True):
+                raise ValueError(f"{fams[fam].get('title', fam)} は現在単一 GPU 専用です (純正: runs on one GPU so far)")
+            argv += ["--gpus", "all"]
+        else:
+            try:
+                sel = [int(x) for x in gpus.split(",") if x.strip() != ""]
+            except ValueError:
+                raise ValueError(f"gpus が不正です: {gpus}")
+            if not sel or len(set(sel)) != len(sel) or any(i not in usable for i in sel):
+                raise ValueError(f"gpus が検出外の GPU を指しています: {gpus} (使える GPU: {sorted(usable)})")
+            if len(sel) == 1:
+                argv += ["--gpu", str(sel[0])]      # 単一カード指定は純正 --gpu
+            else:
+                if not fams[fam].get("multi_gpu", True):
+                    raise ValueError(f"{fams[fam].get('title', fam)} は現在単一 GPU 専用です (純正: runs on one GPU so far)")
+                argv += ["--gpus", ",".join(str(i) for i in sel)]
     argv += ["--yes", "--no-start", "--no-browser"]
     tag = str(fams[fam].get("tag") or "")
     config_name = f"strata-{(tag + model).lower()}.json"
