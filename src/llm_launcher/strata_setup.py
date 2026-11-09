@@ -8,14 +8,22 @@
 と「ホワイトリスト検証 + argv 組み立て」だけを持つ。
 
   * load_options(): 純正 setup.py を submodule cwd で import する短い subprocess から
-    FAMILIES / MODELS / MULTI_FILE_FAMILIES / CONTEXTS と PC の RAM・データディスクの
-    空きを JSON で受け取る (表の単一の源は常に submodule 側。upstream の bump で
-    選択肢も増えていく)。60 秒キャッシュ。
+    FAMILIES / MODELS / MULTI_FILE_FAMILIES / CONTEXTS と PC の RAM・VRAM・GPU 一覧・
+    データディスクの空き、家系別の max_context / multi_gpu、モデル別の rec_context と
+    重み実在 (have) を JSON で受け取る (表の単一の源は常に submodule 側。upstream の
+    bump で選択肢も増えていく)。60 秒キャッシュ。
   * build_argv(): 検証済みフラグのみ argv にする。family / model は読み出した表の
-    キーそのもの、context は表の CONTEXTS の値、vision は列挙値だけを通す
-    (shell は挟まないが、argv 化に値の検証は必須)。
+    キーそのもの、context は表の CONTEXTS の値、vision は列挙値、gpus は検出した
+    usable GPU の index 集 (単一カード = --gpu N、複数 = --gpus "0,1"/all、
+    own-path 家系の複数指定は拒否 — 純正が単一 GPU 宣言)。どれか一つでも外れたら
+    InstallError 相当の ValueError を投げる (argv 化に値の検証は必須)。
+  * weights_status() / installed_configs(): config が参照する重み (--native / --pack /
+    vision / tokenizer、マルチシャードは兄弟も) の実在とサイズを検証する —
+    「一覧に出る = 起動できる」の根拠。UI に JSON 名は出さない (モデル名で出す)。
   * 設定 JSON の名前は純正の作法どおり `strata-<fam.tag + model>.json` (module/strata 直下)。
-    ジョブ完了後の result.config はこの名前ピンポイント + mtime フォールバックで解決する。
+    ジョブ完了後の result.config はこの名前ピンポイント + mtime フォールバックで解決し、
+    result.parallel は config の parallel (③ の並列数既定 — 全局推奨を焼いて
+    エンジンに VRAM 不足で弾かれるのを防ぐ)。
 """
 from __future__ import annotations
 
