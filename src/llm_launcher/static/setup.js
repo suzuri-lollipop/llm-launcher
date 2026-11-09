@@ -1144,6 +1144,13 @@ $("#cf-go").addEventListener("click", async () => {
       return;
     }
   }
+  /* Strata: serve/server.py の --engine 既定は mock (スクリプト付きテストエンジン)。
+     ウィザードが作るプロファイルは常に実エンジンを意味するので、未設定ならここで
+     埋める — 埋めないと「起動するとモックが来る」(2026-11-09 報告) */
+  if (W.backend === "strata" && !String(vals.engine || "").trim()) {
+    vals.engine = "strata";
+    if (on) on.engine = true;
+  }
   // プロファイル名 (既定はモデル名で既に入力済み。空なら元の name を維持)
   const nmEl = $("#cf-name");
   const newName = (nmEl && nmEl.value.trim()) || p.name;

@@ -281,6 +281,8 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     # 掴んで別プロファイルの config 整合チェックに弾かれる事故の回帰防止
     assert "W.calPick" in js
     assert "対象: " in js
+    # Strata の --engine 既定は mock (serve/server.py)。ウィザード保存は常に実エンジンを埋める
+    assert 'vals.engine = "strata"' in js
     # ② のコンテキスト既定 = 純正の推奨 (own_path_context / ram_ctx) + 大選択の注記
     assert "rec_context" in js and "(推奨)" in js
     assert "rec_context" in (static.parent / "strata_setup.py").read_text("utf-8")
@@ -292,6 +294,24 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     assert "strata-<model>.json をそのまま" not in js   # JSON 選択導線の回帰禁止
     tab = (static / "js" / "views" / "setup.js").read_text("utf-8")
     assert "モデル準備" in tab             # 📦 履歴の step / タイトル
+
+
+def test_wizard_profile_sends_real_engine():
+    """on=null のウィザード系プロファイルでも values.engine が argv に出ること。
+    出ないと serve/server.py は argparse 既定の mock (スクリプト付きテストエンジン)
+    で起動する — 「起動するとモックが来る」(2026-11-09 報告) の回帰防止。"""
+    from llm_launcher.backends import backend_for, render_argv
+
+    prof = {"id": "p_x", "backend": "strata", "on": None,
+            "values": {"config": "module/strata/strata-q2_0.json", "engine": "strata",
+                       "host": "0.0.0.0", "port": "1919"}}
+    argv = render_argv(backend_for(ROOT, "strata"), dict(prof),
+                       python="py", binary="", root=ROOT)
+    assert argv[argv.index("--engine") + 1] == "strata"
+    del prof["values"]["engine"]
+    argv2 = render_argv(backend_for(ROOT, "strata"), dict(prof),
+                        python="py", binary="", root=ROOT)
+    assert "--engine" not in argv2      # 埋めなければ flag 無し = サーバー側既定 mock
 
 
 # ---------------------------------------------------------------- ② モデル構成 (strata_setup)
