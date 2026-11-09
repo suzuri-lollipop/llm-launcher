@@ -285,7 +285,10 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     assert "rec_context" in js and "(推奨)" in js
     assert "rec_context" in (static.parent / "strata_setup.py").read_text("utf-8")
     html = (static / "setup.html").read_text("utf-8")
-    assert 'id="md-strata"' in html and 'id="md-strata-exist"' in html
+    assert 'id="md-strata"' in html
+    # 「設定済み JSON を選ぶ」択は廃止 — 一覧はモデルだけ (config JSON は内部の成果物)
+    assert 'id="md-strata-exist"' not in html
+    assert "取得済み" in js                 # サイズ選択肢の重み実在バッジ
     tab = (static / "js" / "views" / "setup.js").read_text("utf-8")
     assert "モデル準備" in tab             # 📦 履歴の step / タイトル
 
@@ -450,6 +453,23 @@ def test_strata_model_api(tmp_path: Path):
     # body 検証: family 空は pydantic で 422
     assert client.post("/api/installs/strata-model",
                        json={"family": "", "model": "Q2_0"}).status_code == 422
+
+
+def test_merge_config_ready_marks_models(tmp_path: Path):
+    """既存 config の重み ok をモデル表へ引き写す (nvfp4 のような特殊レイアウトの
+    バッジ源)。ファイル名解決が既に当てたモデルは上書きしない。"""
+    mod = tmp_path
+    g = mod / "g.gguf"
+    g.write_bytes(b"x" * 1024)
+    (mod / "strata-q2_0.json").write_text(
+        json.dumps({"exe": "e", "args": ["--native", str(g)]}), encoding="utf-8")
+    data = {"families": {"qwen": {"tag": "", "models": {
+        "Q2_0": {},
+        "IQ2_XS": {"have": {"files": 2, "found": 0, "gb": 0.0}},
+    }}}}
+    strata_setup._merge_config_ready(mod, data)
+    assert data["families"]["qwen"]["models"]["Q2_0"]["have"] == {"files": 1, "found": 1, "gb": 0.0}
+    assert data["families"]["qwen"]["models"]["IQ2_XS"]["have"]["found"] == 0  # config 無しは触らない
 
 
 def test_installed_configs_weights_status(tmp_path: Path):

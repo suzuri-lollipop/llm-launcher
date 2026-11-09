@@ -32,6 +32,7 @@ from typing import Any
 # 出力は最後の 1 行の JSON だけ — 何か print が増えても最後の {...} を取るので壊れない。
 _DUMP_SNIPPET = r"""
 import json, shutil, sys
+from pathlib import Path
 sys.path.insert(0, ".")
 import setup as S
 def m_entry(d):
@@ -61,31 +62,61 @@ try:
 except Exception:
     pc["vram_gb"] = None
 try:
+    st = S.load_settings()
+    data = Path(st["data_dir"]) if st.get("data_dir") else S.home().parent / "Strata-data"
+except Exception:
     data = S.home().parent / "Strata-data"
-    probe = data if data.exists() else data.parent
-    free = shutil.disk_usage(str(probe)).free / 2**30
+try:
     pc["data_dir"] = str(data)
-    pc["disk_free_gb"] = round(free, 1)
+    probe = data if data.exists() else data.parent
+    pc["disk_free_gb"] = round(shutil.disk_usage(str(probe)).free / 2**30, 1)
 except Exception:
     pass
+# 重み実在の判定は「ファイル名インデックス × 純正のファイル名解決 (model_file /
+# shards リスト)」— パス組み立てを再発明せず、名前で当てる。取れても取れなくても
+# 選定は壊れない (バッジが出ないだけ)。ダウンロードの有無は setup.py 自身が毎回
+# 実ファイルで判定するので、ここは UI の案内専用。
+idx = {}
+for root in (data / "models", data / "packs"):
+    try:
+        if root.is_dir():
+            for f in root.rglob("*"):
+                if f.is_file():
+                    idx[f.name] = idx.get(f.name, 0) + f.stat().st_size
+    except Exception:
+        pass
+multi = getattr(S, "MULTI_FILE_FAMILIES", {})
+own = getattr(S, "PREVIEW_FAMILIES", {})
+def shards_of(fid, raw, model):
+    try:
+        if fid in multi:
+            return [Path(s).name for s in (raw.get("models", {}).get(model, {}).get("shards") or [])]
+        m = S.MODELS.get(model, {})
+        n = int(m.get("shards") or raw.get("shards") or 2)
+        return [S.model_file(raw, model, i) for i in range(1, n + 1)]
+    except Exception:
+        return []
 # 推奨コンテキストは純正の式そのもの (own-path / multi-file 系は own_path_context、
 # flash-next 系は min(128K, ram_ctx))。UI は既定を推奨にして、より大きい選択に注記を出す
 # — 純正の対話質問の「(recommended for your GPU)」と同じ立場 (大きくても注記して従う)。
 ram = pc.get("ram_gb") or 0.0
 vram = pc.get("vram_gb") or 0.0
-multi = getattr(S, "MULTI_FILE_FAMILIES", {})
-own = getattr(S, "PREVIEW_FAMILIES", {})
 for fid, f in fams.items():
     raw = getattr(S, "FAMILIES", {}).get(fid) or own.get(fid) or multi.get(fid) or {}
     f["max_context"] = 262144 if fid in multi else (max(S.CONTEXTS) if getattr(S, "CONTEXTS", []) else 524288)
-    for m in f["models"]:
+    for m, d in f["models"].items():
         try:
             if fid in own or fid in multi:
-                f["models"][m]["rec_context"] = int(S.own_path_context(raw, vram))
+                d["rec_context"] = int(S.own_path_context(raw, vram))
             else:
-                f["models"][m]["rec_context"] = int(min(131072, S.ram_ctx(m, ram, False)))
+                d["rec_context"] = int(min(131072, S.ram_ctx(m, ram, False)))
         except Exception:
             pass
+        names = shards_of(fid, raw, m)
+        if names:
+            found = [n for n in names if n in idx]
+            d["have"] = {"files": len(names), "found": len(found),
+                         "gb": round(sum(idx[n] for n in found) / 2**30, 1)}
 print(json.dumps({"families": fams, "contexts": list(getattr(S, "CONTEXTS", [])), "pc": pc}))
 """
 
@@ -126,6 +157,7 @@ def load_options(module_dir: Path) -> dict[str, Any]:
                     break
         if data is not None:
             data["available"] = bool(data.get("families"))
+            _merge_config_ready(module_dir, data)
             out = data
     except Exception:  # noqa: BLE001 — 表が読めないだけでセットアップ全体を止めない
         pass
@@ -135,6 +167,24 @@ def load_options(module_dir: Path) -> dict[str, Any]:
 
 _SHARD_RE = re.compile(r"^(.*-)(\d{5})-of-(\d{5})(\.\w+)$")
 _PACK_SUFFIXES = (".gguf", ".bin", ".safetensors")
+
+
+def _merge_config_ready(module_dir: Path, data: dict[str, Any]) -> None:
+    """既存 config (strata-<tag+model>.json) の重み検証が ok なら、その実在をモデル表へ
+    引き写して「取得済み」バッジにする — ユーザーに見えるのは常にモデルだけ (JSON は
+    内部の命名作法のまま)。ファイル名解決が通らない特殊レイアウト (nvfp4 の dense+pack)
+    も、config が実パスを持っているのでこれでカバーされる。"""
+    ready: dict[str, Any] = {}
+    for c in installed_configs(module_dir):
+        w = c.get("weights") or {}
+        if w.get("ok"):
+            ready[c["name"][len("strata-"):-len(".json")].lower()] = w
+    for f in (data.get("families") or {}).values():
+        tag = str(f.get("tag") or "")
+        for m, d in (f.get("models") or {}).items():
+            w = ready.get((tag + m).lower())
+            if w and not (d.get("have") or {}).get("found"):
+                d["have"] = {"files": 1, "found": 1, "gb": w.get("size_gb")}
 
 
 def weights_status(data: dict) -> dict:
