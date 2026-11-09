@@ -735,8 +735,17 @@ class InstallManager:
                     self._append_log(job, "完了しましたが strata-<model>.json が"
                                           "見つかりません (ログ末尾と module/strata を確認してください)")
                 else:
+                    # config の parallel (純正が VRAM 予算で決めた同時数) を UI に返す —
+                    # 無い = 既定 1。ウィザード ③ の並列数の既定はここから取る
+                    # (全局推奨の 4 を焼くと 24GB で 4 スロット起動失敗する: 2026-11-09)
+                    par = None
+                    try:
+                        pv = json.loads(Path(cfg).read_text("utf-8", errors="replace")).get("parallel")
+                        par = int(pv) if str(pv).isdigit() else None
+                    except (OSError, ValueError):
+                        pass
                     job["status"] = "done"
-                    job["result"] = {"installed": True, "config": str(cfg)}
+                    job["result"] = {"installed": True, "config": str(cfg), "parallel": par}
                     self._append_log(job, f"モデル設定完了: {cfg.name}")
         except InstallError as e:
             job["status"] = "failed"

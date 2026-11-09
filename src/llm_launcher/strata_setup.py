@@ -250,8 +250,10 @@ def installed_configs(module_dir: Path) -> list[dict[str, Any]]:
             continue
         if "exe" not in data and "args" not in data:      # model_config() と同じ見立て
             continue
+        par = data.get("parallel")
         out.append({"file": str(p), "name": p.name,
                     "model_name": str(data.get("model_name") or p.stem[len("strata-"):] or ""),
+                    "parallel": int(par) if str(par).isdigit() else None,
                     "weights": weights_status(data),
                     "mtime": p.stat().st_mtime})
     out.sort(key=lambda x: -x["mtime"])

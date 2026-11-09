@@ -283,6 +283,8 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     assert "対象: " in js
     # Strata の --engine 既定は mock (serve/server.py)。ウィザード保存は常に実エンジンを埋める
     assert 'vals.engine = "strata"' in js
+    # ③ の並列数既定 = 作られた config の parallel (全局推奨 4 を焼くと 24GB で起動失敗)
+    assert "jp.parallel" in js
     # ② のコンテキスト既定 = 純正の推奨 (own_path_context / ram_ctx) + 大選択の注記
     assert "rec_context" in js and "(推奨)" in js
     assert "rec_context" in (static.parent / "strata_setup.py").read_text("utf-8")
@@ -455,6 +457,31 @@ def test_start_strata_model_plans_single_model_job(monkeypatch, tmp_path: Path):
 
 # ---------------------------------------------------------------- API (②)
 
+def test_run_model_result_carries_parallel_from_config(monkeypatch, tmp_path: Path):
+    """② ジョブの result.parallel — ③ の並列数既定はこれ (config 無し = None → 1)。
+    全局推奨 4 を焼くと 24GB で 4 スロット起動失敗した回帰 (2026-11-09)。"""
+    mod = _fake_module(tmp_path, with_venv=True)
+    mod = _seed_tables(monkeypatch, mod)
+    mgr = _manager(tmp_path)
+
+    async def fake_step(self, job, step):  # noqa: ANN001
+        (Path(step["cwd"]) / job["config_name"]).write_text(
+            json.dumps({"exe": "e", "args": [], "parallel": 8}), encoding="utf-8")
+        return 0, ""
+
+    monkeypatch.setattr(InstallManager, "_run_step", fake_step)
+
+    async def go() -> dict:
+        job = mgr.start_strata_model({"family": "qwen", "model": "Q2_0", "context": 131072})
+        await mgr._tasks[job["id"]]
+        return mgr.get(job["id"]) or {}
+
+    done = asyncio.run(go())
+    assert done["status"] == "done"
+    assert done["result"]["parallel"] == 8
+    assert done["result"]["config"].endswith("strata-q2_0.json")
+
+
 def test_strata_model_api(tmp_path: Path):
     from fastapi.testclient import TestClient
 
@@ -542,7 +569,7 @@ def test_strata_model_api_lists_installed_configs(tmp_path: Path, monkeypatch: p
     mod = tmp_path / "module" / "strata"
     mod.mkdir(parents=True)
     (mod / "setup.py").write_text("# fake\n", encoding="utf-8")   # load_options の入口ガード
-    (mod / "strata-q2_0.json").write_text('{"exe": "/x/strata", "args": [], "model_name": "qwen3.8-flash-next-q2_0"}',
+    (mod / "strata-q2_0.json").write_text('{"exe": "/x/strata", "args": [], "model_name": "qwen3.8-flash-next-q2_0", "parallel": 4}',
                                           encoding="utf-8")
     (mod / "strata-q2_0.shared-settings.json").write_text('{"exe": "x", "args": []}', encoding="utf-8")
     (mod / "strata-not-a-config.json").write_text('{"nope": 1}', encoding="utf-8")
@@ -556,3 +583,5 @@ def test_strata_model_api_lists_installed_configs(tmp_path: Path, monkeypatch: p
     # shared-settings と model_config 作法外 (exe/args 無し) は除外される
     assert names == ["strata-q2_0.json"]
     assert body["configs"][0]["model_name"] == "qwen3.8-flash-next-q2_0"
+    # parallel は ③ の既定になる (config 無し = None → UI は 1 に倒す)
+    assert body["configs"][0]["parallel"] == 4

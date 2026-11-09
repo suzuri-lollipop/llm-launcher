@@ -664,7 +664,7 @@ async function mdStartStrata(btn) {
       W.kind = "install";
       W.job = { id: "", kind: "install", phase: "model", status: "done", backend: "strata",
                 repo_id: "", config_name: c.name, model: x.fam + "/" + x.model,
-                result: { config: c.file } };
+                result: { config: c.file, parallel: c.parallel || null } };
       W.cfgProfId = null; W.cfgProfNew = false;
       W.summary.push({ ok: true, t: `ダウンロード済みの ${x.label} を使用します` });
       renderConfig(); go("s-config");
@@ -1013,6 +1013,13 @@ async function renderConfig() {
     if (!cfg.par) return 1;
     const s = parseInt(v[cfg.par.key] ?? "", 10);
     if (Number.isFinite(s) && s > 0) return s;
+    /* strata: 並列数の既定は作られた config の parallel (エンジンが VRAM 予算で決めた値)。
+       config に無い = 純正既定の 1。全局推奨の 4 を焼くと 24GB で 4 スロット起動失敗
+       (qwen36 131072 = 5.56 GiB/スロット、2026-11-09 実測) */
+    if (W.backend === "strata") {
+      const jp = (W.job || {}).result || {};
+      return Number(jp.parallel) || 1;
+    }
     const rec = cfg.par.opts.find(o => (o[2] || "").includes("推奨")) || cfg.par.opts[0] || ["1"];
     return parseInt(rec[0], 10) || 1;
   })();
