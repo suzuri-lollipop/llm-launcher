@@ -314,27 +314,7 @@ def build_strata_commands(root: Path, profile: dict[str, Any], python: str,
                    "--review-result", report, "--output", "json"],
         "apply": [python, script, "engine", "calibrate", "--profile", profile_name,
                   "--apply-result", report, "--exclusive", "--output", "json"],
-        # 並列特化: 4 本同時 / stagger を実測して env を選ぶ。engine calibrate は 1 本ずつなので別ツール。
-        "parallel": _strata_parallel_command(root, profile, python, report),
     }
-
-
-def _strata_parallel_command(root: Path, profile: dict[str, Any], python: str, report: str) -> list[str]:
-    """The parallel calibration command for a Strata profile (main or fork).
-
-    The tool lives in the main Strata clone; `--root` points it at the fork clone when the profile is
-    `strata-fork`, so the same tool starts the fork's serve/server.py.  It writes the winner to the run
-    config's env itself (`--apply`), with a backup."""
-    tool = root / "module" / "strata" / "tools" / "calibrate_serving.py"
-    cfg = strata_config_path(root, profile)
-    argv = [python, str(tool), "--config", cfg or "", "--out", report, "--apply", "--multi"]
-    values = profile.get("values") or {}
-    n = str(values.get("parallel") or "").strip()
-    if n.isdecimal():
-        argv += ["--parallel", n]
-    if profile.get("backend") == "strata-fork":
-        argv += ["--root", str(root / "module" / "fork" / "strata")]
-    return argv
 
 
 # ----------------------------------------------------------------- メモリガード
@@ -574,7 +554,12 @@ class CalibrationManager:
                 spec_mode = self._ft_speculative(profile)
             except ValueError as e:
                 raise CalibrateError(str(e))
-            if cal_mode == "auto":
+            if cal_mode == "multi":
+                # 並行 prefill (piped/mixed/short-first) の腕比較: fork 同梱の
+                # calibrate_multi を CLI 実行し、勝者のノブ一式を起動構成へ書き戻す。
+                job_mode = "cli-multi"
+                steps = [self._ft_multi_step(job_id, profile, module_dir, report_dir, python)]
+            elif cal_mode == "auto":
                 # 投機モード自体の自動選定 (mtp sweep → lookup CLI → 共通プローブ決勝)。
                 # 現モードが lookup でも mtp でも、まず auto が最上位の分岐
                 job_mode = "auto"
@@ -603,23 +588,19 @@ class CalibrationManager:
                 existing = []
             report = str((report_dir / f"calibration-{job_id}.json").resolve())
             cmds = build_strata_commands(self.root, profile, python, report, name)
-            if cal_mode == "parallel":
-                job_mode = "parallel"
-                steps = [{"name": "parallel", "argv": cmds["parallel"], "cwd": str(module_dir)}]
+            # 既に保存済みで同じ config なら create は不要 (Strata は同名の保存に失敗する)
+            have = next((p for p in existing if p.get("id") == name), None)
+            if have is None:
+                steps = [{"name": "create", "argv": cmds["create"], "cwd": str(module_dir)}]
+            elif str(Path(have.get("source_config") or cfg).resolve()) != str(Path(cfg).resolve()):
+                raise CalibrateError(
+                    f"Strata の保存 profile {name} が別の config を指しています "
+                    f"({have.get('source_config')}) — このプロファイル用の config を揃えるか、"
+                    f"Strata 側で profile use-config {name} を実行してください")
             else:
-                # 既に保存済みで同じ config なら create は不要 (Strata は同名の保存に失敗する)
-                have = next((p for p in existing if p.get("id") == name), None)
-                if have is None:
-                    steps = [{"name": "create", "argv": cmds["create"], "cwd": str(module_dir)}]
-                elif str(Path(have.get("source_config") or cfg).resolve()) != str(Path(cfg).resolve()):
-                    raise CalibrateError(
-                        f"Strata の保存 profile {name} が別の config を指しています "
-                        f"({have.get('source_config')}) — このプロファイル用の config を揃えるか、"
-                        f"Strata 側で profile use-config {name} を実行してください")
-                else:
-                    steps = []
-                steps += [{"name": k, "argv": cmds[k], "cwd": str(module_dir)}
-                          for k in ("plan", "measure", "review", "apply")]
+                steps = []
+            steps += [{"name": k, "argv": cmds[k], "cwd": str(module_dir)}
+                      for k in ("plan", "measure", "review", "apply")]
 
         # GPU 独占: 同じプロファイルで稼働中のサーバーは全部止めてから実行する。
         # (キャリブレーションはエンジンを起動して GPU を独占するので、同居は絶対に不可)
@@ -795,24 +776,6 @@ class CalibrationManager:
         if not self.profiles.mutate(patch):
             raise CalibrateError("計測中にプロファイルが消えたため、結果を保存できませんでした")
 
-    def _write_profile_env(self, profile: dict[str, Any], updates: dict[str, str]) -> None:
-        """Write server-side env (e.g. STRATA_COALESCE_PREFILL) into the profile store, where the
-        server process reads it.  The run config's env only reaches the engine."""
-        if not updates:
-            return
-
-        def patch(data: list[Any]) -> bool:
-            for p in data:
-                if isinstance(p, dict) and p.get("id") == profile["id"]:
-                    p.setdefault("env", {}).update({str(k): str(v) for k, v in updates.items()})
-                    if isinstance(p.get("_resolved_env"), dict):
-                        p["_resolved_env"].update({str(k): str(v) for k, v in updates.items()})
-                    return True
-            return False
-
-        if not self.profiles.mutate(patch):
-            raise CalibrateError("計測中にプロファイルが消えたため、サーバー側 env を保存できませんでした")
-
     def _ft_read_log(self, rel: str, limit: int = 400_000) -> str:
         """root 相対ログ路径の末尾を読む (machine-fit は起動行だけ必要)。"""
         if not rel:
@@ -879,28 +842,49 @@ class CalibrationManager:
                               f"{'起動 JSON' if launch is not None else 'profile'} の "
                               f"--moe-ram-budget {budget} GiB (次回起動から)")
 
-    def _ft_lookup_step(self, job_id: str, profile: dict[str, Any], module_dir: Path,
-                        report_dir: Path, python: str) -> dict[str, Any]:
-        """calibrate_lookup の CLI ステップを組み立てる (cli モードと auto フェーズ B 共用)。
-
-        起動 JSON 主体モードではその JSON 自体を --config に渡す (同一形式)。"""
+    def _ft_cli_spec(self, job_id: str, profile: dict[str, Any], module_dir: Path,
+                     report_dir: Path, strip_prefixes: tuple) -> str:
+        """fork CLI 群 (--config 受理) 共通の spec 引数解決。起動 JSON 主体モードではその
+        JSON 自体を返す (校正対象と起動構成が同一ファイル = calibrate_* の spec と同形式);
+        レガシー profile では argv/env を組み立てて一時 spec JSON に書く。前回の勝者 env
+        (strip_prefix 系) は基準腕に漏らさない -- ツールの規則を launcher 側でも守る。"""
         port_v = str((profile.get("values") or {}).get("port") or "").strip()
         launch_path = launch_json_path(self.root, profile)
         if launch_path is not None and launch_path.is_file():
-            config_arg = str(launch_path)
-        else:
-            full = self.manager.build_argv(profile)
-            spec_env = {**{k: str(v) for k, v in (profile.get("env") or {}).items()},
-                        **{k: str(v) for k, v in (profile.get("_resolved_env") or {}).items()}}
-            spec = {"python": full[0], "argv": full[1:], "cwd": str(module_dir),
-                    "env": {k: v for k, v in spec_env.items()
-                            if not k.startswith("FREETOKEN_LOOKUP_")},
-                    "port": int(port_v or "1919"), "model_name": profile.get("name", "")}
-            spec_path = report_dir / f"calibration-{job_id}.spec.json"
-            spec_path.write_text(json.dumps(spec, ensure_ascii=False, indent=1), "utf-8")
-            config_arg = str(spec_path)
+            return str(launch_path)
+        full = self.manager.build_argv(profile)
+        spec_env = {**{k: str(v) for k, v in (profile.get("env") or {}).items()},
+                    **{k: str(v) for k, v in (profile.get("_resolved_env") or {}).items()}}
+        spec = {"python": full[0], "argv": full[1:], "cwd": str(module_dir),
+                "env": {k: v for k, v in spec_env.items()
+                        if not k.startswith(strip_prefixes)},
+                "port": int(port_v or "1919"), "model_name": profile.get("name", "")}
+        spec_path = report_dir / f"calibration-{job_id}.spec.json"
+        spec_path.write_text(json.dumps(spec, ensure_ascii=False, indent=1), "utf-8")
+        return str(spec_path)
+
+    def _ft_lookup_step(self, job_id: str, profile: dict[str, Any], module_dir: Path,
+                        report_dir: Path, python: str) -> dict[str, Any]:
+        """calibrate_lookup の CLI ステップを組み立てる (cli モードと auto フェーズ B 共用)。"""
+        port_v = str((profile.get("values") or {}).get("port") or "").strip()
+        config_arg = self._ft_cli_spec(job_id, profile, module_dir, report_dir,
+                                       ("FREETOKEN_LOOKUP_",))
         return {"name": "calibrate-lookup", "cwd": str(module_dir),
                 "argv": [python, "-m", "freetoken.calibrate_lookup",
+                         "--config", config_arg, "--out-dir", str(report_dir),
+                         "--tag", f"cal-{job_id}",
+                         *(["--port", port_v] if port_v else [])]}
+
+    def _ft_multi_step(self, job_id: str, profile: dict[str, Any], module_dir: Path,
+                       report_dir: Path, python: str) -> dict[str, Any]:
+        """calibrate_multi (並行 prefill 腕比較) の CLI ステップ。lookup と同じ契約で、
+        前回の勝者 env は FREETOKEN_PIPED_*... 系を剥がして基準腕に渡す。"""
+        port_v = str((profile.get("values") or {}).get("port") or "").strip()
+        config_arg = self._ft_cli_spec(job_id, profile, module_dir, report_dir,
+                                       ("FREETOKEN_PIPED_", "FREETOKEN_MIXED_",
+                                        "FREETOKEN_ADMIT_"))
+        return {"name": "calibrate-multi", "cwd": str(module_dir),
+                "argv": [python, "-m", "freetoken.calibrate_multi",
                          "--config", config_arg, "--out-dir", str(report_dir),
                          "--tag", f"cal-{job_id}",
                          *(["--port", port_v] if port_v else [])]}
@@ -914,6 +898,51 @@ class CalibrationManager:
         except (OSError, ValueError) as e:
             raise CalibrateError(f"lookup のキャリブレーションレポートが読めません "
                                  f"({path.name}): {e}")
+
+    def _ft_multi_doc(self, job: dict[str, Any]) -> dict[str, Any]:
+        """calibrate_multi が書いたレポート (--tag の sanitize 規則は lookup と同一)。"""
+        tag = f"cal-{job['id']}".replace("_", "-")
+        path = self.root / "data" / "calibrations" / f"freetoken-multi-{tag}.json"
+        try:
+            return json.loads(path.read_text("utf-8"))
+        except (OSError, ValueError) as e:
+            raise CalibrateError(f"multi のキャリブレーションレポートが読めません "
+                                 f"({path.name}): {e}")
+
+    def _apply_freetoken_multi(self, job: dict[str, Any],
+                               profile: dict[str, Any]) -> dict[str, Any]:
+        """fork 同梱 calibrate_multi の出力 JSON を適用する。
+
+        勝者の env はノブ全集合 (明示的 0 を含む): 「併発なしが最善」の結論も
+        起動構成に正直に書き、実験中に残った ON 値を消す。判定規則 (stall 利得 /
+        スループット下限 / 腕有効性) はツール側の契約で、launcher は規則を足さない。"""
+        doc = self._ft_multi_doc(job)
+        chosen = doc.get("chosen") or {}
+        winner = {str(k): str(v) for k, v in (chosen.get("env") or {}).items()}
+        applied = bool(winner)
+        if applied:
+            self._ft_write_env(profile, winner)
+            # _ft_write_env の実体は config 主体モードなら起動 JSON 側 (lookup と同じ
+            # 文言に揃える)。キーは FREETOKEN_ 前置だけ落とす (k[11:] は先頭文字も欠けた)
+            where = ("起動 JSON" if launch_json_path(self.root, profile) is not None
+                     else "profile env")
+            self._append_log(job, f"{where} に適用: "
+                             + ", ".join(f"{k.removeprefix('FREETOKEN_').lower()}={v}"
+                                         for k, v in winner.items()))
+        else:
+            self._append_log(job, "chosen.env が空のため env は書き戻しません")
+        arms = doc.get("arms") or []
+        best_line = "; ".join(
+            f"{a.get('label')}: stall {a.get('stall_worst', 0):.2f}s "
+            f"tps {a.get('out_tps', 0):.1f}" for a in arms if a.get("valid", True))
+        return {
+            "tuned": True, "backend": "freetoken-multi", "applied": applied,
+            "settings": winner if applied else {},
+            "improvement_pct": round(float(chosen.get("gain_stall_s") or 0.0) * 10, 1),
+            "latency": (f"chosen={chosen.get('label')} "
+                        f"stall {chosen.get('stall_worst', 0):.2f}s "
+                        f"ttft={chosen.get('note', '')[:80]} | {best_line}")[:400],
+        }
 
     def _ft_base_env(self, profile: dict[str, Any]) -> dict[str, str]:
         """セルの基準 env: 起動 JSON の env が正、profile.env がユーザー上書き。"""
@@ -958,7 +987,9 @@ class CalibrationManager:
         applied = bool(doc.get("lookup_enabled") and winner)
         if applied:
             self._ft_write_env(profile, winner)
-            self._append_log(job, "profile env に適用: "
+            where = ("起動 JSON" if launch_json_path(self.root, profile) is not None
+                     else "profile env")
+            self._append_log(job, f"{where} に適用: "
                              + ", ".join(f"{k[17:].lower()}={v}" for k, v in winner.items()))
         else:
             self._append_log(job, "lookup は並行上限で素の batch 推論に負けたため env は"
@@ -1583,7 +1614,7 @@ class CalibrationManager:
             if job["kind"] == "freetoken" and job.get("mode") == "auto":
                 # FreeToken auto: 投機モード自体の選定 (mtp sweep → lookup CLI → 決勝)
                 result["freetoken"] = await self._run_freetoken_auto(job, profile)
-            elif job["kind"] == "freetoken" and job.get("mode") != "cli":
+            elif job["kind"] == "freetoken" and job.get("mode") not in ("cli", "cli-multi"):
                 # FreeToken: CLI 実行ではなく launcher 内でエンジン再起動 + greedy 計測
                 result["freetoken"] = await self._run_freetoken(job, profile)
             else:
@@ -1594,19 +1625,6 @@ class CalibrationManager:
                     if job["id"] in self._cancel:
                         raise _Cancelled()
                     payload = self._parse_json(raw)
-                    if step["name"] == "parallel":
-                        # the tool writes its report to --out; stdout is the live log
-                        out = next((step["argv"][i + 1] for i, t in enumerate(step["argv"])
-                                    if t == "--out" and i + 1 < len(step["argv"])), "")
-                        if out:
-                            with contextlib.suppress(OSError, ValueError):
-                                payload = json.loads(Path(out).read_text("utf-8"))
-                    if step["name"] == "parallel" and isinstance(payload, dict):
-                        server_env = (payload.get("winner") or {}).get("server_env") or {}
-                        if server_env:
-                            self._write_profile_env(profile, server_env)
-                            self._append_log(job, "サーバー側 env をプロファイルに適用: "
-                                             + ", ".join(f"{k}={v}" for k, v in server_env.items()))
                     if rc != 0:
                         err = (payload or {}).get("error") if isinstance(payload, dict) else None
                         msg = err.get("message") if isinstance(err, dict) else ""
@@ -1628,7 +1646,10 @@ class CalibrationManager:
                             reasons = ", ".join(review.get("reasons") or []) or "review が適用不可と判定しました"
                             raise CalibrateError(f"review: 適用できません ({reasons})")
                     result[step["name"]] = payload or {}
-                if job["kind"] == "freetoken":
+                if job["kind"] == "freetoken" and job.get("mode") == "cli-multi":
+                    # multi: fork CLI の出力 JSON をそのまま適用 (勝者のノブ一式を書き戻す)
+                    result["freetoken"] = self._apply_freetoken_multi(job, profile)
+                elif job["kind"] == "freetoken":
                     # lookup: fork CLI の出力 JSON をそのまま適用 (勝ったときだけ env 書戻し)
                     result["freetoken"] = self._apply_freetoken_lookup(job, profile)
             job["status"] = "done"
@@ -1721,25 +1742,12 @@ def _summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
         return {"tuned": True, "backend": "maya"}
     if kind == "freetoken":
         rep = result.get("freetoken") or {}
-        if rep.get("backend") in ("freetoken-lookup", "freetoken-auto"):
-            return rep          # lookup (fork CLI) / auto (トーナメント) は UI 形のまま返す
+        if rep.get("backend") in ("freetoken-lookup", "freetoken-multi", "freetoken-auto"):
+            return rep          # lookup / multi (fork CLI) / auto (トーナメント) は UI 形のまま返す
         return {"tuned": True, "backend": "freetoken", "applied": True,
                 "settings": rep.get("winner") or {},
                 "improvement_pct": rep.get("improvement_pct"),
                 "latency": rep.get("latency", "")}
-    if kind == "strata" and isinstance(result.get("parallel"), dict) and result["parallel"]:
-        p = result["parallel"]
-        w = p.get("winner") or {}
-        settings = {**(w.get("config_env") or {}), **(w.get("server_env") or {})}
-        arms = {}
-        for name, r in (p.get("arms") or {}).items():
-            if not isinstance(r, dict):
-                continue
-            probe = r.get(r.get("score_probe") or "stagger") or {}
-            arms[name] = {"error": r.get("error", ""), "agg_tps": probe.get("agg_tps"),
-                          "max_q": probe.get("max_q"), "sum_p": probe.get("sum_p")}
-        return {"settings": settings, "applied": bool(w.get("arm") and w.get("arm") != "baseline"),
-                "parallel": {"winner": w, "arms": arms}}
     # Strata の JSON は {"schema_version":1, "ok":true, "review": {...}} / {"... ","application": {...}}
     review = (result.get("review") or {}).get("review") or result.get("review") or {}
     apply = result.get("apply") or {}

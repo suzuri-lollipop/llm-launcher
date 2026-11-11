@@ -120,7 +120,7 @@ def test_strata_commands_are_profile_based_measure_review_apply(tmp_path):
     (tmp_path / "module" / "strata" / "strata-x.json").write_text("{}")
     cmds = calibrate.build_strata_commands(tmp_path, _profile(), "py", str(tmp_path / "r.json"),
                                            "p_deadbeef1234")
-    assert set(cmds) == {"create", "plan", "measure", "review", "apply", "parallel"}
+    assert set(cmds) == {"create", "plan", "measure", "review", "apply"}
     # plan は読み取り専用の事前検査 (エンジン起動なし) → measure より前に走らせて欠損を見つける
     assert "--plan" in cmds["plan"] and "--exclusive" not in cmds["plan"]
     create = cmds["create"]
@@ -132,22 +132,7 @@ def test_strata_commands_are_profile_based_measure_review_apply(tmp_path):
     assert "--exclusive" in cmds["measure"] and "--out" in cmds["measure"]
     assert "--review-result" in cmds["review"] and str(tmp_path / "r.json") in cmds["review"]
     assert "--apply-result" in cmds["apply"] and "--exclusive" in cmds["apply"]
-    assert all("--output" in c and "json" in c for c in cmds.values() if c is not cmds["parallel"])
-    # 並列校正は engine calibrate ではなく launcher の tool を直接叩く (config の env に --apply)
-    par = cmds["parallel"]
-    assert par[1].endswith("module/strata/tools/calibrate_serving.py")
-    assert "--config" in par and "--apply" in par and "--multi" in par and str(tmp_path / "r.json") in par
-    assert "--root" not in par
-
-
-def test_strata_fork_parallel_command_starts_the_fork_clone(tmp_path):
-    (tmp_path / "module" / "strata").mkdir(parents=True)
-    (tmp_path / "module" / "strata" / "strata-x.json").write_text("{}")
-    prof = {"id": "p_deadbeef1234", "name": "fork", "backend": "strata-fork",
-            "values": {"config": str(tmp_path / "module" / "strata" / "strata-x.json")}}
-    cmds = calibrate.build_strata_commands(tmp_path, prof, "py", str(tmp_path / "r.json"), "p_deadbeef1234")
-    par = cmds["parallel"]
-    assert par[par.index("--root") + 1] == str(tmp_path / "module" / "fork" / "strata")
+    assert all("--output" in c and "json" in c for c in cmds.values())
 
 
 def test_strata_profile_name_is_saved_profile_safe_and_stable():
@@ -1135,6 +1120,129 @@ def test_freetoken_lookup_missing_report_fails_job(tmp_path):
     assert "レポートが読めません" in job["error"]
 
 
+def _ft_multi_profile(**kw):
+    base = {"id": "p_ftm2", "name": "ft multi", "backend": "freetoken-fork",
+            "values": {"speculative": "none", "port": "1935"},
+            "on": {}, "env": {"X": "1", "FREETOKEN_PIPED_PREFILL": "1"}}
+    base.update(kw)
+    return base
+
+
+def _multi_doc(job_id, label="piped"):
+    tag = f"cal-{job_id}".replace("_", "-")
+    env = {"FREETOKEN_PIPED_PREFILL": "1" if label.startswith("piped") else "0",
+           "FREETOKEN_MIXED_PREFILL_TOKENS": "1024" if label == "mixed" else "0",
+           "FREETOKEN_ADMIT_SHORT_FIRST": "1024" if label in ("mixed", "piped-sf") else "0",
+           "FREETOKEN_ADMIT_MAX_WAIT_S": "30"}
+    doc = {"schema_version": 1, "backend": "freetoken-multi",
+           "multi_enabled": label != "none",
+           "arms": [{"label": "none", "stall_worst": 3.8, "out_tps": 51.0, "valid": True},
+                    {"label": "piped", "stall_worst": 0.1, "out_tps": 45.0, "valid": True}],
+           "chosen": {"label": label, "env": env, "gain_stall_s": 3.7,
+                      "note": "worst stall 3.80s -> 0.10s, tps 51.0 -> 45.0"}}
+    return f"freetoken-multi-{tag}.json", doc, env
+
+
+def test_freetoken_multi_start_builds_cli_multi_step(tmp_path):
+    prof = _ft_multi_profile()
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    got = {}
+
+    async def no_run(job, steps, profile):
+        got["job"], got["steps"] = job, steps
+    mgr._run = no_run
+
+    async def go():
+        return await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+    job = asyncio.run(go())
+    assert job["mode"] == "cli-multi"
+    steps = got["steps"]
+    assert [s["name"] for s in steps] == ["calibrate-multi"]
+    argv = steps[0]["argv"]
+    assert argv[1:3] == ["-m", "freetoken.calibrate_multi"]
+    assert argv[argv.index("--tag") + 1] == f"cal-{job['id']}"
+    spec_path = next((tmp_path / "data" / "calibrations").glob(f"calibration-{job['id']}.spec.json"))
+    spec = json.loads(spec_path.read_text())
+    # 前回の勝者ノブは基準腕に漏らさない / 無関係 env は保持
+    assert spec["env"] == {"X": "1"}
+    assert spec["port"] == 1935
+
+
+def test_freetoken_multi_job_writes_full_knob_set(tmp_path):
+    prof = _ft_multi_profile()
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+
+    async def fake_step(job, step):
+        name, doc, env = _multi_doc(job["id"], "piped")
+        (tmp_path / "data" / "calibrations" / name).write_text(json.dumps(doc))
+        return 0, ""
+    mgr._run_step = fake_step
+
+    async def go():
+        job = await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    rep = job["report"]
+    assert rep["backend"] == "freetoken-multi" and rep["applied"] is True
+    assert "worst stall" in rep["latency"]
+    saved = json.loads((tmp_path / "profiles.json").read_text())[0]["env"]
+    assert saved["FREETOKEN_PIPED_PREFILL"] == "1"
+    assert saved["FREETOKEN_MIXED_PREFILL_TOKENS"] == "0"   # 明示的 0 で全集合
+    assert saved["FREETOKEN_ADMIT_SHORT_FIRST"] == "0"
+    assert saved["X"] == "1"
+
+
+def test_freetoken_multi_none_winner_still_clears_stale_knobs(tmp_path):
+    prof = _ft_multi_profile()
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+
+    async def fake_step(job, step):
+        name, doc, env = _multi_doc(job["id"], "none")
+        (tmp_path / "data" / "calibrations" / name).write_text(json.dumps(doc))
+        return 0, ""
+    mgr._run_step = fake_step
+
+    async def go():
+        job = await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    saved = json.loads((tmp_path / "profiles.json").read_text())[0]["env"]
+    # 「この PC では併発しない」も正直に起動構成へ: 実験中に残った ON を消す
+    assert saved["FREETOKEN_PIPED_PREFILL"] == "0"
+
+
+def test_freetoken_multi_missing_report_fails_job(tmp_path):
+    prof = _ft_multi_profile()
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+
+    async def fake_step(job, step):
+        return 0, ""
+    mgr._run_step = fake_step
+
+    async def go():
+        job = await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "failed"
+    assert "multi のキャリブレーションレポート" in job["error"]
+
+
 # ---------------------------------------------------------------- FreeToken machine-fit (--moe-ram-budget)
 #
 # 単調パラメータなので sweep 対象外: 起動ログに disk 層発動行が出た時だけ
@@ -1691,6 +1799,10 @@ def test_api_calibrate_mode_validation(tmp_path):
         st, err = await _asgi(app, "POST", "/api/calibrations",
                               {"profile_id": "p_ft", "mode": "weird"})
         assert st == 400 and "current / auto" in err["detail"]
+        # 並列特化 (parallel) は本家 Strata に tool が無いので廃止 — 旧クライアントの送信も拒否する
+        st, err = await _asgi(app, "POST", "/api/calibrations",
+                              {"profile_id": "p_ft", "mode": "parallel"})
+        assert st == 400 and "current / auto" in err["detail"]
     asyncio.run(go())
 
 
@@ -1835,15 +1947,3 @@ def test_auto_micro_adopts_wiring_for_mtp_winner(tmp_path):
     saved = json.loads((tmp_path / "profiles.json").read_text())[0]
     assert saved["env"]["FREETOKEN_MTP_WIRING"] == "norm_mix_fc"
     assert "micro-mtp_wiring=norm_mix_fc" in [c[0] for c in calls["final"]]
-
-
-def test_parallel_report_summary_shows_the_winner_env():
-    rep = {"winner": {"arm": "routed", "config_env": {"STRATA_PREFILL_ROUTED_STREAM": "1"},
-                      "server_env": {}, "improvement_pct": 40.0},
-           "arms": {"baseline": {"score_probe": "stagger", "stagger": {"agg_tps": 27.0, "max_q": 0.0, "sum_p": 10.8}},
-                    "routed": {"score_probe": "stagger", "stagger": {"agg_tps": 27.3, "max_q": 0.0, "sum_p": 10.7}}}}
-    out = calibrate._summary("strata", {"parallel": rep})
-    assert out["applied"] is True
-    assert out["settings"] == {"STRATA_PREFILL_ROUTED_STREAM": "1"}
-    assert out["parallel"]["winner"]["arm"] == "routed"
-    assert out["parallel"]["arms"]["routed"]["agg_tps"] == 27.3
