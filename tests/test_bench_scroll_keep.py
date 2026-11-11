@@ -1,8 +1,9 @@
 """Regression tests for scroll stability inside the periodically re-rendered panels.
 
 The bench tab re-renders every 2.5 s (``benchTimer`` -> ``bmPoll`` -> ``renderBench`` ->
-``renderBenchActive`` / ``renderBenchHistory``), and every render swaps the container's
-whole ``innerHTML``. Rebuilding the DOM throws away the state of nested scroll boxes, so
+``renderBenchActive`` / ``renderBenchHistory`` / ``renderBenchCompare``), and every render
+swaps the container's whole ``innerHTML``. Rebuilding the DOM throws away the state of
+nested scroll boxes, so
 the stage table — ``.bm-wrap`` is ``overflow-x:auto`` and 12 columns wide, so it is
 *always* horizontally scrolled on a phone or a narrow window — snapped back to its left
 edge twice per minute while the user was reading the TTFT / 最大停止 / 停止数 columns.
@@ -64,9 +65,10 @@ def test_table_renderers_take_and_pass_a_key():
     assert not re.search(r"bmStageTable\([A-Za-z.]+\.stages\)", SRC)
     assert not re.search(r"calSettingsTable\(run\.report\)", SRC)
     # run ids are stable across polls, so they are the key; the prefixes keep them apart
-    # from the log boxes' data-logkey="k:<id>" (a clash would restore the wrong box)
+    # from the log boxes' data-logkey="k:<id>" (a clash would restore the wrong box).
+    # "a:" = active card, "c:" = 結果・比較タブの詳細 (履歴・管理タブは一覧のみで表を持たない)
     assert 'bmStageTable(run.stages, "a:" + run.id)' in SRC
-    assert 'bmStageTable(r.stages, "k:" + r.id)' in SRC
+    assert 'bmStageTable(r.stages, "c:" + r.id)' in SRC
     assert 'calSettingsTable(run.report, "a:" + run.id)' in SRC
     assert 'data-detailkey="${esc(key)}:err"' in SRC
 
@@ -92,11 +94,13 @@ def test_restore_does_not_rewrite_unchanged_positions():
     assert "Math.abs(p.scrollLeft - s.left) > 0.5" in back
 
 
-# The six panels that poll (bench / calibrate / setup, active card + history list) and the
-# assignment that resets nested scroll boxes in each of them.
+# The panels that poll (bench / calibrate / setup, active card + history/compare lists)
+# and the assignment that resets nested scroll boxes in each of them. The bench history
+# pane is management-only (plain cards, no .bm-wrap) since the 3-tab split, so it left
+# this map; the compare pane carries the detail tables and inherited the duty.
 SWAP_SITES = {
     "renderBenchActive": "el.innerHTML = `<",
-    "renderBenchHistory": "el.innerHTML = html;",
+    "renderBenchCompare": "el.innerHTML = html;",
     "renderCalActive": "el.innerHTML = `<",
     "renderCalHistory": "el.innerHTML = html;",
     "renderInsActive": "el.innerHTML = html;",
@@ -106,6 +110,7 @@ SWAP_SITES = {
 # ... and the slot that caches the last HTML written, so an identical poll is a no-op.
 HTML_CACHES = {
     "renderBenchHistory": "S.bench._bh",
+    "renderBenchCompare": "S.bench._bc",
     "renderCalHistory": "S.cal._ch",
     "renderInsHistory": "S.ins._ih",
     "renderInsActive": "S.ins._ia",
@@ -115,6 +120,7 @@ HTML_CACHES = {
 DEFER_SLOTS = {
     "renderBenchActive": "bm-act",
     "renderBenchHistory": "bm-hist",
+    "renderBenchCompare": "bm-cmp",
     "renderCalActive": "cal-act",
     "renderCalHistory": "cal-hist",
     "renderInsActive": "ins-act",

@@ -29,7 +29,11 @@ header h1{font-size:17px; margin:0; letter-spacing:.3px}
 main{max-width:920px;margin:0 auto;padding:14px 14px 20px}
 h2.view-title{font-size:15px;color:var(--sub);margin:6px 2px 12px;font-weight:600}
 .card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);padding:14px;margin-bottom:12px}
-.grid{display:grid;gap:12px}
+/* 暗黙の grid トラックは min-content を下限に取るため、カード内の長い名前 / パス /
+   操作ボタンが 390px 幅でもカード自体を 450〜500pxまで押し広げ、枠がページ端を
+   越える。minmax(0,1fr) + 項目の min-width:0 でカードを画面幅に従わせる。 */
+.grid,.dash-2col{grid-template-columns:minmax(0,1fr)}
+.grid>*, .dash-2col>*{min-width:0}
 .row{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
 .grow{flex:1 1 auto;min-width:0}
 .muted{color:var(--sub);font-size:12.5px}
@@ -166,8 +170,8 @@ details.adv .inner{padding:0 12px 12px}
   padding:10px 18px;border-radius:8px;font-size:13.5px;z-index:60;display:none;max-width:92vw;
   box-shadow:0 2px 6px 2px rgba(60,64,67,.15),0 1px 2px rgba(60,64,67,.3);white-space:pre-wrap;
 }
-.kvs{display:grid;grid-template-columns:auto 1fr;gap:2px 12px;font-size:12.5px;color:var(--sub)}
-.kvs .v{color:var(--text);overflow-wrap:anywhere}
+.kvs{display:grid;grid-template-columns:auto minmax(0,1fr);gap:2px 12px;font-size:12.5px;color:var(--sub)}
+.kvs .v{color:var(--text);overflow-wrap:anywhere;min-width:0}
 .empty{border:1.5px dashed var(--line);border-radius:var(--r);padding:26px 16px;text-align:center;color:var(--sub);font-size:13.5px}
 .spin{display:inline-block;width:13px;height:13px;border:2px solid var(--sub);border-top-color:transparent;border-radius:50%;animation:sp 0.8s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
@@ -244,7 +248,7 @@ button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
 @media(min-width:760px){.dash-2col{grid-template-columns:minmax(0,1fr) minmax(0,1.15fr)}}
 .card-h{font-size:12px;font-weight:800;color:var(--acc);letter-spacing:.4px;margin:0 0 4px;display:flex;align-items:center;gap:8px}
 .meter{margin:10px 0}
-.m-hd{display:flex;align-items:baseline;gap:8px;font-size:12.5px;color:var(--sub);min-width:0}
+.m-hd{display:flex;align-items:baseline;gap:8px;font-size:12.5px;color:var(--sub);min-width:0;flex-wrap:wrap}
 .m-hd b{color:var(--text);font-size:13px;font-weight:700}
 .m-hd .r{margin-left:auto;color:var(--text);font-variant-numeric:tabular-nums;font-size:12px;white-space:nowrap}
 .mbar{height:8px;border-radius:999px;background:#e9ecef;border:0;overflow:hidden;margin-top:5px}
@@ -257,6 +261,51 @@ button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
 #home-live .mini{flex-wrap:wrap}
 #home-live .lact{display:flex;align-items:center;gap:6px;width:100%;justify-content:flex-end;flex-wrap:wrap;margin-top:-2px}
 #home-live .lact .upt{white-space:nowrap}
+/* デコード速度: basalt の Speed カード (1 秒サンプル / スロット毎の折れ線) を
+   白地のカードに合わせたもの。SVG の目盛り線は縦位置だけを共有する。 */
+.par-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px;min-width:0}
+.par-lab{font-size:12px;color:var(--sub);font-weight:600;white-space:nowrap}
+.par-sel{width:auto;flex:0 1 auto;max-width:300px;min-height:34px;padding:5px 10px;font-size:12.5px;margin:0}
+.par-rate{display:flex;align-items:baseline;gap:4px;white-space:nowrap;margin-left:auto}
+.par-rate b{font-size:22px;font-weight:800;color:var(--acc);font-variant-numeric:tabular-nums;line-height:1}
+.par-unit{font-size:12px;font-weight:700;color:var(--text)}
+.par-sub{font-size:11.5px;color:var(--sub)}
+.par-chart-wrap{margin-top:10px;min-width:0}
+.par-meta{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--sub);min-width:0;margin:2px 0 4px}
+.par-meta span:nth-child(2){margin-left:auto;white-space:nowrap}
+.par-chart{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r2);padding:8px 10px 4px;position:relative}
+.par-chart svg{display:block;width:100%;height:180px}
+.par-chart-empty{min-height:180px;display:flex;align-items:center;justify-content:center;gap:8px;
+  background:var(--bg2);border:1px solid var(--line);border-radius:var(--r2);color:var(--sub);font-size:12.5px}
+.par-axis{display:flex;justify-content:space-between;font-size:11px;color:var(--sub);padding:0 2px;margin-top:4px}
+.par-note{margin-top:10px;padding:8px 10px;border:1px dashed var(--line);border-radius:var(--r2);
+  color:var(--sub);font-size:12px;line-height:1.55;background:var(--bg2);overflow-wrap:anywhere}
+.par-note.err{border-color:#f0bbb7;background:#fce8e6;color:var(--err)}
+.par-slots{margin-top:10px;border-top:1px solid var(--line);padding-top:4px}
+/* basalt の Slots タブ: Slot N+状態 | tok/s | Last 60 s (スロット毎の独立グラフ) |
+   Output tok | Context | Accept。待機行は値だけを薄くし、グリッドの形を変えない */
+.par-srow{display:grid;grid-template-columns:104px 74px minmax(0,1fr) 88px 112px 64px;gap:10px;
+  align-items:center;padding:7px 2px;font-size:12.5px;min-width:0}
+.par-srow.par-head{font-size:11.5px;color:var(--sub);font-weight:700;padding:4px 2px}
+.par-srow.par-head .par-num,.par-srow.par-head .par-ctx{text-align:right}
+.par-srow + .par-srow{border-top:1px solid color-mix(in srgb,var(--line) 60%,transparent)}
+.par-srow span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.par-num{font-family:ui-monospace,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums;text-align:right}
+.par-num.mut,.par-ctx.mut{color:var(--sub)}
+.par-slotid{display:flex;flex-direction:column;line-height:1.25;min-width:0}
+.par-slotid .nm{font-weight:700}
+.par-slotid i{font-style:normal;font-size:11px;color:var(--sub)}
+.par-slotid i.ok{color:var(--ok);font-weight:700}
+.par-slotid i.warn{color:var(--warn);font-weight:700}
+.par-sk{min-width:0;height:34px}
+.par-sk svg{display:block;width:100%;height:34px}
+.par-sk-empty{color:var(--sub);text-align:center;line-height:34px}
+.par-foot{margin-top:6px;font-size:11.5px;color:var(--sub);font-variant-numeric:tabular-nums}
+/* 折れ線終端のラベル (basalt の "All" / "s1") */
+.par-cl{position:absolute;right:6px;transform:translateY(-50%);font-size:10.5px;font-weight:700;pointer-events:none;
+  font-variant-numeric:tabular-nums;background:color-mix(in srgb,var(--bg2) 78%,transparent);border-radius:3px;padding:0 3px}
+.par-empty{margin-top:10px;padding:18px 14px;border:1.5px dashed var(--line);border-radius:var(--r2);
+  text-align:center;color:var(--sub);font-size:13px;line-height:1.55}
 /* ---------------- playground ---------------- */
 #pg-msgs{max-height:56vh;min-height:130px;overflow:auto;display:flex;flex-direction:column;gap:10px;padding:2px 2px 6px}
 .pg-msg{max-width:86%;padding:9px 12px;border-radius:10px;border:1px solid var(--line);font-size:14px;overflow-wrap:break-word;word-break:normal}
@@ -284,6 +333,28 @@ table.bm{border-collapse:collapse;width:100%;font-size:12.5px;white-space:nowrap
 table.bm th,table.bm td{padding:6px 9px;border-bottom:1px solid var(--line);text-align:right;font-variant-numeric:tabular-nums}
 table.bm th:first-child,table.bm td:first-child{text-align:left}
 table.bm th{color:var(--sub);font-weight:700;font-size:11px;letter-spacing:.3px}
+/* 先頭列 (並列度) を固定: 横スクロール後も「どの行か」を見失わない (border-collapse 対策に box-shadow) */
+table.bm th:first-child,table.bm td:first-child{position:sticky;left:0;background:var(--card);z-index:1;box-shadow:inset -1px 0 0 var(--line)}
+/* 補助列 (req/s ほか) はボタンで開閉 (data-x=0 で CSS が隠す) */
+table.bm[data-x="0"] .bm-x{display:none}
+/* 経時チャート: SVG は viewBox スケールで親幅に追随 */
+.bm-chart{margin-top:8px}
+.bm-chart svg{display:block;width:100%;height:auto}
+.bm-lgd{display:flex;flex-wrap:wrap;gap:2px 12px;font-size:11px;color:var(--sub);margin-top:2px}
+.bm-lgd i{display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:4px;vertical-align:-1px}
+.bm-cmp{border-color:#c6dafc}
+.bm-ck{display:flex;align-items:center}
+.bm-ck input{accent-color:var(--acc);width:15px;height:15px;cursor:pointer}
+/* ページ内タブ: 実行 / 履歴・管理 / 結果・比較 (メニューを増やさない機能分離) */
+.bm-tabs{display:flex;gap:4px;margin-top:12px;border-bottom:2px solid var(--line);flex-wrap:wrap}
+.bm-tab{appearance:none;border:0;background:none;font:inherit;font-size:13.5px;font-weight:700;color:var(--sub);cursor:pointer;display:inline-flex;align-items:center;gap:6px;padding:8px 14px;margin-bottom:-2px;border-bottom:2px solid transparent;border-radius:8px 8px 0 0}
+.bm-tab:hover{color:var(--text);background:var(--card2)}
+.bm-tab.on{color:var(--acc);border-bottom-color:var(--acc)}
+.bm-tab .n{font-size:11px;font-weight:700;background:var(--bg2);border:1px solid var(--line);border-radius:99px;padding:1px 7px;color:var(--sub);font-variant-numeric:tabular-nums}
+.bm-tab.on .n{background:#e8f0fe;border-color:#c6dafc;color:var(--acc)}
+.bm-tab .run-dot{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:bmpulse 1.2s ease-in-out infinite}
+@keyframes bmpulse{50%{opacity:.3}}
+.bm-pick + .bm-pick{margin-top:2px}
 .nbadge.run{background:var(--acc);color:#fff}
 /* ---------------- ロール権限で隠す要素 (キーは rbac.CAPS / can() と対応) ---------------- */
 body.no-edit .need-edit,body.no-bench .need-bench,body.no-cal .need-cal,body.no-oom .need-oom,
@@ -297,3 +368,12 @@ body.no-backend .need-backend,body.no-admin .need-admin,body.no-dashboard .need-
 .ic{width:1.05em;height:1.05em;fill:currentColor;flex:none;vertical-align:-.15em}
 .sprite{position:absolute;width:0;height:0;overflow:hidden}
 button .ic{margin-right:1px}
+@media(max-width:560px){
+  .par-tools{gap:6px}
+  .par-sel{flex:1 1 180px;max-width:none}
+  .par-rate{width:100%;justify-content:flex-end;margin-left:0}
+  .par-chart svg{height:140px}
+  .par-chart-empty{min-height:140px}
+  .par-srow{grid-template-columns:84px 56px minmax(0,1fr)}
+  .par-srow .par-gen,.par-srow .par-ctx,.par-srow .par-acc{display:none}
+}
