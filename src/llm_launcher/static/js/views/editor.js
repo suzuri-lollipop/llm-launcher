@@ -128,11 +128,16 @@ function hfPickerHtml(f) {
   const hf = S.hf;
   if (hf === undefined) return `<div class="muted" style="font-size:11.5px;margin-top:4px">HFキャッシュを確認中…</div>`;
   const dirNote = `<div class="muted mono" style="font-size:10.5px;margin-top:3px">${esc(hf.cache_dir)} · <a href="#" onclick="hfReload();return false">再スキャン</a></div>`;
-  const isGguf = S.editing?.backend === "llamacpp";
+  /* 選択中バックエンドが実際に読み込める形だけに出す:
+     basalt = .basalt pack ファイル / llama.cpp = .gguf ファイル (gguf 無ければ DIR 指定)。
+     他 (vLLM / SGLang / FreeToken 系) はスナップショット DIR をそのまま渡す */
+  const bid = S.editing?.backend;
   const opts = [];
   for (const m of (hf.models || [])) {
     const tag = m.source === "data" ? "[データ] " : "";
-    if (isGguf) {
+    if (bid === "basalt") {
+      for (const g of (m.basalt || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
+    } else if (bid === "llamacpp") {
       for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
       if (!(m.gguf || []).length && m.has_weights !== false)
         opts.push({v: m.snapshot, label: `${tag}${m.repo_id} · (ggufなし・ディレクトリ指定)`});
@@ -140,7 +145,8 @@ function hfPickerHtml(f) {
       opts.push({v: m.snapshot, label: `${tag}${m.repo_id}${m.revision ? " · rev " + m.revision : ""}`});
     }
   }
-  if (!opts.length) return `<div class="muted" style="font-size:11.5px;margin-top:4px">キャッシュ / データフォルダにモデルがありません${isGguf ? " (gguf検出なし)" : ""}</div>${dirNote}`;
+  const noneNote = bid === "basalt" ? " (.basalt pack 検出なし)" : (bid === "llamacpp" ? " (gguf検出なし)" : "");
+  if (!opts.length) return `<div class="muted" style="font-size:11.5px;margin-top:4px">キャッシュ / データフォルダにモデルがありません${noneNote}</div>${dirNote}`;
   return `
     <select style="margin-top:5px" onchange="hfPick('${f.key}', this.value)">
       <option value="">キャッシュ / データフォルダから選択 (${opts.length})</option>
@@ -220,7 +226,13 @@ function renderEditor() {
       <button type="button" class="ghost" onclick="launchJsonExport()"><svg class=ic aria-hidden=true><use href=#i-file /></svg> 現在のパラメータから起動 JSON を作成 (Strata 方式へ切替)</button>
     </div>
   `);
-  const paramsHtml = (launchCap && cfgPath) ? launchBlock : launchBlock + fieldsHtml;
+  // Basalt: フォームの値から basalt_config.json (v2) を生成し、プロファイルの --config に繋ぐ
+  const basaltBlock = (b?.id === "basalt") ? `
+    <div class="row" style="gap:8px;margin:2px 2px 10px">
+      <button type="button" class="ghost" onclick="basaltConfigExport()"><svg class=ic aria-hidden=true><use href=#i-file /></svg> 現在のパラメータから basalt_config.json を作成</button>
+    </div>
+    <div class="muted" style="font-size:11px;margin:0 2px 10px">※ --config を設定すると models / engine は JSON が正になります (--model / --gpu / --parallel などモデル項目は送りません)</div>` : "";
+  const paramsHtml = (launchCap && cfgPath) ? launchBlock : launchBlock + basaltBlock + fieldsHtml;
   const legacyExtra = String(d.extra_args || "").trim();
   sheet.innerHTML = `
     <h3>${d.id ? "プロファイル編集" : "新規プロファイル"}</h3>
@@ -299,6 +311,19 @@ async function launchJsonExport() {
     toast("起動 JSON を作成しました");
     await refresh(false);
     go(routeUrl(S.tab, "editor", d.id), true);   // config 主体モードで開き直す (履歴は積まない)
+  } catch (e) { toast("作成失敗: " + e.message); }
+}
+/* Basalt: 現在のフォーム値から basalt_config.json (v2) を作り直して --config に繋ぐ */
+async function basaltConfigExport() {
+  const d = S.editing;
+  if (!d || !d.id) return toast("先にプロファイルを保存してください (新規作成中は JSON を作れません)");
+  try {
+    collectDraft();
+    await api(`/api/profiles/${d.id}`, {method:"PUT", body: editorBody()});   // 現値を保存してから生成
+    const r = await api(`/api/profiles/${d.id}/config-json`, {method:"POST"});
+    toast("basalt_config.json を作成しました: " + (r.path || ""));
+    await refresh(false);
+    go(routeUrl(S.tab, "editor", d.id), true);   // config 値の入った状態で開き直す
   } catch (e) { toast("作成失敗: " + e.message); }
 }
 async function launchJsonShow(btn) {

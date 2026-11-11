@@ -21,7 +21,8 @@ VIEWS.setup = `
 const INS_ST = {queued: ["info", "待機"], running: ["warn", "実行中"], done: ["ok", "完了"],
                 failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "中断 (launcher 再起動)"]};
 const INS_STEPS = {clone: "clone", branch: "ブランチ切替", venv: "venv 作成", precheck: "確認",
-                   install: "uv pip install", verify: "import 確認"};
+                   install: "uv pip install", cmake: "cmake 設定", "cmake-build": "cmake ビルド",
+                   engine: "エンジン受信", model: "モデル準備 (Strata)", verify: "import 確認"};
 /* install ステップの実体は uv があれば uv pip、無い環境だけ venv の pip。
    手順名はサーバーが返す tool (実行する argv と同じ判定) で出す。 */
 const insToolLabel = tool => tool === "pip" ? "pip install" : "uv pip install";
@@ -113,6 +114,9 @@ async function insStart() {
 function dlPickModel() {                 // 対応モデル一覧 → repo id に反映 (保存先が model_data 系なら従う)
   const v = inputVal("#dl-model"); if (!v) return;
   $("#dl-repo").value = v;
+  // 一覧エントリの include (例: basalt の pack 1 個) をファイル絞り込みへ入れる
+  const ent = (S.ins.installable || []).flatMap(e => e.supported_models || []).find(m => m.repo_id === v);
+  if (ent && ent.include && ent.include.length) $("#dl-patterns").value = ent.include.join(", ");
   const sp = insSpec($("#ins-backend").value);
   if (sp && sp.model_data && inputVal("#dl-dest") !== sp.id) {
     const dd = $("#dl-dest");
@@ -213,6 +217,8 @@ const insTitle = r => insKind(r) === "calibrate"
   ? `<svg class=ic aria-hidden=true><use href=#i-target /></svg> ${esc(r.profile_name || r.profile_id)} <span class="muted mono" style="font-size:12px">${esc(r.backend_name || r.backend)}</span>`
   : insKind(r) === "download" ? `<svg class=ic aria-hidden=true><use href=#i-download /></svg> ${esc(r.repo_id)}`
   : `<svg class=ic aria-hidden=true><use href=#i-box /></svg> ${esc(insName(r.backend))}`
+    + (r.phase === "model"
+        ? ` <span class="muted" style="font-size:12px">モデル準備${r.model ? ": " + esc(r.model) : ""}</span>` : "")
     + (r.ref ? ` <span class="muted mono" style="font-size:12px">${esc(r.ref)}</span>` : "");
 /* ---- セットアップ③: <svg class=ic aria-hidden=true><use href=#i-target /></svg> タブと同じ選択・同じ実行コア (calRun) を使う薄い UI ---- */
 const scProfiles = () => calUiOn() ? (((S.state || {}).profiles || []).filter(p => calSupports(p.backend))) : [];
@@ -367,12 +373,20 @@ function renderSetup() {
       : (sp.current_ref === ref ? `既存 clone は ${ref} 済み — ブランチは変えません`
         : (sp.current_ref ? `既存 clone は ${sp.current_ref} — ${ref} へ切り替えます (未コミットの変更があれば失敗)`
           : `既存 clone のブランチが判別できないため ${ref} への切替を試みます`))));
-  const tl = insToolLabel(S.ins.tool);
+  const tl = insToolLabel((sp && sp.tool) || S.ins.tool);
+  /* 手順の末尾: requirements 系 (pyproject の無い Basalt など) は -r + cmake ビルド、
+     Strata (engine_fetch) は -r + 公式リリースからのエンジン受信、
+     packaging 系は従来どおり -e ".[extras]"。cmake / engine は実在チェック込みの verify で締める */
+  const tail = sp.requirements
+    ? `${tl} -r ${sp.requirements}`
+      + (sp.cmake ? " → cmake configure + build (bin) → import + エンジン確認" : "")
+      + (sp.engine_fetch ? " → エンジン受信 (公式リリース) → import + エンジン確認" : "")
+    : `${tl} -e ".[${sp.extras}]"`;
   $("#ins-preview").textContent = !sp ? "" : (!sp.cloned
-    ? `git clone --depth 1 ${ref ? "-b " + ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → ${tl} -e ".[${sp.extras}]"`
+    ? `git clone --depth 1 ${ref ? "-b " + ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → ${tail}`
     : (sp.current_ref === ref
-        ? `既存 clone (${ref}) → .venv 作成 → ${tl} -e ".[${sp.extras}]"`
-        : `git fetch + checkout ${ref} → .venv 作成 → ${tl} -e ".[${sp.extras}]"`));
+        ? `既存 clone (${ref}) → .venv 作成 → ${tail}`
+        : `git fetch + checkout ${ref} → .venv 作成 → ${tail}`));
   const busy = insLock || S.ins.busy;
   renderSetupCal(busy);
   const active = (S.ins.jobs || []).find(r => r.id === S.ins.active) || null;

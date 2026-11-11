@@ -16,3 +16,6 @@
 [submodule "module/vllm"]
 	path = module/vllm
 	url = https://github.com/vllm-project/vllm.git
+[submodule "module/basalt"]
+	path = module/basalt
+	url = https://github.com/jesdga95/basalt

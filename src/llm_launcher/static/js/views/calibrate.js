@@ -12,6 +12,13 @@ VIEWS.calibrate = `
         <span class="badge" id="cal-prof-state"><span class="dot"></span>-</span>
       </div>
       <div class="muted" id="cal-prof-note" style="margin-top:6px"></div>
+      <div class="row hidden" id="cal-mode-row" style="margin-top:6px;gap:8px;align-items:center">
+        <span class="muted" style="font-size:12.5px">校正対象</span>
+        <select id="cal-mode" class="grow" style="min-width:220px" onchange="calPersist()">
+          <option value="auto">single: 単一ストリーム (投機モード自動選定)</option>
+          <option value="multi">multi: 並行 prefill (piped/mixed 腕比較)</option>
+        </select>
+      </div>
       <label class="switch" style="margin-top:6px"><input type="checkbox" id="cal-restart"><span class="track"></span><span class="lab" style="font-size:12.5px">調整後にサーバーを起動し直す (完了後に自動起動)</span></label>
       <div class="row" style="margin-top:10px">
         <button class="primary need-cal" id="cal-start" onclick="calStart()"><svg class=ic aria-hidden=true><use href=#i-target /></svg> キャリブレーション実行</button>
@@ -40,8 +47,10 @@ function calInit() {
                    if ($("#sc-profile")) $("#sc-profile").value = d.profile; }
   if (d.restart === true) { $("#cal-restart").checked = true;
                             if ($("#sc-restart")) $("#sc-restart").checked = true; }
+  if (d.mode && $("#cal-mode")) $("#cal-mode").value = d.mode;
   $("#cal-profile").addEventListener("change", calPersist);
   $("#cal-restart").addEventListener("change", calPersist);
+  if ($("#cal-mode")) $("#cal-mode").addEventListener("change", calPersist);
 }
 const calSaved = () => { try { return JSON.parse(localStorage.getItem(CAL_KEY) || "{}") || {}; } catch { return {}; } };
 /* 選択 (プロファイル / 再起動) は <svg class=ic aria-hidden=true><use href=#i-target /></svg> タブと セットアップ③ で同一の値を指す。
@@ -57,7 +66,9 @@ function calWrite(patch) {
 }
 function calPersist() {
   if (!S.cal) return;
-  calWrite({profile: $("#cal-profile").value, restart: $("#cal-restart").checked});
+  const mode = $("#cal-mode") ? $("#cal-mode").value : "";
+  calWrite({profile: $("#cal-profile").value, restart: $("#cal-restart").checked,
+            mode: mode || undefined});
 }
 function openCalibration(pid) {
   if (!S.cal) calInit();
@@ -92,18 +103,23 @@ async function calRun(pid, restart, opts) {
   if (!p || !calSupports(p.backend)) { toast("Maya / Strata / FreeToken のプロファイルで実行できます"); return false; }
   const live = liveOf(pid);
   const isFt = p.backend === "freetoken" || p.backend === "freetoken-fork";
-  const t = { maya: "~10-15分 (DS4 は 25-40分)", "strata": "~15-30分 (measure) + apply",
-              "freetoken": "~3-4時間 (全部測りの1発)", "freetoken-fork": "~3-4時間 (全部測りの1発)" }[p.backend] || "長時間";
+  const modeSel = isFt && $("#cal-mode") ? $("#cal-mode").value : "";
+  const isMulti = isFt && modeSel === "multi";
+  const t = isMulti ? "~15-25分 (4腕 × エンジン再起動)"
+      : { maya: "~10-15分 (DS4 は 25-40分)", "strata": "~15-30分 (measure) + apply",
+          "freetoken": "~3-4時間 (全部測りの1発)", "freetoken-fork": "~3-4時間 (全部測りの1発)" }[p.backend] || "長時間";
   const warn = (live ? "稼働中のサーバーを停止して GPU を独占します。\n" : "") +
                `${b?.name || p.backend}: この PC 向け調整を実行します (${t}, PC はその間占有されます)。\n` +
                (p.backend === "strata" ? "設定は backup + smoke test 付きで適用されます。\n" : "") +
-               (isFt ? "none / mtp(+chain) / lookup の自動選定 + 内部ノブの A/B まで全部実測し、勝者の --speculative と env を起動構成へ自動記載します。\n" : "") +
+               (isMulti ? "none / mixed / piped / piped+short-first の 4 腕を並行ワークロードで実測し、勝者の並行ノブ一式 (不要なら明示的 0) を起動構成へ書き戻します。\n"
+                        : isFt ? "none / mtp(+chain) / lookup の自動選定 + 内部ノブの A/B まで全部実測し、勝者の --speculative と env を起動構成へ自動記載します。\n" : "") +
                "続行しますか?";
   if (!(opts && opts.auto) && !confirm(warn)) return false;
   d.busy = true; renderCalibrate(); renderSetup();
   try {
     const job = await api("/api/calibrations", {method: "POST",
-      body: {profile_id: pid, restart_after: restart === true}});
+      body: {profile_id: pid, restart_after: restart === true,
+             ...(modeSel ? {mode: modeSel} : {})}});
     toast(`キャリブレーション開始: ${job.profile_name} [${job.backend_name}]`);
     d.active = job.id;
     calPoll(true);
@@ -187,7 +203,9 @@ function calStatusBadge(r) {
   return `<span class="badge ${cls}"><span class="dot"></span>${label}</span>`;
 }
 const CAL_STEP_LABEL = {create: "profile 作成", measure: "measure", review: "review", apply: "apply",
+                        parallel: "並列校正",
                         calibrate: "実測調整", sweep: "MTP sweep", "calibrate-lookup": "lookup sweep",
+                        "calibrate-multi": "multi 並行校正",
                         auto: "自動選定", "phase-mtp": "MTP 実測", "phase-lookup": "lookup 実測",
                         tournament: "決勝"};
 const calStepLabel = name => CAL_STEP_LABEL[name] || name;
@@ -224,7 +242,9 @@ function calPreview(p) {
     return "maya.sh --calibrate --no-start --config <maya-<model>.json>  (起動せず実測 → config へ書き戻し)";
   if (p.backend === "strata" || p.backend === "strata-fork")
     return "strata.py engine calibrate --profile <保存profile> --measure --exclusive --out <report.json> → --review-result → --apply-result";
-  return "launcher 内で MTP / lookup を実測 (auto 選定) → 勝者の --speculative と env を起動構成 (profile / 起動 JSON) へ書き戻し";
+  return "single: MTP / lookup を実測 (auto 選定) → 勝者の --speculative と env を書き戻し / "
+       + "multi: none・mixed・piped・piped+short-first を並行ワークロードで実測 → "
+       + "勝者の並行ノブ一式 (不要なら明示的 0) を起動構成 (profile / 起動 JSON) へ書き戻し";
 }
 function renderCalibrate() {
   calInit();
@@ -249,6 +269,8 @@ function renderCalibrate() {
     : ($("#cal-restart").checked ? "未起動 → 調整完了後に自動起動します。"
                                  : "未起動 → 調整のみ実行します (完了後は起動タブから開始)");
   $("#cal-start").disabled = S.cal.busy || !!S.cal.active || !p;
+  const isFtP = p && (p.backend === "freetoken" || p.backend === "freetoken-fork");
+  $("#cal-mode-row").classList.toggle("hidden", !isFtP);
   $("#cal-note").textContent = S.cal.busy ? "開始中…"
     : (S.cal.active ? "キャリブレーション実行中です (同時に 1 件)" : "");
   $("#cal-preview").textContent = calPreview(p);

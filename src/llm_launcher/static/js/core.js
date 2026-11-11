@@ -110,18 +110,23 @@ function statusBadge(s) {
 /* ============================================================= polling */
 let refreshTimer = null, logTimer = null, sysTimer = null, clockTimer = null, benchTimer = null, calTimer = null, insTimer = null;
 async function refresh(silent = true) {
+  /* ランプ (live-dot) は「接続」専用。描画中の JS 例外を接続エラーと取り違えると、
+     サーバーが健全なのに画面が赤く沈んで見える (実事故: 実行中の段バッジ組み立てで
+     undefined 参照 → 履歴ごと消灯)。取得と描画を try で分ける。 */
   try {
     S.state = await api("/api/state");
     $("#live-dot").classList.add("on");
     const sys = S.state.system;
     S.hdr = { host: sys.hostname, ip: sys.ip };   // 右上の吹き出しに出す (ヘッダにはアイコンだけ)
     renderAcct();
-    renderAll(!silent);
   } catch (e) {
     $("#live-dot").classList.remove("on");
     S.hdr = { err: true }; renderAcct();          // 接続エラーは吹き出しの中と live-dot の赤で示す
     if (!silent) toast("状態取得に失敗: " + e.message);
+    return;
   }
+  try { renderAll(!silent); }
+  catch (e) { console.error("render error:", e); }  // 描画失敗はランプを落とさずコンソールへ
 }
 async function refreshSystem() {
   try { S.sys = await api("/api/system"); }

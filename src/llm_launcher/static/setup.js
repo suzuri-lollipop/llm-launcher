@@ -32,7 +32,9 @@ async function api(path, opts = {}) {
 
 /* ---------------------------------------------------------------- 状態 */
 const INS_STEPS = { clone: "リポジトリを取得 (clone)", branch: "ブランチ切替", venv: "実行環境を作成",
-                    precheck: "インストール内容を確認", verify: "動作確認 (import)" };
+                    precheck: "インストール内容を確認", cmake: "エンジンを設定 (cmake)",
+                    "cmake-build": "エンジンをビルド (cmake)", engine: "エンジンを受信 (公式リリース)",
+                    model: "モデルを準備 (Strata)", verify: "動作確認 (import)" };
 const CAL_STEPS = { prepare: "調整の準備", auto: "最適構成を自動で探す", lookup: "キャッシュを引く",
                     sweep: "実際に測る (実測)", create: "プロファイルを更新", adjust: "調整を反映",
                     restart: "サーバーを起動し直す" };
@@ -55,9 +57,13 @@ const W = {
 };
 const spec = id => (W.installs.installable || []).find(e => e.id === (id ?? W.backend)) || null;
 const specName = id => (spec(id) || {}).name || id || "";
-const toolLabel = () => W.installs.tool === "pip" ? "pip install" : "uv pip install";
+/* install ステップの実体は uv があれば uv pip、無い環境だけ venv の pip。venv_pip の
+   バックエンド (Strata) は uv が在っても pip を使うので、spec / ジョブが返す tool を優先する
+   (UI の手順名は実際に走る argv と同じ判定から出す)。 */
+const toolLabelFor = t => (t || W.installs.tool) === "pip" ? "pip install" : "uv pip install";
+const toolLabel = sp => toolLabelFor((sp || spec() || {}).tool);
 const stepLabel = (name, kind) => kind === "install"
-  ? (name === "install" ? toolLabel() : (INS_STEPS[name] || name))
+  ? (name === "install" ? toolLabelFor((W.job || {}).tool) : (INS_STEPS[name] || name))
   : (CAL_STEPS[name] || name);
 
 /* ---------------------------------------------------------------- 画面遷移 */
@@ -222,12 +228,18 @@ function renderReview() {
   const rows = [
     ["ソフト", `${esc(sp.name)} <span class="mono">${esc(sp.module_path)}</span>`],
     ["バージョン", W.ref ? esc(W.ref) : "既定"],
-    ["実行内容", `1. リポジトリを取得 (git clone)<br>2. 実行環境を作成 (.venv)<br>3. 依存パッケージを導入 (${esc(toolLabel())})`],
+    ["実行内容", `1. リポジトリを取得 (git clone)<br>2. 実行環境を作成 (.venv)<br>`
+      + `3. 依存パッケージを導入 (${sp.requirements ? `${toolLabel(sp)} -r ${esc(sp.requirements)}` : esc(toolLabel(sp))})`
+      + (sp.cmake ? "<br>4. ネイティブエンジンをビルド (cmake → bin/basalt)" : "")
+      + (sp.engine_fetch ? "<br>4. ネイティブエンジンを受信 (公式リリース → engine/strata)" : "")],
     ["この後の予定", doing],
   ];
   $("#rv-rows").innerHTML = rows.map(([k, v]) =>
     `<div class="row-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
-  $("#rv-preview").textContent = `git clone → .venv → ${toolLabel()} -e ".[${sp.extras || "accel"}]"`;
+  $("#rv-preview").textContent = `git clone → .venv → `
+    + (sp.requirements ? `${toolLabel(sp)} -r ${sp.requirements}` : `${toolLabel(sp)} -e ".[${sp.extras || "accel"}]"`)
+    + (sp.cmake ? " → cmake configure + build" : "")
+    + (sp.engine_fetch ? " → エンジン受信 (公式リリース)" : "");
   $("#rv-start").disabled = false;
   $("#rv-start").textContent = "インストール";
   go("s-review");
@@ -271,7 +283,11 @@ function renderProgress() {
   err.classList.toggle("hidden", !r.error);
   if (r.error) err.textContent = r.error;
   $("#pg-title").textContent = W.kind === "install"
-    ? (r.status === "done" ? "インストールが完了しました" : STEP_NAMES[r.status] && r.status !== "running" ? STEP_NAMES[r.status] : "インストール中…")
+    ? (r.phase === "model"
+        ? (r.status === "done" ? "モデルの準備が完了しました"
+           : r.status === "running" ? "Strata がモデルを準備しています (時間がかかります)"
+           : (STEP_NAMES[r.status] || "準備中"))
+        : (r.status === "done" ? "インストールが完了しました" : STEP_NAMES[r.status] && r.status !== "running" ? STEP_NAMES[r.status] : "インストール中…"))
     : $("#pg-title").textContent;
 }
 async function pullLog(ep) {
@@ -304,13 +320,30 @@ async function pollTick() {
     finishJob();
   }
 }
+/* インストール完了後の追い書き */
+const INSTALL_NOTES = {
+  strata: "インストール完了です。次はモデルの設定 — 家系・サイズ・コンテキスト長を選ぶと、"
+    + "Strata 本体のセットアップ手順 (ダウンロードと strata-<model>.json 作成) がこの画面のまま"
+    + "走りきるため、シェルの準備はありません。",
+};
 function finishJob() {
   const r = W.job || {};
   if (W.kind === "install") {
+    if (r.phase === "model") {
+      // Strata ② のモデル構成ジョブ: 完了後は稼働設定 (config 接続) へ直行する
+      if (r.status === "done") {
+        W.summary.push({ ok: true, t: "Strata のモデル設定が完了しました (strata-<model>.json 作成済み)" });
+        renderConfig(); go("s-config"); return;
+      }
+      renderProgress();
+      offerRetry("モデル選びやり直す");
+      return;
+    }
     if (r.status === "done") {
       W.summary.push({ ok: true, t: `${specName(r.backend)} をインストールしました` });
       $("#ok-title").textContent = `${specName(r.backend)} のインストールが完了しました`;
-      $("#ok-sub").textContent = "次はモデルのダウンロードです。まだモデルが無い場合はダウンロードしてください。";
+      $("#ok-sub").textContent = INSTALL_NOTES[r.backend]
+        || "次はモデルのダウンロードです。まだモデルが無い場合はダウンロードしてください。";
       go("s-installed");
     } else {
       renderProgress();
@@ -349,6 +382,7 @@ function offerRetry(label) {
   b.onclick = () => {
     b.classList.add("hidden");
     if (W.kind === "cal") { W.summary.push({ ok: false, t: "調整は完了しませんでした (後で実行できます)" }); renderDone(); go("s-done"); }
+    else if ((W.job || {}).phase === "model") { renderModel(); go("s-model"); }
     else { renderReview(); }
   };
 }
@@ -368,13 +402,158 @@ $("#dl-next").addEventListener("click", () => { renderConfig(); go("s-config"); 
    repo id 直接入力は「その他」の details に格納し、既定の導線にはしない。 */
 let mdLocal = [];                                   // /api/hf-models のダウンロード済み一覧
 const mdMode = () => ($$("#md-modes input").find(i => i.checked) || {}).value || "dl";
+/* ---- Strata: 純正 setup.py を --yes (非対話) で走らせる選択面板 ---------------- */
+const MD_LABELS = {
+  other: [["モデルをダウンロードする", "対応モデルの一覧から選んで取得します"],
+          ["ダウンロード済みのモデルを使う", "この PC にあるモデルから選びます (再取得しません)"]],
+  strata: [["モデルをダウンロードする", "家系・サイズ・コンテキスト長を選ぶと、Strata 本体のセットアップ手順でダウンロードと設定作成まで走ります"],
+           ["ダウンロード済みのモデルを使う", "この PC に重みが在るモデルから選びます (再取得しません)"]],
+};
+function setMdModeLabels(isSt) {
+  const L = isSt ? MD_LABELS.strata : MD_LABELS.other;
+  $("#md-dl-mode-t1").textContent = L[0][0]; $("#md-dl-mode-t2").textContent = L[0][1];
+  $("#md-local-mode-t1").textContent = L[1][0]; $("#md-local-mode-t2").textContent = L[1][1];
+  // Strata はモデル設定なしでは起動設定 (values.config) が作れないので「あとでする」を隠す
+  $("#md-later").classList.toggle("hidden", !!isSt);
+}
+async function loadStrata() {
+  if (W.mdStrata) return W.mdStrata;
+  try { W.mdStrata = await api("/api/installs/strata-model"); }
+  catch { W.mdStrata = { available: false, families: {}, contexts: [], configs: [], venv_ready: false }; }
+  return W.mdStrata;
+}
+function mdStModels() {
+  return (((W.mdStrata || {}).families || {})[W.mdStFam] || {}).models || {};
+}
+function mdStFull(m) {
+  const h = (mdStModels()[m] || {}).have || {};
+  return !!(h.files && h.found >= h.files);
+}
+function mdStFillSizes() {
+  const st = W.mdStrata || {};
+  const ms = mdStModels();
+  const ram = (st.pc || {}).ram_gb || 0;
+  const ids = Object.keys(ms);
+  // 推奨 = この PC の RAM に収まる最大サイズ (無ければ最小)。selection は推奨から始める
+  const fit = ids.filter(m => !(Number(ms[m].ram_gb) > ram))
+                 .sort((a, b) => (ms[b].ram_gb || 0) - (ms[a].ram_gb || 0));
+  const rec = fit[0] || ids[0] || "";
+  // ダウンロード択の一覧は「まだ無いモデル」から選ぶ — 済みのものはグレー表示 (選択不可)
+  if (!ids.includes(W.mdStModel) || mdStFull(W.mdStModel)) {
+    W.mdStModel = fit.find(m => !mdStFull(m)) || rec || "";
+  }
+  $("#md-size").innerHTML = ids.map(m => {
+    const d = ms[m] || {}; const bits = [];
+    if (d.ram_gb) bits.push(`RAM ${d.ram_gb} GB${ram && d.ram_gb > ram ? " ※この PC " + ram + " GB" : ""}`);
+    if (!mdStFull(m) && d.download_gb) bits.push(`DL ${d.download_gb} GB`);
+    return `<option value="${esc(m)}"${m === W.mdStModel ? " selected" : ""}${mdStFull(m) ? " disabled" : ""}>`
+      + `${esc((d.label || m) + (mdStFull(m) ? " (ダウンロード済み" + (((d.have || {}).gb) ? " " + d.have.gb + " GB" : "") + ")" : "") + (bits.length ? " — " + bits.join(" / ") : "") + (m === rec && !mdStFull(m) ? " (この PC 推奨)" : ""))}</option>`;
+  }).join("") || '<option value="">(サイズ一覧が空です)</option>';
+  // vision は対応パックだけ選択を出して既定 ON。非対応は送信しない
+  const d = ms[W.mdStModel] || {};
+  $("#md-vision-opt").style.display = d.vision ? "" : "none";
+  $("#md-vision-opt").classList.toggle("sel", $("#md-vision").checked);
+  mdStHint();
+}
+function mdStRecCtx() {
+  const d = mdStModels()[W.mdStModel] || {};
+  return Number(d.rec_context) || 131072;
+}
+function mdStFillGpus() {
+  const st = W.mdStrata || {};
+  const fam = (st.families || {})[W.mdStFam] || {};
+  const cards = ((st.pc || {}).gpus || []).filter(g => g.usable);
+  const field = $("#md-gpu-field");
+  if (cards.length < 2) { field.classList.add("hidden"); W.mdStGpus = ""; return; }
+  field.classList.remove("hidden");
+  const opts = [["auto", "まかせる (Strata 推奨)"]];
+  cards.forEach(g => opts.push([String(g.index), `GPU ${g.index} のみ (${g.name} ${g.vram_gb} GB)`]));
+  if (fam.multi_gpu !== false) opts.push([cards.map(g => g.index).join(","),
+    `全カード共有 (${cards.map(g => g.index).join(", ")}) — モデルを分けて積む (layer split)`]);
+  if (!opts.some(o => o[0] === W.mdStGpus)) W.mdStGpus = "auto";
+  $("#md-gpu").innerHTML = opts.map(o => `<option value="${esc(o[0])}"${o[0] === W.mdStGpus ? " selected" : ""}>${esc(o[1])}</option>`).join("");
+}
+function mdStFillCtx() {
+  const st = W.mdStrata || {};
+  const fam = (st.families || {})[W.mdStFam] || {};
+  const maxc = Number(fam.max_context) || 524288;
+  const cs = ((st.contexts || []).length ? st.contexts : [8192, 32768, 65536, 131072, 204800, 262144])
+    .filter(c => c <= maxc);
+  // 既定は純正の推奨 (own_path_context / ram_ctx)。家族・サイズを変えたら推奨へ戻る
+  const rec = mdStRecCtx();
+  if (!cs.includes(W.mdStCtx) || W.mdStCtxRec !== rec) W.mdStCtx = cs.includes(rec) ? rec : 131072;
+  W.mdStCtxRec = rec;
+  $("#md-ctx").innerHTML = cs.map(c => `<option value="${c}"${c === W.mdStCtx ? " selected" : ""}>`
+    + `${c >= 1024 ? Math.round(c / 1024) + "K" : c}${c === rec ? " (推奨)" : c > rec ? " (大)" : ""}</option>`).join("");
+  mdStHint();   // 推奨と選択の差はヒントに出す (サイズ変更後は ctx が後から変わるためここで再計算)
+}
+function mdStHint() {
+  const st = W.mdStrata || {};
+  const d = mdStModels()[W.mdStModel] || {};
+  const pc = st.pc || {}; const parts = [];
+  if (!st.available) parts.push("Strata のモデル一覧が読めません — 前に戻って ① インストールを先に実行してください");
+  else if (!st.venv_ready) parts.push("Strata の実行環境 (.venv) がまだありません — 前に戻って ① インストールを実行してください");
+  if (d.about) parts.push(d.about);
+  const h = d.have || {};
+  if (h.files && h.found >= h.files) {
+    parts.push("重みはこの PC に在ります — setup.py が検証してダウンロードを素通りし、"
+      + "config JSON の作成だけ走るので速いです");
+  } else if (h.found) {
+    parts.push(`重みが部分的です (${h.found}/${h.files}) — 足りない分は受信します`);
+  } else if (d.download_gb) {
+    parts.push(`ダウンロード ${d.download_gb} GB`);
+  }
+  if (d.ram_gb) parts.push(`RAM ${d.ram_gb} GB 推奨`);
+  if (pc.disk_free_gb) parts.push(`モデル保存先 (${pc.data_dir || "Strata-data"}) の空き ${pc.disk_free_gb} GB`);
+  /* 純正の対話と同じ立場: 推奨より大きいコンテキストは「注記して従う」。
+     24GB クラスで 512K はエンジン起動時の KV 確保に失敗しうる (2026-11-09 実測) */
+  const rec = mdStRecCtx();
+  if (W.mdStCtx > rec) {
+    parts.push(`※ コンテキスト ${Math.round(W.mdStCtx / 1024)}K はこの PC 向け推奨 ${Math.round(rec / 1024)}K より大きい — 起動時に VRAM/RAM 不足で失敗することがあります`);
+  }
+  /* own-path 家系 (Qwen3.6) は純正が単一 GPU 宣言 — 2 枚在っても分割できない */
+  const cards = ((st.pc || {}).gpus || []).filter(g => g.usable);
+  if (cards.length >= 2 && (st.families || {})[W.mdStFam] && (st.families[W.mdStFam].multi_gpu === false))
+    parts.push("この家系は現在単一 GPU 専用です (純正: runs on one GPU so far)");
+  $("#md-strata-hint").textContent = parts.join(" ・ ");
+}
 function mdSync() {
   const mode = mdMode();
   $$("#md-modes .opt").forEach(o => {
     const i = o.querySelector("input"); o.classList.toggle("sel", i.checked); });
+  if (W.backend === "strata") {
+    /* 2 択は他バックエンドと同じ形: ダウンロード択 (済みのサイズはグレー) /
+       ダウンロード済みのモデルを使う (モデル名で並べ、JSON は一切見せない) */
+    $("#md-adv").hidden = true;
+    $("#md-repo").value = "";                        // repo id 直接入力は Strata では意味が無い
+    ["#md-dl-field", "#md-local-field", "#md-speed-field"].forEach(s => $(s).classList.add("hidden"));
+    $("#md-strata").classList.toggle("hidden", mode !== "dl");
+    $("#md-strata-exist-field").classList.toggle("hidden", mode !== "local");
+    const btn = $("#md-start");
+    const st = W.mdStrata || {};
+    if (mode === "dl") {
+      btn.textContent = "モデル設定を開始";
+      btn.disabled = !st.available || !st.venv_ready || !W.mdStFam || !W.mdStModel;
+      $("#md-dest").textContent = "ダウンロードと設定は Strata 本体の手順が走ります — 中断しても続きから再開できます";
+    } else {
+      btn.textContent = "このモデルで続ける";
+      btn.disabled = !$("#md-strata-exist").value;
+      const sel = (st.downloaded || []).find(x => x.key === $("#md-strata-exist").value);
+      $("#md-dest").textContent = sel
+        ? `重みはこの PC に在ります (${sel.gb || "?"} GB) — 再取得はありません`
+        : "";
+    }
+    return;
+  }
+  setMdModeLabels(false);
+  $$("#md-modes .opt").forEach(o => {
+    if ((o.querySelector("input") || {}).value === "local") o.style.display = "";
+  });
   const adv = $("#md-adv");
   adv.hidden = mode !== "dl";
   if (mode !== "dl") $("#md-repo").value = "";       // 直接入力はダウンロード時のみ意味を持つ
+  $("#md-strata").classList.add("hidden");
+  $("#md-strata-exist-field").classList.add("hidden");
   $("#md-dl-field").classList.toggle("hidden", mode !== "dl");
   $("#md-local-field").classList.toggle("hidden", mode !== "local");
   $("#md-speed-field").classList.toggle("hidden", mode !== "dl");
@@ -394,11 +573,20 @@ function mdSync() {
   }
 }
 async function renderModel() {
+  if (W.backend === "strata") { await renderModelStrata(); return; }
+  setMdModeLabels(false);
   const sp = spec();
   const ms = (sp && sp.supported_models) || [];
+  W.mdList = ms;                                    // クリック時に include (取得ファイル) を引く
   try {
     const hm = await api("/api/hf-models");
-    mdLocal = (hm.models || []).filter(m => m.has_weights && m.repo_id);
+    /* 選択中バックエンドが読める形のモデルだけに出す
+       (basalt = .basalt pack / llama.cpp = gguf / 他は重量物ディレクトリ) */
+    const shape = W.backend === "basalt" ? "basalt" : (W.backend === "llamacpp" ? "gguf" : "");
+    mdLocal = (hm.models || []).filter(m => m.repo_id && (
+      shape === "basalt" ? (m.basalt || []).length
+      : shape === "gguf" ? ((m.gguf || []).length || m.has_weights)
+      : m.has_weights));
   } catch { mdLocal = []; }
   $("#md-sel").innerHTML = ms.length
     ? ms.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
@@ -406,8 +594,9 @@ async function renderModel() {
     : '<option value="">(このバックエンドに対応モデル一覧がありません)</option>';
   $("#md-local").innerHTML = mdLocal.length
     ? mdLocal.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
-        + `${esc(m.repo_id)}${m.source === "data" ? " — 導入済みモデルフォルダ" : ""}</option>`).join("")
-    : '<option value="">(ダウンロード済みのモデルが見つかりません)</option>';
+        + `${esc(m.repo_id)}` + ((m.basalt || []).length ? ` · ${esc(m.basalt[0].name)}` : "")
+        + `${m.source === "data" ? " — 導入済みモデルフォルダ" : ""}</option>`).join("")
+    : '<option value="">(このバックエンドで使えるダウンロード済みモデルが見つかりません)</option>';
   /* 済みモデルが 0 件ならその選択を不可にしてダウンロード択に寄せる */
   const localR = $$("#md-modes input").find(i => i.value === "local");
   localR.disabled = !mdLocal.length;
@@ -425,9 +614,122 @@ $$("#md-modes input").forEach(i => i.addEventListener("change", mdSync));
 $("#md-sel").addEventListener("change", mdSync);
 $("#md-local").addEventListener("change", mdSync);
 $("#md-repo").addEventListener("input", mdSync);
+/* Strata 面板の選択変更 */
+$("#md-family").addEventListener("change", () => {
+  W.mdStFam = $("#md-family").value; W.mdStModel = ""; mdStFillSizes(); mdStFillGpus(); mdSync(); });
+$("#md-size").addEventListener("change", () => { W.mdStModel = $("#md-size").value; mdStFillSizes(); mdStFillCtx(); mdStFillGpus(); mdSync(); });
+$("#md-gpu").addEventListener("change", () => { W.mdStGpus = $("#md-gpu").value; mdSync(); });
+$("#md-ctx").addEventListener("change", () => { W.mdStCtx = parseInt($("#md-ctx").value, 10); mdStHint(); mdSync(); });
+$("#md-vision").addEventListener("change", () => {
+  $("#md-vision-opt").classList.toggle("sel", $("#md-vision").checked); mdSync(); });
+$("#md-strata-exist").addEventListener("change", mdSync);
+async function renderModelStrata() {
+  setMdModeLabels(true);
+  W.mdStrata = null;          // 再入時は表も設定済み一覧も最新の取り直し (サーバー側に 60s キャッシュ)
+  const st = await loadStrata();
+  const fams = st.families || {};
+  const famIds = Object.keys(fams).filter(f => Object.keys((fams[f] || {}).models || {}).length);
+  if (!famIds.includes(W.mdStFam)) W.mdStFam = famIds.includes("qwen") ? "qwen" : (famIds[0] || "");
+  $("#md-family").innerHTML = famIds.map(f => `<option value="${esc(f)}"${f === W.mdStFam ? " selected" : ""}>`
+    + `${esc(fams[f].title || f)}</option>`).join("")
+    || '<option value="">(Strata のモデル一覧が読めません)</option>';
+  mdStFillSizes(); mdStFillCtx(); mdStFillGpus();
+  /* ダウンロード済み一覧: 表から作る (モデル名 + サイズ + GB)。JSON 名は内部では
+     使うが UI には出さない — 「そのモデルが在る」だけがユーザーの情報 */
+  const dl = [];
+  for (const fid of famIds) {
+    const f = fams[fid];
+    for (const [m, d] of Object.entries(f.models || {})) {
+      if (mdStFullIn(f, m)) dl.push({ key: fid + "/" + m, fam: fid, model: m,
+                                      label: (f.title || fid) + " · " + (d.label || m),
+                                      gb: (d.have || {}).gb });
+    }
+  }
+  st.downloaded = dl;
+  $("#md-strata-exist").innerHTML = dl.map((x, i) => `<option value="${esc(x.key)}"${i === 0 ? " selected" : ""}>`
+    + `${esc(x.label + " — " + (x.gb || "?") + " GB")}</option>`).join("")
+    || '<option value="">(ダウンロード済みのモデルがありません)</option>';
+  const localR = $$("#md-modes input").find(i => i.value === "local");
+  localR.disabled = !dl.length;
+  $$("#md-modes .opt").forEach(o => { if (o.contains(localR)) o.style.opacity = dl.length ? "" : ".45"; });
+  if (localR.disabled && mdMode() === "local") {
+    $$("#md-modes input").find(i => i.value === "dl").checked = true;
+  }
+  $("#md-err").classList.add("hidden");
+  $("#md-sub").textContent = "Strata は家系・サイズ・コンテキスト長を選ぶだけです。Strata 本体のセットアップ手順がこのまま走り、"
+    + "ダウンロードから起動設定 (strata-<model>.json) の作成まで完了します。ダウンロード済みのモデルは"
+    + "「ダウンロード済みのモデルを使う」から再取得なしで選べます。";
+  mdSync();
+}
+function mdStFullIn(f, m) {
+  const h = ((f || {}).models || {})[m] || {};
+  const hv = h.have || {};
+  return !!(hv.files && hv.found >= hv.files);
+}
+/* ダウンロードの有無に関わらず同じ 1 経路: 純正 setup.py (再開対応・SHA-256 検証・
+   既存ファイルは検証して素通り) をジョブとして走らせる。config JSON はその成果物 */
+async function mdStartStrata(btn) {
+  const st = W.mdStrata || {};
+  if (mdMode() === "local") {
+    const x = (st.downloaded || []).find(v => v.key === $("#md-strata-exist").value);
+    if (!x) return;
+    /* config JSON は内部の成果物 — 純正命名作法の config が在って重み ok ならそのまま採用、
+       重みが在るのに config が無い (削除/別経路) ときは同じジョブを走らせるだけで
+       setup.py が検証・受信素通り・config 作成をする (ダウンロードは起きない) */
+    const f = (st.families || {})[x.fam] || {};
+    const key = "strata-" + String((f.tag || "") + x.model).toLowerCase() + ".json";
+    const c = (st.configs || []).find(y => y.name === key && (y.weights || {}).ok === true);
+    if (c) {
+      W.kind = "install";
+      W.job = { id: "", kind: "install", phase: "model", status: "done", backend: "strata",
+                repo_id: "", config_name: c.name, model: x.fam + "/" + x.model,
+                result: { config: c.file, parallel: c.parallel || null } };
+      W.cfgProfId = null; W.cfgProfNew = false;
+      W.summary.push({ ok: true, t: `ダウンロード済みの ${x.label} を使用します` });
+      renderConfig(); go("s-config");
+      return;
+    }
+    btn.disabled = true; btn.textContent = "開始中…";
+    try {
+      const d = (f.models || {})[x.model] || {};
+      const job = await api("/api/installs/strata-model", { method: "POST",
+        body: { family: x.fam, model: x.model, context: d.rec_context || 131072, vision: "" } });
+      W.kind = "install"; W.job = job;
+      W.logCursor = 0; W.logText = "";
+      W.cfgProfId = null; W.cfgProfNew = false;
+      renderProgress(); go("s-progress"); startPoll();
+    } catch (e) {
+      $("#md-err").textContent = "開始できませんでした: " + e.message;
+      $("#md-err").classList.remove("hidden");
+    } finally { btn.textContent = "このモデルで続ける"; mdSync(); }
+    return;
+  }
+  btn.disabled = true; btn.textContent = "開始中…";
+  try {
+    /* vision ON = --vision を渡さない = 純正のマシン既定 (own-path 系は VRAM が
+       24GB 未満なら CPU エンコーダ、以上で GPU エンコーダ。2026-11-09: 24.4GB 未満
+       のこの PC で --vision gpu を送るのは推奨外)。OFF = 明示の "no" */
+    const vision = ($("#md-vision-opt").style.display === "none") ? ""
+                 : ($("#md-vision").checked ? "" : "no");
+    const job = await api("/api/installs/strata-model", { method: "POST",
+      body: { family: W.mdStFam, model: W.mdStModel,
+              context: parseInt($("#md-ctx").value, 10) || 131072, vision,
+              gpus: (W.mdStGpus && W.mdStGpus !== "auto") ? W.mdStGpus : "" } });
+    W.kind = "install"; W.job = job;
+    W.logCursor = 0; W.logText = "";
+    W.cfgProfId = null; W.cfgProfNew = false;
+    renderProgress(); go("s-progress"); startPoll();
+  } catch (e) {
+    $("#md-err").textContent = "開始できませんでした: " + e.message;
+    $("#md-err").classList.remove("hidden");
+  } finally {
+    btn.textContent = "モデル設定を開始"; mdSync();
+  }
+}
 $("#md-start").addEventListener("click", async () => {
   const btn = $("#md-start");
   $("#md-err").classList.add("hidden");
+  if (W.backend === "strata") { await mdStartStrata(btn); return; }
   if (mdMode() === "local") {
     /* 済みモデルは「完了済みのダウンロードジョブ」に化かして後続 (稼働設定の
        プロファイル名 / model_path 解決) をそのまま通す */
@@ -443,13 +745,17 @@ $("#md-start").addEventListener("click", async () => {
   }
   const repo = $("#md-repo").value.trim() || $("#md-sel").value;
   if (!repo) return;
+  /* 一覧から選んだモデルは既定ファイル (pack 1 個) だけ取得する。repo 全体 (1 TB) を
+     落とさないための allow_patterns。repo id を手入力したときは指定なし = 全体 */
+  const entry = (W.mdList || []).find(m => m.repo_id === repo) || null;
+  const patterns = (entry && entry.include) || [];
   const sp = spec();
   btn.disabled = true; btn.textContent = "開始中…";
   try {
     const kb = parseInt($("#md-speed").value, 10) || 0;
     const job = await api("/api/installs/download", { method: "POST",
       body: { repo_id: repo, revision: "", backend: (sp && sp.model_data) ? sp.id : "",
-              allow_patterns: [], max_kbps: kb } });
+              allow_patterns: patterns, max_kbps: kb } });
     W.kind = "download"; W.job = job;
     W.cancelAt = 0; W.cleanupShown = false;   // 中断/掃除の状態を新しいジョブ用にリセット
     // 新しいセットアップ (モデル取得) を始めたので、稼働設定用の
@@ -621,7 +927,7 @@ function cfParNow() {
 /* 見出し下の補足 1 行。perUser は「1人あたり × 並列 = 合計KV」を生きた値で示す */
 function cfSyncHints() {
   const cfg = RUNCFG[W.backend] || {};
-  for (const id of ["ctx", "kv", "tp", "par"]) {
+  for (const id of ["ctx", "kv", "tp", "par", "vis"]) {
     const sec = cfg[id]; const hint = document.querySelector(`#cf-${id}-hint`);
     if (!sec || !hint) continue;
     hint.textContent = sec.hint || "";
@@ -660,12 +966,31 @@ const RUNCFG = {
           hint: "fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
     par: { key: "max_num_seqs", label: "並列推論数",
            hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: CF_NUM } },
-  "strata": { regen: false,
+  /* strata: values.config は ② のモデル構成 (純正 setup.py) が作った strata-<model>.json。
+     コンテキスト長などはその config の args に入るので、ここでは並列数だけ扱う */
+  "strata": { regen: false, model: "config",
     par: { key: "parallel", label: "並列推論数",
            hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
   "maya": { regen: false,
     par: { key: "parallel", label: "並列推論数",
            hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
+  /* basalt: コンテキスト / KV / 並列は設定 JSON (models[]) が正。保存で自動再生成する。
+     調整 (キャリブレーション) は無いので s-cal は自動でスキップされる */
+  "basalt": { regen: "config-json", model: "model",
+    ctx: { key: "max_context", label: "コンテキスト長",
+           hint: "プロンプト+生成で共有します。並列数を増やすと 1 スロットあたりは コンテキスト÷並列 になります",
+           opts: [["8192", "8K", "既定"], ["32768", "32K", "推奨"],
+                  ["131072", "128K", ""], ["262144", "256K", ""]], cur: CF_TOK },
+    kv: { key: "kv", label: "KVキャッシュ形式",
+          hint: "fp16=品質優先 / int8=VRAM半減 / q4_0・k8v4=さらに圧縮",
+          opts: [["fp16", "fp16", "既定"], ["int8", "int8", "推奨"],
+                 ["q4_0", "q4_0", ""], ["k8v4", "k8v4", ""]], cur: v => v },
+    par: { key: "parallel", label: "並列推論数",
+           hint: "同時に処理するリクエスト数 (1-8)。コンテキスト長はこの数で分割されます",
+           opts: CF_PAR, cur: CF_NUM },
+    vis: { key: "vision", label: "画像入力 (ビジョン)",
+           hint: "dynamic=エンジン内で読む (推奨・常駐VRAMなし)。off にすると画像リクエストはエラーになります",
+           opts: [["dynamic", "dynamic", "推奨"], ["off", "off", ""], ["cpu", "cpu", ""]], cur: v => v } },
 };
 async function renderConfig() {
   W.cfgSkip = true;
@@ -673,24 +998,22 @@ async function renderConfig() {
   let p = null;
   try {
     const j = W.job;
-    // このセットアップでモデルを取得した = 「新規インストール」の進入
-    const fresh = !!(j && j.kind === "download" && j.status === "done"
-                     && j.backend === W.backend);
     const profs = await api("/api/profiles");
     if (W.cfgProfId) {
       // 戻る/次への往復では、このセットアップで作ったプロファイルを再利用
       p = (profs || []).find(x => x.id === W.cfgProfId) || null;
-    } else if (!p && cfg && (fresh || !(profs || []).some(x => x.backend === W.backend))) {
-      // セットアップ時のプロファイルは必ず新規作成する
-      // (既存プロファイルへ書き込むと、そのプロファイルのモデルが
-      //  置き換わってしまうため)。起動 JSON を指定した形になるのは保存時。
-      const nm = (fresh && j.repo_id) ? String(j.repo_id).split("/").pop()
-                                      : specName(W.backend);
+    } else if (cfg) {
+      // セットアップのたびに専用プロファイルを新規作成する。
+      // 既存 (前回のセットアップで作ったものを含む) を再利用すると、その
+      // プロファイルの設定 (コンテキスト長 / 並列など) と JSON を上書きして
+      // しまい、設定違いのプロファイルを増やせなくなる。
+      const nm = (j && j.config_name) ? String(j.config_name).replace(/^strata-/, "").replace(/\.json$/, "")
+                 : (j && j.repo_id) ? String(j.repo_id).split("/").pop()
+                 : specName(W.backend);
       p = await api("/api/profiles", { method: "POST",
-        body: { name: nm, backend: W.backend, values: {}, simple_visible: true } });
+        body: { name: nm, backend: W.backend, values: {}, simple_visible: true,
+                note: "初回セットアップで作成" } });
       W.cfgProfNew = true;
-    } else {
-      p = (profs || []).find(x => x.backend === W.backend) || null;
     }
     if (p) W.cfgProfId = p.id;
   } catch { /* 取得失敗は調整画面へスキップ */ }
@@ -710,10 +1033,17 @@ async function renderConfig() {
     if (!cfg.par) return 1;
     const s = parseInt(v[cfg.par.key] ?? "", 10);
     if (Number.isFinite(s) && s > 0) return s;
+    /* strata: 並列数の既定は作られた config の parallel (エンジンが VRAM 予算で決めた値)。
+       config に無い = 純正既定の 1。全局推奨の 4 を焼くと 24GB で 4 スロット起動失敗
+       (qwen36 131072 = 5.56 GiB/スロット、2026-11-09 実測) */
+    if (W.backend === "strata") {
+      const jp = (W.job || {}).result || {};
+      return Number(jp.parallel) || 1;
+    }
     const rec = cfg.par.opts.find(o => (o[2] || "").includes("推奨")) || cfg.par.opts[0] || ["1"];
     return parseInt(rec[0], 10) || 1;
   })();
-  for (const id of ["ctx", "kv", "tp", "par"]) {
+  for (const id of ["ctx", "kv", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     const stored = String(v[sec.key] ?? "");
     const perNum = sec.perUser ? Math.round(Number(stored) / parInit) : NaN;
@@ -778,7 +1108,7 @@ $("#cf-go").addEventListener("click", async () => {
   const on = p.on ? { ...p.on } : null;
   const chosen = [];
   const par = cfParNow();   // 一人あたり項目が合計を書き込むときに使う並列数 (フォームの選択)
-  for (const id of ["ctx", "kv", "tp", "par"]) {
+  for (const id of ["ctx", "kv", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     const el = document.querySelector(`#cf-groups select#cf-${id}`);
     if (!el || !el.value) continue;
@@ -798,29 +1128,55 @@ $("#cf-go").addEventListener("click", async () => {
   // リロードで W.job を失ってもインストール履歴 (jobs) から復元する。新規
   // プロファイルでモデルなしを保存すると --model-path 無しで起動不能になる
   // ため、解決できなければ保存せず前に戻す (2026-10-30 の実害の再発防止)。
-  if (cfg.model && !String((p.values || {}).model_path || "").trim()) {
+  const modelKey = cfg.model === true ? "model_path" : (cfg.model || "model_path");
+  /* Strata は kind=install / phase=model の「モデル構成」ジョブが result.config で
+     strata-<model>.json へのパスを返す (他バックエンドは kind=download の result.path) */
+  const okJob = x => x.status === "done" && x.backend === W.backend
+    && (x.kind === "download" || (x.kind === "install" && x.phase === "model"));
+  const pickMp = x => String((x.result && (x.result.config || x.result.path)) || x.local_dir || "");
+  if (cfg.model && !String((p.values || {})[modelKey] || "").trim()) {
     let mp = "";
     const j = W.job;
-    if (j && j.kind === "download" && j.status === "done" && j.backend === W.backend)
-      mp = String((j.result && j.result.path) || j.local_dir || "");
+    if (j && okJob(j)) mp = pickMp(j);
     if (!mp) {
       try {
         const ins = await api("/api/installs");
-        const done = ((ins && ins.jobs) || []).filter(x => x.kind === "download"
-          && x.status === "done" && x.backend === W.backend);
+        const done = ((ins && ins.jobs) || []).filter(okJob);
         const dj = done[done.length - 1];
-        if (dj) mp = String((dj.result && dj.result.path) || dj.local_dir || "");
+        if (dj) mp = pickMp(dj);
       } catch { /* 履歴が取れなければ空のまま */ }
     }
+    if (mp && W.backend === "basalt" && !mp.endsWith(".basalt")) {
+      /* HF ダウンロードの result.path はスナップショット DIR。basalt の --model は
+         .basalt ファイル正体なので、一覧の include (既定 pack) かキャッシュスキャンで
+         ファイルへ解決する (解決できなければ DIR のまま = 起動時に正直なエラー) */
+      const ent = (W.mdList || []).find(m => m.repo_id === String((W.job || {}).repo_id || ""));
+      const want = (ent && ent.include && ent.include[0]) || "";
+      let files = [];
+      try {
+        const hm = await api("/api/hf-models?refresh=1");   // 取得直後でキャッシュが古い可能性
+        const snap = (hm.models || []).find(m => m.snapshot === mp);
+        files = ((snap && snap.basalt) || []).map(f => f.name);
+      } catch { /* スキャン失敗は include で */ }
+      const fname = files.includes(want) ? want : (files[0] || want);
+      if (fname) mp = mp.replace(/\/+$/, "") + "/" + fname;
+    }
     if (mp) {
-      vals.model_path = mp;
-      if (on) on.model_path = true;
+      vals[modelKey] = mp;
+      if (on) on[modelKey] = true;
       chosen.push("モデル " + mp.split("/").pop());
     } else if (W.cfgProfNew) {
       err.textContent = "モデルがまだ決まっていません。前に戻ってモデルをダウンロードしてください";
       err.classList.remove("hidden");
       return;
     }
+  }
+  /* Strata: serve/server.py の --engine 既定は mock (スクリプト付きテストエンジン)。
+     ウィザードが作るプロファイルは常に実エンジンを意味するので、未設定ならここで
+     埋める — 埋めないと「起動するとモックが来る」(2026-11-09 報告) */
+  if (W.backend === "strata" && !String(vals.engine || "").trim()) {
+    vals.engine = "strata";
+    if (on) on.engine = true;
   }
   // プロファイル名 (既定はモデル名で既に入力済み。空なら元の name を維持)
   const nmEl = $("#cf-name");
@@ -833,8 +1189,10 @@ $("#cf-go").addEventListener("click", async () => {
   try {
     await api(`/api/profiles/${p.id}`, { method: "PUT", body });
     if (cfg.regen) {
-      // 調整と起動は起動 JSON を正として読むため、保存後は必ず再生成する
-      await api(`/api/profiles/${p.id}/launch-json`, { method: "POST" });
+      // 調整と起動は JSON を正として読むため、保存後は必ず再生成する
+      // (basalt は basalt_config.json、それ以外は従来の起動 JSON)
+      await api(`/api/profiles/${p.id}/${cfg.regen === "config-json" ? "config-json" : "launch-json"}`,
+                { method: "POST" });
     }
     p.name = newName;
     await refreshProf(p); // config (起動JSON) 込みの最新を次のステップへ渡す
@@ -898,7 +1256,8 @@ $("#nt-go").addEventListener("click", async () => {
     await api(`/api/profiles/${p.id}`, { method: "PUT", body });
     const cfg = RUNCFG[W.backend] || {};
     if (cfg.regen) {
-      await api(`/api/profiles/${p.id}/launch-json`, { method: "POST" });
+      await api(`/api/profiles/${p.id}/${cfg.regen === "config-json" ? "config-json" : "launch-json"}`,
+                { method: "POST" });
     }
     await refreshProf(p); // 再生成後の config 込み最新を後続ステップへ
     W.summary.push({ ok: true, t: "接続設定を保存しました (" + chosen.join(" · ") + ")" });
@@ -911,6 +1270,11 @@ $("#nt-go").addEventListener("click", async () => {
 $("#nt-skip").addEventListener("click", () => { renderCal(); go("s-cal"); });
 
 /* ---------------------------------------------------------------- 3: 調整 */
+function calPick(profs) {
+  const mine = W.calProfile && profs.find(x => x.id === W.calProfile.id);
+  if (mine) return mine;
+  return profs.slice().sort((a, b) => Number(b.updated_at || 0) - Number(a.updated_at || 0))[0] || null;
+}
 async function renderCal() {
   const runOpt = $$("#ca-list input").find(i => i.value === "run");
   const canCal = W.me && (W.me.role === "admin" || !W.me.auth_enabled || (W.me.perms || {}).calibrate);
@@ -919,13 +1283,29 @@ async function renderCal() {
     const [c, st] = await Promise.all([api("/api/calibrations").catch(() => null),
                                        api("/api/state").catch(() => null)]);
     const supported = (c && c.supported) || [];
-    const profs = ((st && st.profiles) || []).filter(p => supported.includes(p.backend));
-    ok = canCal && profs.length > 0;
+    // このバックエンドに調整が無い (basalt 等) とき、他バックエンドのプロファイルを
+    // 巻き込んで実行しないよう対象をこのバックエンドに限定する
+    const calOff = !supported.includes(W.backend);
+    const profs = ((st && st.profiles) || []).filter(p => supported.includes(p.backend)
+      && p.backend === W.backend);
+    ok = canCal && !calOff && profs.length > 0;
     W.calProfiles = profs;
+    /* ⑤ の対象は ③ で作り/編集したプロファイル (W.calProfile)。re-load で
+       W.calProfile を失ったときは「最近更新した自バックエンドのプロファイル」に
+       倒す — 一覧先頭 (最古) を選んで他人のプロファイルを触る事故防止
+       (2026-11-09: 旧プロファイル p_6acf49a3ad87 を掴んで config 整合チェックに弾かれた) */
+    W.calPick = calPick(profs);
+    if (calOff) {   // 調整が無いバックエンド (basalt 等) は調整画面を出さずに完了へ
+      W.summary.push({ ok: true, t: "このバックエンドはキャリブレーション非対応のため、調整はスキップしました" });
+      renderDone(); go("s-done"); return;
+    }
     $("#ca-time").textContent = (profs.find(p => (p.backend || "").includes("freetoken"))
       ? "FreeToken は目安 3〜4 時間かかります" : "目安: 10〜30 分 (バックエンドにより変わります)");
     if (!canCal) $("#ca-sub").textContent = "調整はキャリブレーション権限のあるアカウントで実行できます。";
+    else if (calOff) $("#ca-sub").textContent = "このバックエンドはキャリブレーションに対応していません (調整なしで完了できます)。";
     else if (!profs.length) $("#ca-sub").textContent = "調整対象のプロファイルがまだありません。プロファイルを作成してから、ダッシュボードの「キャリブレーション」で実行してください。";
+    else $("#ca-sub").textContent = "調整 (キャリブレーション) はこの機械向けの性能調整です。実行中は GPU を独占します。"
+      + "対象: " + (W.calPick ? W.calPick.name : "(未選択)");
   } catch { ok = false; }
   runOpt.disabled = !ok;
   $$("#ca-list .opt").forEach(o => { if (o.contains(runOpt)) o.style.opacity = ok ? "" : ".45"; });
@@ -942,9 +1322,11 @@ $$("#ca-list input").forEach(i => i.addEventListener("change", syncCalSel));
 $("#ca-go").addEventListener("click", async () => {
   const run = $$("#ca-list input").find(i => i.checked)?.value === "run";
   if (!run) { renderDone(); go("s-done"); return; }
-  const sp = spec();
   const profs = W.calProfiles || [];
-  const p = profs.find(x => x.backend === W.backend) || profs.find(x => (sp || {}).name && x.backend === (sp.id)) || profs[0];
+  /* 対象は renderCal が決めた W.calPick (③ で作ったプロファイル優先)。
+     profs[0] = 一覧の最古プロファイルで、Strata 側保存との config 整合チェックに
+     弾かれるか別設定を調整してしまう (2026-11-09 の事故) */
+  const p = W.calPick || calPick(profs) || profs[0];
   if (!p) { W.summary.push({ ok: false, t: "調整対象のプロファイルがなく、スキップしました" }); renderDone(); go("s-done"); return; }
   try {
     const job = await api("/api/calibrations", { method: "POST", body: { profile_id: p.id, restart_after: false } });
