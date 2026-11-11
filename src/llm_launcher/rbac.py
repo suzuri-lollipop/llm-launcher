@@ -121,6 +121,8 @@ def required_cap(method: str, path: str) -> str | None:
     if p.startswith("/api/sessions"):
         if p.endswith("/log"):
             return "logs"
+        if p.endswith("/parallel"):
+            return "dashboard"         # ホームのデコード速度グラフ (ホスト詳細と同じ開示範囲)
         if m == "DELETE":
             return "history"          # 履歴レコードの削除
         return CORE                    # 起動 / 停止 / 再起動
@@ -134,7 +136,7 @@ def required_cap(method: str, path: str) -> str | None:
         return "backends.edit"
     if p.startswith("/api/playground"):
         return "playground"
-    if p.startswith("/api/benchmarks"):
+    if p.startswith("/api/benchmarks") or p.startswith("/api/bench-profiles"):
         return "bench"
     if p.startswith("/api/calibrations"):
         # 実行はエンジン起動 + config 書き換え。閲覧も config パス・CLI ログを含むので同じ権限にする

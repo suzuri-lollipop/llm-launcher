@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backends import BACKENDS, fork_dir, fork_model_root
+from . import strata_setup
 from .store import JsonStore, new_id, now
 
 # ログはデータベース (installs.json) に保持する。インストール実行では行が増えるので
@@ -54,8 +55,14 @@ LOG_TAIL = 400
 # 大きいと UI の進捗が鈍くなり、小さいとログが膨らむ。
 PROGRESS_MIN_INTERVAL = 1.0
 
-# UI からインストールできるバックエンド。strata / maya は setup.sh / maya.sh 側が
-# 対話プロンプトを含むため UI 化していない (導線を壊さない範囲で今後追加する)。
+# UI からインストールできるバックエンド。maya は maya.sh 側が対話プロンプトを含むため
+# UI 化していない (導線を壊さない範囲で今後追加する)。
+# requirements / cmake / engine_bin を持つ spec は FreeToken 系と打って変わって
+# 「pip のパッケージ化が無い + ネイティブビルド込み」の形 (Basalt) に対応する。
+# strata は純正 setup.sh / setup.py が対話インストーラなので、機械部分だけを薄い driver
+# (strata_engine.py) で UI に乗せた: .venv + requirements.txt + 公式リリースからの
+# 既製エンジン受信 (engine_fetch)。モデル選択・ダウンロード・strata-<model>.json 生成は
+# 引き続き setup.sh 1 回の手動領域 (エンジンも venv も在ればそこは素通りする)。
 INSTALL_SPECS: dict[str, dict[str, Any]] = {
     "freetoken-fork": {
         "clone": "https://github.com/suzuri-lollipop/FreeToken",
@@ -79,6 +86,56 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
         "module_path": "module/freetoken",
         "check": "freetoken",
         "extras": "accel",
+    },
+    # Basalt (Strata 系フォーク / Blackwell 向け MoE エンジン): pip パッケージでは無い
+    # (pyproject なし) ので requirements.txt を入れ、cmake でネイティブエンジン
+    # (bin/basalt) をビルドする。 submodule なので clone 済み (git submodule update --init)
+    # なら clone step はスキップされ、.venv → pip → cmake → verify だけ走る。
+    "basalt": {
+        "clone": "https://github.com/jesdga95/basalt",
+        "ref": "",
+        "refs": [],
+        "fork_name": "",
+        "module_path": "module/basalt",
+        "check": "serve.server",         # submodule を cwd にした実 import (Strata と同じ)
+        "extras": "",                    # -e . ではなく requirements.txt 側で入れる
+        "requirements": "requirements.txt",
+        "cmake": True,                   # cmake configure + build の 2 step を install 後に挟む
+        "engine_bin": "bin/basalt",      # ビルド成果物。precheck / verify はこれも要求する
+        # インストール完了時に置く雛形 (既にあれば触らない)。手動起動の既定パスでもある
+        "config_seed": {
+            "file": "basalt_config.json",
+            "doc": {
+                "version": 2,
+                "models": [{"model": "models/Qwen3.8-FN-NVFP4-DQ6_K.basalt",
+                            "gpu": "0", "kv": "int8"}],
+                "engine": {"resident-experts": True},
+                "server": {"host": "0.0.0.0", "port": 8080},
+            },
+            "note": "モデル pack のダウンロード後に model / gpu / kv を環境に合わせてください",
+        },
+    },
+    # Strata (https://github.com/Niko1221/Strata): サブモジュールだが .venv は無く、エンジン
+    # (engine/strata) も GPU ごとに公式リリースから受信する / コンパイルする (純正 setup.py の
+    # 対話手順)。UI 化するのは機械部分だけ: clone (submodule 取得済みならスキップ) →
+    # .venv → pip install -r requirements.txt → strata_engine.py が純正 setup.py の
+    # get_prebuilt() で既製エンジン + NVIDIA CUDA ホイールを入れる → verify
+    # (serve.server import + engine/strata 実行可)。純正 setup.py の pip_install は
+    # `.venv/bin/python -m pip` を前提にするため .venv は uv ではなく標準 venv+pip で作る
+    # (venv_pip)。GPU が古い / アーキが既製に無い場合はコンパイル領域なので setup.sh 1 回へ
+    # 正直に導線する (ジョブログに理由が出る)。
+    "strata": {
+        "clone": "https://github.com/Niko1221/Strata",
+        "ref": "",
+        "refs": [],
+        "fork_name": "",
+        "module_path": "module/strata",
+        "check": "serve.server",         # submodule を cwd にした実 import (検出と同じ)
+        "extras": "",                    # -e . ではなく requirements.txt 側で入れる
+        "requirements": "requirements.txt",
+        "venv_pip": True,                # 標準 venv+pip (upstream setup.py が -m pip を使う)
+        "engine_fetch": True,            # strata_engine.py で既製エンジンを受信する step
+        "engine_bin": "engine/strata",   # precheck / verify はこれも要求する
     },
 }
 
@@ -142,6 +199,48 @@ def find_uv() -> str:
     return ""
 
 
+# CUDA ツールキット (nvcc) の実在する場所。uv と同じ問題で、systemd / デスクトップ起動の
+# launcher には /usr/local/cuda/bin が PATH に無いことが多く、cmake の CUDA コンパイラ
+# 検出は PATH 依存 ("No CMAKE_CUDA_COMPILER could be found.")。見つけたパスは
+# CMAKE_CUDA_COMPILER として明示的に渡す (PATH を汚さず、どの nvcc を使うかも決まる)。
+_CUDA_FALLBACK_DIRS = ("/usr/local/cuda", "/opt/cuda", "/usr/lib/nvidia-cuda-toolkit", "/usr/local/cuda-13.3", "/usr/local/cuda-13.2")
+
+
+def _nvcc_candidates() -> list[Path]:
+    """nvcc を探す候補 (テストから差し替え可)。CUDACXX / CUDA_HOME の明示指定が最優先。"""
+    out: list[Path] = []
+    cudacxx = (os.environ.get("CUDACXX") or "").strip()
+    if cudacxx:
+        p = Path(cudacxx).expanduser()
+        out.append(p if p.name == "nvcc" else p / "bin" / "nvcc")
+    for var in ("CUDA_HOME", "CUDA_PATH"):
+        base = (os.environ.get(var) or "").strip()
+        if base:
+            out.append(Path(base).expanduser() / "bin" / "nvcc")
+    found = shutil.which("nvcc")
+    if found:
+        out.append(Path(found))
+    out += [Path(d).expanduser() / "bin" / "nvcc" for d in _CUDA_FALLBACK_DIRS]
+    try:
+        # /usr/local/cuda-<ver>/bin/nvcc (新しい版を先に)
+        for p in sorted(Path("/usr/local").glob("cuda-*/bin/nvcc"), reverse=True):
+            out.append(p)
+    except OSError:
+        pass
+    return out
+
+
+def find_nvcc() -> str:
+    """CUDA の nvcc の絶対パス (見つからなければ "")。"""
+    for cand in _nvcc_candidates():
+        try:
+            if cand.is_file() and os.access(cand, os.X_OK):
+                return str(cand)
+        except OSError:
+            continue
+    return ""
+
+
 def install_tool() -> str:
     """依存インストールに使うツール表示 (既定は uv pip、uv が本当に無い環境だけ venv の pip)。
 
@@ -190,6 +289,14 @@ def install_env(*, environ: dict[str, str] | None = None) -> dict[str, str]:
         env[low] = val
         env[low.upper()] = val
     env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    # nvcc のディレクトリを PATH に足す (BASALT の cmake だけでなく、エンジンビルドが
+    # 呼ぶ cicc / ptxas 等も同じ bin にある)。既に PATH にある環境は触らない。
+    nvcc = find_nvcc()
+    if nvcc:
+        bin_dir = str(Path(nvcc).parent)
+        parts = [p for p in (env.get("PATH") or "").split(os.pathsep) if p]
+        if bin_dir not in parts:
+            env["PATH"] = os.pathsep.join(parts + [bin_dir])
     return env
 
 
@@ -267,6 +374,29 @@ def seed_launch_json(module_dir: Path) -> str | None:
     path.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
     return ("起動 JSON テンプレート freetoken-launch.json を作成しました "
             "(--model-path を編集すれば ./setup.sh と profile の起動 JSON パスが同じ構成で起動します)")
+
+
+def seed_basalt_config(module_dir: Path, spec: dict[str, Any]) -> str | None:
+    """Basalt のインストール完了時に basalt_config.json (v2) の雛形を置く。
+
+    ユーザーが編集した JSON を壊さないよう、存在しないときだけ書く。置き場所は
+    upstream の Quick start と同じ module/basalt/basalt_config.json なので、
+    `cd module/basalt && bin/basalt serve --config basalt_config.json` がそのまま動く。
+    プロファイルから作る設定 JSON (data/launch/basalt-<id>.json) とは別物で、
+    こちらは手動起動・最初の 1 枚岩用のテンプレート。
+    """
+    seed = spec.get("config_seed")
+    if not seed:
+        return None
+    path = module_dir / str(seed["file"])
+    if path.exists():
+        return None
+    try:
+        path.write_text(json.dumps(seed["doc"], ensure_ascii=False, indent=2) + "\n", "utf-8")
+    except OSError as e:  # noqa: BLE001 — 雛形は補助なのでインストール自体は成功させる
+        return f"{seed['file']} を作成できませんでした: {e}"
+    note = str(seed.get("note") or "")
+    return f"{seed['file']} の雛形を作成しました" + (f" ({note})" if note else "")
 
 
 def record_launch_json_model(root: Path, spec: dict, model_dir: Path) -> str | None:
@@ -445,12 +575,23 @@ class InstallManager:
 
         if needs_clone and not spec["clone"]:
             raise InstallError(f"{module_rel} がありません")
-        tool = install_tool()
-        uv_path = find_uv()
+        # venv_pip spec (Strata) は uv が在っても標準 venv+pip で作る: upstream の pip_install が
+        # `.venv/bin/python -m pip` を前提にするため、uv_path を空にして venv 作成・install・
+        # 表示 (job["tool"]) をまとめて pip に寄せる (表示と実行が同じ判定から出ることは崩さない)
+        venv_pip = bool(spec.get("venv_pip"))
+        uv_path = "" if venv_pip else find_uv()
+        tool = "uv" if uv_path else "pip"
         venvpy = str(module_dir / ".venv" / "bin" / "python")
+        # requirements 系 spec (Basalt) は verify でもネイティブエンジンの実在を要求する。
+        # precheck が通らない = 依存 or エンジンのどれかが欠けている、ということで
+        # install / cmake が必ず走る (pip の再実行はほぼキャッシュで素通しになる)。
+        engine_bin = str(spec.get("engine_bin") or "")
+        engine_check = (f"; import os as _os, sys as _sys;"
+                        f" _sys.exit(0 if _os.access({engine_bin!r}, _os.X_OK) else 1)"
+                        if engine_bin else "")
         verify_argv = [venvpy, "-c",
                        f"import {check}, sys; print('{check}', getattr({check}, '__version__', '?'),"
-                       f" 'py', sys.version.split()[0])"]
+                       f" 'py', sys.version.split()[0])" + engine_check]
         steps: list[dict[str, Any]] = []
         if needs_clone:
             argv = ["git", "clone", "--depth", "1"]
@@ -463,24 +604,159 @@ class InstallManager:
             steps.append({"name": "branch"})
         steps.append({"name": "venv"})
         steps.append({"name": "precheck", "argv": verify_argv, "cwd": str(module_dir)})
-        spec_arg = f".[{extras_str}]" if extras_str else "."
+        req = str(spec.get("requirements") or "")
+        if req:
+            # 非 packaging リポジトリ (pyproject の無い Basalt など): requirements.txt 直指定
+            spec_args = ["-r", req]
+        else:
+            spec_args = ["-e", f".[{extras_str}]" if extras_str else "."]
         if uv_path:
             # 絶対パスのまま argv[0] に置く — 子プロセスの PATH が短くても解る
-            install_argv = [uv_path, "pip", "install", "--python", venvpy, "-e", spec_arg]
+            install_argv = [uv_path, "pip", "install", "--python", venvpy, *spec_args]
         else:
-            install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off",
-                            "-e", spec_arg]
+            install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off", *spec_args]
         steps.append({"name": "install", "argv": install_argv, "cwd": str(module_dir)})
+        if spec.get("engine_fetch"):
+            # Strata: 純正 setup.py の get_prebuilt() を薄い driver から呼んで既製エンジンを
+            # 受信する (engine/strata + CUDA ホイール)。GPU が既製に無い環境は driver が
+            # 理由を出して失敗し、setup.sh 1 回へ導線する (ここでコンパイルはしない)
+            steps.append({"name": "engine",
+                          "argv": [venvpy, str(Path(__file__).parent / "strata_engine.py")],
+                          "cwd": str(module_dir)})
+        if spec.get("cmake"):
+            if not shutil.which("cmake"):
+                raise InstallError("cmake が見つかりません (Basalt のエンジンビルドに必要です。"
+                                   "CMake 3.24+ をインストールしてから実行してください)")
+            # cmake の CUDA コンパイラ検出は PATH 依存で、systemd / デスクトップ起動の
+            # launcher には /usr/local/cuda/bin が無いことが多い → 見つけた nvcc を明示する
+            nvcc = find_nvcc()
+            if not nvcc:
+                raise InstallError("CUDA の nvcc が見つかりません (Basalt のエンジンビルドには "
+                                   "CUDA 13 が必要です。CUDA をインストールし、PATH か "
+                                   "CUDACXX / CUDA_HOME で場所を指定してください)")
+            # 実行時点では clean で build/ が消えているかもしれないので、計画段階の実在チェック
+            # では止めず cmake 側に再構築させる (構成は差分なし、ビルドは no-op で速い)
+            steps.append({"name": "cmake",
+                          "argv": ["cmake", "-S", ".", "-B", "build",
+                                   "-DCMAKE_BUILD_TYPE=Release",
+                                   f"-DCMAKE_CUDA_COMPILER={nvcc}"],
+                          "cwd": str(module_dir)})
+            steps.append({"name": "cmake-build",
+                          "argv": ["cmake", "--build", "build",
+                                   "--parallel", str(os.cpu_count() or 4)],
+                          "cwd": str(module_dir)})
         steps.append({"name": "verify", "argv": verify_argv, "cwd": str(module_dir)})
 
         job = self._new_job("install", actor, backend=backend_id,
                             backend_name=BACKENDS.get(backend_id, {}).get("name", backend_id),
                             module_path=module_rel, tool=tool, uv_path=uv_path,
                             extras=extras_str, clean=bool(clean), needs_clone=needs_clone,
-                            ref=branch)
+                            ref=branch, cuda=(find_nvcc() if spec.get("cmake") else ""))
         job["steps"] = [s["name"] for s in steps]
         self._tasks[job["id"]] = asyncio.create_task(self._run_install(job, spec, steps))
         return self._public(job)
+
+    # ------------------------------------------------------------ Strata モデル構成 (②)
+
+    def start_strata_model(self, opts: dict[str, Any],
+                           actor: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Strata のセットアップ ②: 純正 setup.py を `--yes --no-start` の非対話で
+        走らせて、モデルのダウンロード → 準備 → strata-<model>.json 生成までを UI から
+        完結させる。
+
+        選定の表もダウンロード (再開対応・SHA-256・MTP ドラフト層) も純正実装そのもので、
+        ここは family/model/context/vision を submodule の表ホワイトリストで検証し、
+        argv を組み立てるだけ (strata_setup)。setup.py の全質問は --yes で既定確定し、
+        マルチ GPU の role も推奨構成がそのまま通る (対話プロンプトには到達しない)。
+        .venv とエンジンは ① で導入済みなので、setup.py のその手順は即スキップされる。
+        """
+        spec = INSTALL_SPECS["strata"]
+        self._check_free()
+        module_dir = (self.root / spec["module_path"]).resolve()
+        venvpy = module_dir / ".venv" / "bin" / "python"
+        if not (module_dir / "setup.py").is_file() or not venvpy.is_file():
+            raise InstallError("Strata の実行環境 (.venv) がまだありません。"
+                               "先に ① インストールを実行してください")
+        try:
+            argv, config_name = strata_setup.build_argv(module_dir, opts or {})
+        except ValueError as e:
+            raise InstallError(str(e)) from None
+        fam = str((opts or {}).get("family") or "")
+        model = str((opts or {}).get("model") or "")
+        job = self._new_job("install", actor, backend="strata",
+                            backend_name=BACKENDS["strata"]["name"],
+                            module_path=spec["module_path"], tool="", uv_path="",
+                            extras="", clean=False, needs_clone=False, ref="", cuda="",
+                            phase="model", model=f"{fam}/{model}",
+                            config_name=config_name)
+        job["steps"] = ["model"]
+        job["started_ts"] = time.time()   # 完了時の config 新生成判定の基準時刻
+        self._tasks[job["id"]] = asyncio.create_task(
+            self._run_model(job, module_dir, [str(venvpy), *argv]))
+        return self._public(job)
+
+    async def _run_model(self, job: dict[str, Any], module_dir: Path,
+                         argv: list[str]) -> None:
+        """単一 step の Strata モデル構成ジョブ (ダウンロードは数時間〜なのでログのみ)。"""
+        job["status"] = "running"
+        self._save()
+        self._append_log(job, proxy_log_line())
+        self._append_log(job, "Strata 純正 setup.py を --yes (非対話) で実行します — "
+                              "モデルのダウンロードは再開対応です (中断しても続きから)")
+        try:
+            rc, out = await self._run_step(job, {"name": "model", "argv": argv,
+                                                 "cwd": str(module_dir),
+                                                 "stdin_null": True})
+            if job["id"] in self._cancel:
+                job["status"] = "cancelled"
+                self._append_log(job, "中断しました — Strata のダウンロードは再開対応なので、"
+                                      "もう一度実行すると続きから進みます")
+            elif rc != 0:
+                tail = [ln.rstrip() for ln in (out or "").splitlines() if ln.strip()][-30:]
+                if tail:
+                    self._append_log(job, f"----- model 失敗時の出力末尾 (exit {rc}) -----")
+                    for ln in tail:
+                        self._append_log(job, ln)
+                first = next((ln for ln in tail if "error" in ln.lower()),
+                             tail[0] if tail else "")
+                raise InstallError(f"Strata のモデル設定が失敗しました (exit {rc})"
+                                   + (f" — {first[:200]}" if first else ""))
+            else:
+                cfg = module_dir / str(job.get("config_name") or "")
+                if not cfg.is_file():
+                    # 純正の命名が変わった環境対応: 実行中に作られた最新の config を拾う
+                    started = job.get("started_ts") or 0
+                    fresh = [c for c in strata_setup.installed_configs(module_dir)
+                             if c["mtime"] >= started - 5.0]
+                    cfg = Path(fresh[0]["file"]) if fresh else None
+                if cfg is None:
+                    job["status"] = "done"
+                    job["result"] = {"installed": True, "config": ""}
+                    self._append_log(job, "完了しましたが strata-<model>.json が"
+                                          "見つかりません (ログ末尾と module/strata を確認してください)")
+                else:
+                    # config の parallel (純正が VRAM 予算で決めた同時数) を UI に返す —
+                    # 無い = 既定 1。ウィザード ③ の並列数の既定はここから取る
+                    # (全局推奨の 4 を焼くと 24GB で 4 スロット起動失敗する: 2026-11-09)
+                    par = None
+                    try:
+                        pv = json.loads(Path(cfg).read_text("utf-8", errors="replace")).get("parallel")
+                        par = int(pv) if str(pv).isdigit() else None
+                    except (OSError, ValueError):
+                        pass
+                    job["status"] = "done"
+                    job["result"] = {"installed": True, "config": str(cfg), "parallel": par}
+                    self._append_log(job, f"モデル設定完了: {cfg.name}")
+        except InstallError as e:
+            job["status"] = "failed"
+            job["error"] = str(e)
+            self._append_log(job, f"失敗: {e}")
+        except Exception as e:  # noqa: BLE001
+            job["status"] = "failed"
+            job["error"] = f"{type(e).__name__}: {e}"
+            self._append_log(job, f"失敗: {job['error']}")
+        finally:
+            self._finish(job)
 
     def _venv_ensure(self, job: dict[str, Any], module_dir: Path) -> str:
         """スレッドで走る .venv 確保。setup.sh と同じ規則: 動く venv は絶対に消さない。
@@ -580,11 +856,16 @@ class InstallManager:
         if job.get("uv_path"):
             ver = await asyncio.to_thread(_uv_version, str(job["uv_path"]))
             self._append_log(job, f"uv: {job['uv_path']} ({ver or '--version 取得できず'})")
+        if job.get("cuda"):
+            self._append_log(job, f"CUDA: {job['cuda']} (CMAKE_CUDA_COMPILER として明示)")
         switched = False   # ブランチ切替が起きたら依存を入れ直す (precheck スキップを効かせない)
         try:
             if job.get("clean") and (module_dir / ".venv").exists():
                 self._append_log(job, "クリーン再インストール: .venv を削除します")
                 await asyncio.to_thread(shutil.rmtree, module_dir / ".venv")
+            if job.get("clean") and spec.get("cmake") and (module_dir / "build").exists():
+                self._append_log(job, "クリーン再インストール: build/ を削除します")
+                await asyncio.to_thread(shutil.rmtree, module_dir / "build")
             for step in steps:
                 if job["id"] in self._cancel:
                     raise _Cancelled()
@@ -609,6 +890,9 @@ class InstallManager:
                             note = seed_launch_json(module_dir)
                             if note:
                                 self._append_log(job, note)
+                        note = seed_basalt_config(module_dir, spec)
+                        if note:
+                            self._append_log(job, note)
                         job["status"] = "done"
                         job["result"] = {"already_installed": True}
                         return
@@ -636,6 +920,9 @@ class InstallManager:
                 note = seed_launch_json(module_dir)
                 if note:
                     self._append_log(job, note)
+            note = seed_basalt_config(module_dir, spec)
+            if note:
+                self._append_log(job, note)
             job["status"] = "done"
             job["result"] = {"installed": True}
         except _Cancelled:
@@ -1036,6 +1323,7 @@ class InstallManager:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *step["argv"], cwd=step["cwd"], env=env,
+                stdin=subprocess.DEVNULL if step.get("stdin_null") else None,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
             )

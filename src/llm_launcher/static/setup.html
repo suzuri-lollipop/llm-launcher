@@ -122,12 +122,29 @@
     <p class="sub tight" id="md-sub">新しいモデルをダウンロードするか、この PC ですでにダウンロード済みのモデルを使うかを選んでください。</p>
     <div class="opt-list" id="md-modes">
       <label class="opt sel"><input type="radio" name="md-mode" value="dl" checked>
-        <span class="txt"><span class="t1">モデルをダウンロードする</span>
-        <span class="t2">対応モデルの一覧から選んで取得します</span></span></label>
+        <span class="txt"><span class="t1" id="md-dl-mode-t1">モデルをダウンロードする</span>
+        <span class="t2" id="md-dl-mode-t2">対応モデルの一覧から選んで取得します</span></span></label>
       <label class="opt"><input type="radio" name="md-mode" value="local">
-        <span class="txt"><span class="t1">ダウンロード済みのモデルを使う</span>
-        <span class="t2">この PC にあるモデルから選びます (再取得しません)</span></span></label>
+        <span class="txt"><span class="t1" id="md-local-mode-t1">ダウンロード済みのモデルを使う</span>
+        <span class="t2" id="md-local-mode-t2">この PC にあるモデルから選びます (再取得しません)</span></span></label>
     </div>
+    <!-- Strata 用: 純正 setup.py を --yes (非対話) で走らせる選択面板 (renderModel が切替) -->
+    <div class="hidden" id="md-strata">
+      <div class="field sel-fixed"><select id="md-family"></select>
+        <label for="md-family">モデルの家系</label></div>
+      <div class="field sel-fixed"><select id="md-size"></select>
+        <label for="md-size">サイズ (量子化)</label></div>
+      <div class="field sel-fixed"><select id="md-ctx"></select>
+        <label for="md-ctx">コンテキスト長</label></div>
+      <div class="field sel-fixed hidden" id="md-gpu-field"><select id="md-gpu"></select>
+        <label for="md-gpu">GPU の使い方</label></div>
+      <label class="opt" id="md-vision-opt"><input type="checkbox" id="md-vision" checked>
+        <span class="txt"><span class="t1">画像も読ませる (ビジョン)</span>
+        <span class="t2">ON のままなら Strata がこの PC に合う読み方 (VRAM に応じて GPU/CPU エンコーダ) を選びます。オフにすると画像リクエストは使えません</span></span></label>
+      <p class="hint" id="md-strata-hint"></p>
+    </div>
+    <div class="field sel-fixed hidden" id="md-strata-exist-field"><select id="md-strata-exist"></select>
+      <label for="md-strata-exist">ダウンロード済みのモデル</label></div>
     <div class="field sel-fixed" id="md-dl-field"><select id="md-sel"></select>
       <label for="md-sel">ダウンロードするモデル</label></div>
     <div class="field sel-fixed hidden" id="md-local-field"><select id="md-local"></select>
@@ -150,7 +167,7 @@
     <div class="foot-btns">
       <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
       <span class="spacer"></span>
-      <button class="btn-text" data-go="s-config">あとでする</button>
+      <button class="btn-text" id="md-later" data-go="s-config">あとでする</button>
       <button class="btn" id="md-start" disabled>ダウンロード</button>
     </div>
   </section>

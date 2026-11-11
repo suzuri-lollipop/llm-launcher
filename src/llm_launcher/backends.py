@@ -533,8 +533,10 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
     strata-<model>.json の "args" 配列に入る。よって GUI から出すのはサーバープロセスの
     起動フラグ (--config / --host / --port と並列チューニング系) だけ。
 
-    bid="strata-fork": フォーク (module/fork/strata-fork worktree) 用。フィールド定義は共通で、
-    型・help の正表だけ fields/strata-fork.json (フォークの server.py から生成) を参照する。
+    bid="strata-fork": フォーク (module/fork/strata worktree) 用。並列チューニングのうち
+    --batch-mtp / --adapt-async / --adapt-every / --piped-concurrent / --yield-chunks は
+    フォークの serve/server.py だけが持つ CLI なので、その 5 つはフォークの表にある時だけ出す
+    (本家 main の server.py には無い。config の args/env には本家でも一部がある)。
     """
     b = bid
     F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
@@ -558,21 +560,6 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
           help="1 = 全スロットを 1 ウィンドウで直列デコード (適応エキスパート tier と Batch MTP が有効)。"
                "auto/N = layer split のステージ毎 N 群でパイプライン (4+ 並列の総スループットは最速だが MTP/tier 無し)。"
                "config の \"batch_groups\" と同等"),
-        F("--batch-mtp", "Batch MTP ドラフト", section="parallel",
-          help="各バッチスロットでも MTP 提案を検証 (config の --mtp と直列ウィンドウが必要)。"
-               "1-2 並列主体で有効、CPU エキスパート負荷が高い機種では不利。\"batch_mtp\": true と同等"),
-        F("--adapt-async", "適応エキスパート tier の非ブロック化", section="parallel",
-          help="適応 VRAM tier のラウンドでウィンドウを止めない (resident RAM / expert arena 構成向け)。"
-               "実測: ソロ +5-10%、直列 4 並列 89.3→95.9 tok/s。\"adapt_async\": true と同等"),
-        F("--adapt-every", "適応 tier ラウンド間隔 (ウィンドウ数)", section="parallel", placeholder="空=4"),
-        F("--piped-concurrent", "プロンプト読み込み中もデコード継続", section="parallel",
-          help="パイプライン群で長いプロンプトを別スレッド読み込みし、スロットはデコード継続 "
-               "(実測: 読み込み中のストリーム最大停止 39.5s→1.4s、joiner の TTFT は +24% 程度の代償)。"
-               "エンジン env STRATA_PIPED_CONCURRENT=1"),
-        F("--yield-chunks", "長い読みの譲り合い単位 (チャンク数)", section="parallel", placeholder="空=8",
-          help="デコード無しのプロンプト読み込みを N チャンク単位で区切り、短いリクエストの割り込みを許可 "
-               "(1 = 毎チャンク: 実測 割り込み TTFT 30s→6.5s、長い読みは +33%)。"
-               "エンジン env STRATA_BATCH_YIELD_CHUNKS"),
         F("--lazy", "遅延ロード (初回リクエストで起動)", section="sched",
           help="API は未ロードで待ち受け、最初のリクエストでエンジンとビジョンエンコーダを起動"),
         F("--idle-unload", "アイドル自動アンロード秒", section="sched", ftype="float",
@@ -598,6 +585,30 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
         F("--script", "mock エンジンの回答", section="server",
           help="--engine mock のときだけ有効。複数回指定可 (GUI は 1 つまで)"),
     ]
+    # Fork-only server flags (suzuri/parallel-perf's serve/server.py).  The main Strata server has
+    # no such CLI: showing them there sent an unknown option.  The fork's table (generated from its
+    # serve/server.py) decides whether they exist, so a fork clone left on main hides them too.
+    fork_only = [
+        ("--batch-mtp", "Batch MTP ドラフト", dict(section="parallel", default_on=False,
+          help="各バッチスロットでも MTP 提案を検証 (config の --mtp と直列ウィンドウが必要)。"
+               "1-2 並列主体で有効、CPU エキスパート負荷が高い機種では不利。\"batch_mtp\": true と同等")),
+        ("--adapt-async", "適応エキスパート tier の非ブロック化", dict(section="parallel", default_on=False,
+          help="適応 VRAM tier のラウンドでウィンドウを止めない (resident RAM / expert arena 構成向け)。"
+               "実測: ソロ +5-10%、直列 4 並列 89.3→95.9 tok/s。\"adapt_async\": true と同等")),
+        ("--adapt-every", "適応 tier ラウンド間隔 (ウィンドウ数)", dict(section="parallel", default_on=False, placeholder="空=4")),
+        ("--piped-concurrent", "プロンプト読み込み中もデコード継続", dict(section="parallel", default_on=False,
+          help="パイプライン群で長いプロンプトを別スレッド読み込みし、スロットはデコード継続 "
+               "(実測: 読み込み中のストリーム最大停止 39.5s→1.4s、joiner の TTFT は +24% 程度の代償)。"
+               "エンジン env STRATA_PIPED_CONCURRENT=1")),
+        ("--yield-chunks", "長い読みの譲り合い単位 (チャンク数)", dict(section="parallel", default_on=False, placeholder="空=8",
+          help="デコード無しのプロンプト読み込みを N チャンク単位で区切り、短いリクエストの割り込みを許可 "
+               "(1 = 毎チャンク: 実測 割り込み TTFT 30s→6.5s、長い読みは +33%)。"
+               "エンジン env STRATA_BATCH_YIELD_CHUNKS")),
+    ]
+    table = load_table(bid)
+    if all(flag in table for flag, _label, _kw in fork_only):
+        at = next((i for i, f in enumerate(fields) if f["key"] == "lazy"), len(fields))
+        fields[at:at] = [F(flag, label, **kw) for flag, label, kw in fork_only]
     return _backend_meta(b, fields)
 
 
@@ -644,6 +655,91 @@ def build_maya() -> dict[str, Any]:
     return _backend_meta(b, fields)
 
 
+def build_basalt() -> dict[str, Any]:
+    """Basalt (https://github.com/jesdga95/basalt) — Strata 系フォークの、NVIDIA Blackwell
+    (sm_120) 向けの MoE ローカル推論エンジン (OpenAI/Anthropic 互換 + Web UI)。
+
+    起動の入口は cmake でビルドする bin/basalt の serve サブコマンド。ラッパが
+    「リポジトリ直下の .venv があればそれ、無ければ python3」で serve/server.py を
+    --engine-bin 付きで起動するため、GUI からは {llama_server} (= バックエンド設定で
+    上書き可能な bin/basalt の解決結果) + サーバー起動フラグだけを出す。
+    モデル本体の設定 (pack・コンテキスト長・expert 階層) は basalt_config.json の
+    "models" / "engine" 側に入るため、正表は serve/config.py build_parser のサーバー CLI。
+    """
+    b = "basalt"
+    F = lambda flag, label, **kw: fld(b, flag, label, **kw)  # noqa: E731
+    fields = [
+        F("--model", "モデルファイル (.basalt)",
+          placeholder="module/basalt/models/Qwen3.8-FN-NVFP4-DQ6_K.basalt",
+          help="エンジン・トークナイザ・サンプリング・ビジョンはモデルファイルから来る。"
+               "pack は huggingface.co/jesdga/Qwen3.8-Flash-Next-Basalt 等から DL"),
+        F("--config", "実行設定 JSON (basalt_config.json)",
+          placeholder="module/basalt/basalt_config.json",
+          help='{"server": {...}, "engine": {...}, "models": [{"model": FILE}]} 形式。'
+               "コンテキスト長・expert 階層など本体設定はこの args 側 (コマンドラインが優先)"),
+        F("--alias", "API のモデル名 (alias)", help="空 = モデルファイルに保存された名前"),
+        F("--vision", "ビジョンエンコーダ (画像入力)", default="dynamic",
+          placeholder="dynamic / off / cpu / GPU番号",
+          help="dynamic = エンジン内実行 (expert-cache 枠を間借り、常駐 VRAM なし・既定) / off = 画像拒否 / "
+               "cpu = 低速だが VRAM 不使用 / GPU番号 = サイドカーをそのカードに常駐。未設定のまま保存すると画像は使えない"),
+        F("--tokenizer", "トークナイザ DIR",
+          help="空 = リポジトリの pack/full/tokenizer (mock エンジン用。通常は触らない)"),
+        F("--gpu", "GPU 指定", section="parallel", placeholder="0 / 0,1 / auto",
+          help="nvidia-smi の番号。先頭がメインで残りはエンジンが役割を分担。auto = 全 Blackwell カード"),
+        F("--parallel", "並列スロット数 (1-8)", section="parallel", ftype="int", placeholder="空=1",
+          help="N リクエストを同時処理 (超過は到着順に待機)。--max-context は N 分割 "
+               "(slot-full-context で各スロットに全長。KV cache は expert cache から出る)"),
+        F("--slot-full-context", "各スロットに full context", section="parallel", default_on=False,
+          help="--parallel と併用。全スロットに --max-context 全体を与える (KV cache は N 倍)"),
+        F("--max-context", "コンテキスト長 (トークン)", placeholder="空=モデル既定 (8192)",
+          ftype="int",
+          help="プロンプト+生成で共有する長さ。--parallel N と併用すると N 分割され、"
+               "slot-full-context で各スロットに全長を与える。設定 JSON の models に書かれる"),
+        F("--kv", "KV キャッシュ形式", placeholder="空=モデル既定 (fp16)",
+          choices=["fp16", "int8", "q4_0", "k8v4"],
+          help="fp16=品質優先 / int8=VRAM 半減 / q4_0・k8v4=さらに圧縮。設定 JSON の models に書かれる"),
+        F("--lazy", "遅延ロード (初回リクエストで起動)", section="sched", default_on=False,
+          help="API は未ロードで待ち受け、最初のリクエストでロード (sidecar ビジョンは降ろす)"),
+        F("--idle-unload", "アイドル自動アンロード秒", section="sched", ftype="float",
+          placeholder="空=常駐", help="指定秒リクエストが無いとモデルを降ろす。次のリクエストで再ロード"),
+        F("--idle-sleep", "アイドル就寝秒 (VRAM 解放)", section="sched", ftype="float",
+          placeholder="空=常駐", help="指定秒無リクエストでエンジンの VRAM を解放 (RAM 側は残る)。"
+              "次リクエストで数秒で復帰 (Linux)。--idle-unload の代わりに使える"),
+        F("--min-free-vram-mib", "ロードに必要な空き VRAM (MiB)", section="sched",
+          placeholder="空=常にロード", help="未ロード時にこれ未満なら 503 を返す"),
+        F("--host", "ホスト", section="server", default="0.0.0.0",
+          help="0.0.0.0 で LAN 公開 (その場合は APIキーを推奨)。127.0.0.1 = この PC のみ"),
+        F("--port", "ポート", section="server", default="8080"),
+        F("--api-key", "APIキー", section="server", placeholder="key (コマンドラインのみ)",
+          help="/v1/* で Bearer / x-api-key を必須 (--host 0.0.0.0 と併用)。--config には書けない"),
+        F("--open", "起動時にブラウザを開く", section="server", default_on=False,
+          help="モデルが ready になった時点でローカルページ ( stats ページ) を開く"),
+        F("--fit-max-tokens", "max_tokens を残り長さに clamp", section="server", default_on=False,
+          help="OFF はコンテキスト超過を 400 で拒否 (llama.cpp / Strata と同じ既定)"),
+        F("--max-payload-mib", "最大リクエストボディ (MiB)", section="server",
+          placeholder="空=256", help="超過は 413"),
+        F("--allowed-host", "応答する Host 名", section="server", placeholder="例: pc.local (* で検査オフ)",
+          help="追記で複数可。空 = localhost 系のみ"),
+        F("--cors-origin", "CORS 許可 ORIGIN", section="server", placeholder="例: https://example.com",
+          help="この origin の Web ページに /v1/* を使わせる (追記で複数可)"),
+        F("--image-url-host", "画像 URL 許可 HOST[:PORT]", section="server",
+          placeholder="例: img.example.com", help="他マシンからのリクエストの http(s) 画像 URL をこの host に限定 (追記で複数可)"),
+        F("--image-dir", "画像ファイル許可 DIR", section="server",
+          placeholder="例: module/basalt/models", help="他マシンからのリクエストにこの配下のファイルを名指しさせる (追記で複数可)"),
+        F("--image-remote-only", "自マシンも remote 扱い", section="server", default_on=False,
+          help="自マシンのリクエストにも data: URL と許可 host/dir のみ通す (プロキシ併用環境向け)"),
+        F("--mock-engine", "mock エンジン (疎通確認)", section="server", default_on=False,
+          help="モデル無しでスクリプトどおり回答する偽エンジン。API 疎通・UI 確認用 (--model 不要)"),
+        F("--script", "mock エンジンの回答", section="server", placeholder="複数ある場合は追加引数へ",
+          help="--mock-engine のときだけ有効。複数指定可 (GUI は 1 つまで)"),
+        F("--debug", "リクエスト毎のデバッグログ", section="logs", default_on=False,
+          help="1 リクエスト 1 行 + 回答後の生モデルテキストをログに出す"),
+        F("--request-lines", "エンジン要求サマリを stdout へ", section="logs", default_on=False,
+          help="[server] done 行を stdout に返す (supervisor が stdout だけ見る場合向け)"),
+    ]
+    return _backend_meta(b, fields)
+
+
 # モジュール側が自動導出する項目: GUI 既定値で上書きしないよう既定 OFF (チェックで ON にすると送信)
 DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     "vllm": {"dtype", "load_format", "kv_cache_dtype", "generation_config",
@@ -677,12 +773,16 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
     # Strata: 正解を strata-<model>.json (config) が既に持っている項目は既定 OFF
     "strata": {"tokenizer", "gpu", "replicas", "idle_unload", "min_free_vram_mib",
                "slot_save_path", "before_load", "mcp_config", "script",
-               # 並列チューニング系 (2026-10): config キー / env が正解を持つので既定 OFF (ON にすると CLI が優先)
-               "parallel", "batch_groups", "batch_mtp", "adapt_async", "adapt_every",
-               "piped_concurrent", "yield_chunks"},
+               # 本家 main の server.py が持つ並列系。config キーが正解を持つので既定 OFF
+               "parallel", "batch_groups"},
     # Project Maya: 同様に maya-<model>.json (config) が正解を持つ項目 / 起動のたびに不要な項目は既定 OFF
     "maya": {"config", "gpu", "gpus", "parallel", "vram_reserve_mib", "calibrate",
              "backend", "env"},
+    # Basalt: 正解を basalt_config.json (config) が既に持っている項目 / 空なら上流既定に任せる項目は既定 OFF
+    "basalt": {"config", "alias", "gpu", "tokenizer", "parallel", "idle_unload",
+               "idle_sleep", "min_free_vram_mib", "max_payload_mib", "allowed_host",
+               "cors_origin", "image_url_host", "image_dir", "script",
+               "max_context", "kv"},
 }
 
 # 常に送信する (無効化できない) 項目
@@ -693,12 +793,15 @@ REQUIRED_KEYS: dict[str, set[str]] = {
     "freetoken": {"model_path", "host", "port"},
     "strata": {"config", "engine", "host", "port"},
     "maya": {"host", "port"},
+    "basalt": {"host", "port"},
 }
 
 # fork バックエンドは基底 (freetoken) と同じ送信ポリシー (コピーして派生 = 個別追加可)
 DEFAULT_OFF_KEYS["freetoken-fork"] = set(DEFAULT_OFF_KEYS["freetoken"])
 REQUIRED_KEYS["freetoken-fork"] = set(REQUIRED_KEYS["freetoken"])
-DEFAULT_OFF_KEYS["strata-fork"] = set(DEFAULT_OFF_KEYS["strata"])
+# フォークの server.py だけが持つ並列 CLI。フォークの表にある時だけ build_strata が項目を出す
+STRATA_FORK_ONLY = {"batch_mtp", "adapt_async", "adapt_every", "piped_concurrent", "yield_chunks"}
+DEFAULT_OFF_KEYS["strata-fork"] = set(DEFAULT_OFF_KEYS["strata"]) | STRATA_FORK_ONLY
 REQUIRED_KEYS["strata-fork"] = set(REQUIRED_KEYS["strata"])
 
 
@@ -788,7 +891,9 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "repo": "https://github.com/Niko1221/Strata",
         "module_path": "module/strata", "kind": "python",
         "desc": "MoE エキスパートを RAM/SSD に階層化して consumer GPU で大型モデルを動かすエンジン"
-                " (OpenAI/Anthropic 互換)。初回は module/strata で setup.sh を実行する。",
+                " (OpenAI/Anthropic 互換)。初回はセットアップタブ (📦) で .venv・依存・エンジンを入れ、"
+                "モデル設定 (選択・ダウンロード・strata-<model>.json 生成) はセットアップ画面 ② が"
+                "純正 setup.py を非対話で走らせて完結させる。手動なら module/strata で setup.sh も可。",
         # serve/server.py は __file__ から自リポジトリを解決するので cwd 依存ではない
         "default_command": "{python} {root}/module/strata/serve/server.py",
         # serve はリポジトリ直下のパッケージ (未 install) → submodule を cwd に実 import して判定
@@ -832,6 +937,38 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["ready: http"],
         "default_port": "8080",
     },
+    "basalt": {
+        "id": "basalt", "name": "Basalt",
+        "repo": "https://github.com/jesdga95/basalt",
+        "module_path": "module/basalt", "kind": "python",
+        "desc": "Strata 系フォークの Blackwell (sm_120) 向け MoE ローカル推論エンジン"
+                " (Qwen3.8-Flash-Next / DeepSeek-V4.1-Flash、OpenAI/Anthropic 互換)。"
+                "入口は cmake ビルドした bin/basalt の serve サブコマンドで、ラッパが "
+                "module/basalt/.venv (無ければ python3) で serve/server.py を起動する。"
+                "初回は セットアップタブ (📦) か module/basalt で "
+                "cmake -B build && cmake --build build -j + pip install -r requirements.txt を実行する。",
+        # bin/basalt serve が --engine-bin 自身を付けて python サーバーを exec する
+        "default_command": "{llama_server} serve",
+        # serve はリポジトリ直下のパッケージ (未 install) → submodule を cwd にして実 import して判定。
+        # 依存 (jinja2 / numpy / psutil …) は requirements.txt 製なので setup 前は未検出になる
+        "check_module": "serve.server", "check_cwd": True, "health_path": "/health",
+        "ready_markers": ["[server] ready"],
+        "default_port": "8080",
+        "binaries": ["basalt"],
+        "build_candidates": ["module/basalt/bin/basalt"],
+        # セットアップ ② / 初回ウィザードの「対応モデル一覧」。docs/models/index.md の表は
+        # 先頭列が "Packs" でモデル名にならない (parse_supported_models が拾う形ではない) ため、
+        # 公式の 2 リポジトリを明示する。pack は .basalt ファイル / 量子化違いも同 repo 内。
+        # include = 既定で落とすファイル (repo 全体は 1 TB / 57 files なので pack 1 個に絞る)
+        "model_list": [
+            {"name": "Qwen3.8-Flash-Next (NVFP4-DQ6_K pack)",
+             "repo_id": "jesdga/Qwen3.8-Flash-Next-Basalt",
+             "include": ["Qwen3.8-FN-NVFP4-DQ6_K.basalt"]},
+            {"name": "DeepSeek-V4.1-Flash (UD-IQ1_M pack)",
+             "repo_id": "jesdga/DeepSeek-V4.1-Flash-1017-Basalt",
+             "include": ["DeepSeek-V4.1-Flash-1017-UD-IQ1_M.basalt"]},
+        ],
+    },
 }
 
 BACKENDS: dict[str, dict[str, Any]] = {
@@ -843,6 +980,7 @@ BACKENDS: dict[str, dict[str, Any]] = {
     "strata": build_strata(),
     "strata-fork": build_strata("strata-fork"),
     "maya": build_maya(),
+    "basalt": build_basalt(),
 }
 
 
@@ -973,26 +1111,28 @@ def parse_supported_models(text: str) -> list[dict[str, Any]]:
 
 
 def supported_models(root: Path, backend: dict[str, Any]) -> list[dict[str, Any]]:
-    """model_list_doc を持つバックエンドの対応モデル一覧。未 clone / 文書なしは空。
+    """対応モデル一覧: backend の model_list_doc (docs 表) か、静的な model_list から。
+    未 clone / 文書なし / 表が空なら model_list に落ちる。
     (mtime, size) でキャッシュするので /api/installs のポーリングでも安価。"""
+    static = [dict(m) for m in (backend.get("model_list") or [])]
     rel = str(backend.get("model_list_doc") or "")
     if not rel:
-        return []
+        return static
     path = root / str(backend.get("module_path") or "") / rel
     try:
         st = path.stat()
     except OSError:
-        return []
+        return static
     key = str(path)
     hit = _models_doc_cache.get(key)
     if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
-        return hit[2]
+        return hit[2] or static
     try:
         parsed = parse_supported_models(path.read_text("utf-8", errors="replace"))
     except OSError:
-        return []
+        return static
     _models_doc_cache[key] = (st.st_mtime_ns, st.st_size, parsed)
-    return parsed
+    return parsed or static
 
 
 def launch_json_path(root: Path, profile: dict[str, Any]) -> Path | None:
@@ -1031,6 +1171,114 @@ def replace_arg(argv: list[str], flag: str, value: str) -> list[str]:
     return out + [flag, value]
 
 
+# ---------------------------------------------------------------------------
+# Basalt の設定 JSON (basalt_config.json / v2)
+# ---------------------------------------------------------------------------
+
+# serve/config.py の分類に合わせる: "server" はサーバー共有の設定だけ、"engine"/モデル項目は
+# モデル側の設定 (--parallel / --gpu / --vision などもモデル項目)。api-key は config に
+# 書けない (コマンドラインのみ) ので生成しない。
+_BASALT_SERVER_KEYS = frozenset({
+    "host", "port", "lazy", "max_payload_mib", "allowed_host", "cors_origin",
+    "image_url_host", "image_dir", "image_remote_only", "open", "script",
+    "mock_engine", "tokenizer", "debug", "request_lines",
+})
+_BASALT_MODEL_KEYS = frozenset({
+    "alias", "gpu", "vision", "parallel", "slot_full_context", "idle_sleep",
+    "idle_unload", "min_free_vram_mib", "fit_max_tokens", "max_context", "kv",
+})
+_BASALT_INT_KEYS = frozenset({"parallel", "min_free_vram_mib", "max_payload_mib",
+                              "max_context"})
+_BASALT_FLOAT_KEYS = frozenset({"idle_unload", "idle_sleep"})
+_BASALT_LIST_KEYS = frozenset({"allowed_host", "cors_origin", "image_url_host", "image_dir"})
+_BASALT_PATH_KEYS = frozenset({"model", "tokenizer", "image_dir"})
+# 値が空でも JSON に焼き込む既定 (上流既定と意図的に違うものだけ — vision は
+# basalt 本体の既定 off でも画像が死にるので dynamic)。max-payload-mib 等の
+# 正表由来の既定は上流と同じ値なので書かない。
+_BASALT_ADOPT_DEFAULTS = frozenset({"vision"})
+# --config があるときに CLI から送らないモデル項目 (JSON の models / engine が正)
+_BASALT_CONFIG_DRIVEN_SKIP = frozenset({"model"}) | _BASALT_MODEL_KEYS
+
+
+def _basalt_abs(value: str, root: Path) -> str:
+    """config 内のパスは **ファイルの位置** 基準で解決されるため、絶対パスで書く。"""
+    p = os.path.expanduser(value.strip())
+    if not p:
+        return ""
+    return p if os.path.isabs(p) else str((root / p).resolve())
+
+
+def basalt_config_for(profile: dict[str, Any], *, root: Path) -> dict[str, Any]:
+    """プロファイルの値から basalt の設定 JSON ({"version":2,"server","engine","models"}) を組む。
+
+    - フォームの ON/OFF (profile["on"]) と空値を尊重する (render_argv と同じ規則)
+    - --parallel / --gpu / --vision / --alias などは basalt の分類どおり models 側に入れる
+    - api-key は config に書けない (CLI のみ) ので含めない
+    - model / tokenizer / image-dir は config ファイル基準の相対解決になるため絶対パス化
+    モデル未設定 (mock 用のダミーも無い) は ValueError — 中身の無い JSON を作らない。
+    """
+    backend = BACKENDS["basalt"]
+    values: dict[str, Any] = profile.get("values") or {}
+    on = profile.get("on")
+    if not isinstance(on, dict):
+        on = None
+
+    model = str(values.get("model") or "").strip()
+    if not model:
+        raise ValueError("モデル (.basalt ファイル) が未設定のため設定 JSON を作成できません")
+
+    cfg: dict[str, Any] = {"version": 2, "models": [], "server": {}}
+
+    def enabled(f: dict[str, Any]) -> tuple[bool, str]:
+        """(この項目を JSON に書くか, 書く値)。値が空でもフォーム既定 (vision=dynamic など) を採用する。"""
+        key = f["key"]
+        if f["type"] == "bool":
+            # チェックボックスの表現 ("on" / "1" / "true" など) を render_argv と同じ規則で判定
+            return (str(values.get(key) or "").strip().lower() in TRUTHY, "true")
+        if on is not None and not f.get("required"):
+            if not bool(on.get(key, f.get("default_on", True))):
+                return (False, "")
+        raw = str(values.get(key) or "").strip()
+        if not raw and key in _BASALT_ADOPT_DEFAULTS:
+            raw = str(f.get("default") or "").strip()
+        return (bool(raw), raw)
+
+    entry: dict[str, Any] = {"model": _basalt_abs(model, root)}
+    for f in backend["fields"]:
+        key = f["key"]
+        if key in ("model", "config", "api_key"):
+            continue
+        ok, raw = enabled(f)
+        if not ok:
+            continue
+        name = key.replace("_", "-")
+        if f["type"] == "bool":
+            (cfg["server"] if key in _BASALT_SERVER_KEYS else entry)[name] = True
+            continue
+        if key in _BASALT_INT_KEYS:
+            try:
+                val: Any = int(float(raw))
+            except ValueError:
+                raise ValueError(f"{f['label']} は整数で入力してください: {raw}") from None
+        elif key in _BASALT_FLOAT_KEYS:
+            try:
+                val = float(raw)
+            except ValueError:
+                raise ValueError(f"{f['label']} は数値で入力してください: {raw}") from None
+        elif key in _BASALT_LIST_KEYS:
+            val = [_basalt_abs(raw, root) if key in _BASALT_PATH_KEYS else raw]
+        elif key in _BASALT_PATH_KEYS:
+            val = _basalt_abs(raw, root)
+        else:
+            val = raw
+        target = cfg["server"] if key in _BASALT_SERVER_KEYS else entry
+        target[name] = val
+    cfg["models"].append(entry)
+    if not cfg["server"]:
+        cfg.pop("server")
+    return cfg
+
+
 def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str,
                 binary: str, root: Path) -> list[str]:
     """バックエンド + プロファイルから最終 argv を組み立てる。"""
@@ -1059,14 +1307,24 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
         command = (profile.get("command") or "").strip() or backend["default_command"]
         resolved = resolve_command_tokens(root, command, python=python, binary=binary,
                                           values=values)
-        if backend["kind"] == "binary" and not binary:
-            raise ValueError("llama-server が見つかりません。バックエンド設定でパスを指定するか、"
-                             "module/llama.cpp をビルドしてください")
+        if backend.get("binaries") and not binary:
+            name = backend["binaries"][0]
+            mod = backend.get("module_path", "")
+            raise ValueError(f"{name} が見つかりません。バックエンド設定でパスを指定するか、"
+                             f"{mod} をビルドしてください")
         if not resolved.strip():
             raise ValueError("起動コマンドが空です")
         argv = shlex.split(resolved)
+        # Basalt の設定 JSON (--config) があるときは models / engine 側の値は JSON が正。
+        # --model などモデル項目を CLI でも送ると basalt serve ラッパが --model の
+        # ファイル実在チェックで止まり、JSON の models と二重指定にもなるため送らない
+        cfg_active = (backend.get("id") == "basalt"
+                      and bool(str(values.get("config") or "").strip())
+                      and (on is None or bool(on.get("config", True))))
         for field in ([] if profile.get("custom_only") else backend.get("fields", [])):
             key = field["key"]
+            if cfg_active and key in _BASALT_CONFIG_DRIVEN_SKIP:
+                continue
             # 送信 ON/OFF: on dict が明示されたプロファイルのみ尊重 (無い=旧来動作=値があれば送信)
             if on is not None and field["type"] != "bool" and not field.get("required"):
                 if not bool(on.get(key, field.get("default_on", True))):

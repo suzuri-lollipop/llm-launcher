@@ -21,6 +21,18 @@ VIEWS.home = `
       <div class="card-h">GPU</div>
       <div id="home-gpus"></div>
     </div>
+    <div class="card" style="margin-top:12px">
+      <div class="card-h">デコード速度 <span class="muted" style="font-weight:400;letter-spacing:0;margin-left:4px">全スロット合算 · 直近 60 秒 · スロット毎のグラフは下表</span></div>
+      <div class="par-tools">
+        <label class="par-lab" for="home-par-select">サーバー</label>
+        <select id="home-par-select" class="par-sel" onchange="parChoose(this.value)" aria-label="デコード速度を表示するサーバー"></select>
+        <span class="badge" id="home-par-state"><span class="dot"></span>—</span>
+        <span class="muted" id="home-par-count"></span>
+        <span class="grow"></span>
+        <span id="home-par-rate" class="par-rate" aria-live="polite">-</span>
+      </div>
+      <div id="home-par"><span class="muted"><span class="spin"></span> 読み込み中…</span></div>
+    </div>
     <div class="dash-2col" style="margin-top:12px">
       <div class="card" style="margin:0">
         <div class="card-h">稼働中サーバー <span class="badge" id="home-live-count" style="margin-left:auto"></span></div>
@@ -48,6 +60,7 @@ function renderHome(){
   renderHomeHost();
   renderHomeMeters();
   renderHomeGpus();
+  renderHomeParallel();
   renderHomeLive();
   renderHomeBackends();
   renderHomeRecent();
@@ -224,4 +237,316 @@ function renderHomeRecent(){
 let clockInterval = null;
 function tickHomeClock(){ fmtClock(); if(!clockInterval) clockInterval=setInterval(fmtClock,1000); }
 
+/* ---------------- dashboard: デコード速度 (live slot graph) ----------------
+   basalt の Speed カード: /metrics の history を 60 秒分の折れ線にし、
+   --parallel のスロットを 1 本ずつ色 / 太さで重ね、右端に現在値を置く。
+   ここではブラウザ側で 1 秒ごとに取得したサンプルを 60 点溜める。
+   Strata 系は live.slots の tok/s をスロット毎に描く。内訳の無い
+   Maya などは全スロット合算だけを描く。 */
+const PAR_HIST = 60;
+const PAR_STEPS = [10, 20, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500,
+                   600, 750, 800, 1000, 1200, 1500, 2000, 2500, 3000, 4000, 5000,
+                   6000, 8000, 10000, 12000, 15000, 20000, 25000, 30000];
+const PAR_SERVERS = new Set(["strata", "strata-fork", "maya"]);
+
+function parInit(){
+  if (!S.homePar) {
+    S.homePar = { sid: "", samples: [], latest: null, error: "",
+                  busy: false, sig: "", timer: null, slotLast: {} };
+    setTimeout(parPoll, 0);
+    S.homePar.timer = setInterval(parPoll, 1000);
+    // 非表示タブの 1 秒タイマーはブラウザに 1 分/回へ絞られる (Chrome/Firefox の
+    // timer throttling)。復帰時に間隔の再開を待たず即再取得しないと、生成中なのに
+    // 状態バッジが最後に読んだ "待機" のまま取り残される。
+    const resync = () => { if (document.visibilityState === "visible") parPoll(true); };
+    document.addEventListener("visibilitychange", resync);
+    window.addEventListener("pageshow", resync);
+  }
+  return S.homePar;
+}
+function parServers(){
+  return (S.state.sessions || []).filter(s =>
+    s.status === "running" && s.ready && PAR_SERVERS.has(s.backend));
+}
+function parChoose(sid){
+  const p = parInit();
+  p.sid = sid;
+  p.samples = [];
+  p.latest = null;
+  p.error = "";
+  p.slotLast = {};
+  renderHomeParallel();
+  parPoll(true);
+}
+async function parPoll(force){
+  const p = parInit();
+  if (S.tab !== "home" || !S.state) return;
+  if (p.busy && !force) return;
+  const servers = parServers();
+  const ids = servers.map(s => s.id);
+  if (!p.sid || !ids.includes(p.sid)) {
+    p.sid = ids[0] || "";
+    p.samples = [];
+    p.latest = null;
+    p.error = "";
+    p.slotLast = {};
+  }
+  if (!p.sid){
+    renderHomeParallel();
+    return;
+  }
+  p.busy = true;
+  const sid = p.sid;
+  try {
+    const data = await api(`/api/sessions/${encodeURIComponent(sid)}/parallel`);
+    if (p.sid !== sid) return;             // 選択が切り替わったら古い結果は捨てる
+    p.latest = data;
+    p.error = "";
+    const sample = parSample(data);
+    const last = p.samples[p.samples.length - 1];
+    // タイマー制限後や切断後 (間隔が空いた時) は、古い点に 1 点足すより
+    // サーバー側の 60 秒履歴から描き直す (古い点が現在値のように並ぶのを防ぐ)。
+    if (!p.samples.length || !last || sample.t - last.t > 5) p.samples = parHistorySamples(data);
+    const tail = p.samples[p.samples.length - 1];
+    if (!tail || sample.t > tail.t + 0.2) {
+      p.samples.push(sample);
+      if (p.samples.length > PAR_HIST) p.samples.splice(0, p.samples.length - PAR_HIST);
+    }
+  } catch (e) {
+    p.error = (e.status === 404 || e.status === 405)
+      ? "デコード速度の取得用 API が見つかりません。llm-launcher を再起動すると有効になります。"
+      : (e.message || String(e));
+  } finally {
+    p.busy = false;
+  }
+  renderHomeParallel();
+}
+function parSample(d){
+  const live = (d && d.live) || {};
+  const slots = Array.isArray(d && d.slots) ? d.slots : [];
+  return {
+    t: typeof d.fetched_at === "number" ? d.fetched_at : Date.now() / 1000,
+    total: typeof live.tok_s === "number" ? live.tok_s : null,
+    slots: slots.map(s => ({
+      slot: typeof s.slot === "number" ? s.slot : null,
+      tok_s: typeof s.tok_s === "number" ? s.tok_s : null,
+    })),
+    active: typeof live.active === "number" ? live.active : null,
+  };
+}
+function parHistorySamples(d){
+  const hist = (d && d.history) || {};
+  const raw = Array.isArray(hist.tok_s) ? hist.tok_s : [];
+  const slotH = Array.isArray(hist.slot_tok_s) ? hist.slot_tok_s : [];
+  const n = raw.length || slotH.reduce((m, a) => Math.max(m, (a || []).length), 0);
+  if (!n) return [];
+  const now = typeof d.fetched_at === "number" ? d.fetched_at : Date.now() / 1000;
+  return Array.from({ length: n }, (_, i) => {
+    const v = raw.length ? raw[raw.length - n + i] : null;
+    return {
+      t: now - (n - i),
+      total: typeof v === "number" && Number.isFinite(v) ? v : null,
+      slots: slotH.map((a, k) => {
+        const sv = a && a[a.length - n + i];
+        return { slot: k, tok_s: typeof sv === "number" && Number.isFinite(sv) ? sv : null };
+      }).filter(x => x.tok_s != null),
+      active: null,
+    };
+  });
+}
+function parNum(v){
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+function parF1(v){
+  const n = parNum(v);
+  return n == null ? "-" : n.toLocaleString("ja-JP", {minimumFractionDigits: 1, maximumFractionDigits: 1});
+}
+function parInt(v){
+  const n = parNum(v);
+  return n == null ? "-" : Math.round(n).toLocaleString("ja-JP");
+}
+function parNice(v){
+  if (!(v > 0)) return 20;
+  return PAR_STEPS.find(s => s >= v * 1.15) || Math.ceil(v * 1.15 / 10000) * 10000;
+}
+function parPadded(arr){
+  const pad = Math.max(0, PAR_HIST - arr.length);
+  return Array(pad).fill(null).concat(arr);
+}
+function parSegments(values, yFn){
+  const out = []; let cur = [];
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (!Number.isFinite(v)) { if (cur.length) { out.push(cur); cur = []; } continue; }
+    cur.push(`${(i / (PAR_HIST - 1) * 1000).toFixed(1)},${yFn(v).toFixed(1)}`);
+  }
+  if (cur.length) out.push(cur);
+  return out;
+}
+// basalt の Decode ヒーロー: 合算 (All) 1 本だけの 60 秒チャート。
+// スロット毎の線はこのチャートには重ねず、下の Slot 行で各自のグラフを持つ。
+function parChart(agg, max){
+  const W = 1000, H = 200, top = 12, bottom = 10;
+  const y = v => H - bottom - Math.min(Math.max(v, 0) / max, 1) * (H - top - bottom);
+  let out = "";
+  [0, 0.25, 0.5, 0.75, 1].forEach(f => {
+    const py = H - bottom - f * (H - top - bottom);
+    out += `<line x1="0" y1="${py.toFixed(1)}" x2="${W}" y2="${py.toFixed(1)}" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 5" vector-effect="non-scaling-stroke"/>`;
+  });
+  parSegments(agg, y).forEach(pts => {
+    out += `<polyline points="${pts.join(" ")}" fill="none" stroke="var(--acc)" stroke-width="2.1" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  });
+  let last = -1;
+  for (let i = agg.length - 1; i >= 0; i--) if (Number.isFinite(agg[i])) { last = i; break; }
+  let lab = "";
+  if (last >= 0) {
+    out += `<circle cx="${(last / (PAR_HIST - 1) * W).toFixed(1)}" cy="${y(agg[last]).toFixed(1)}" r="2.4" fill="var(--acc)" vector-effect="non-scaling-stroke"/>`;
+    lab = `<span class="par-cl" style="top:${(y(agg[last]) / H * 100).toFixed(1)}%;color:var(--acc)">全体</span>`;
+  }
+  return `<div class="par-chart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="全スロット合算のデコード速度、直近 60 秒">${out}</svg>${lab}</div>`;
+}
+// basalt の slotRows のミニグラフ列: スロット毎の 60 秒スパークライン
+function parSpark(values, max){
+  const W = 160, H = 30, top = 3, bottom = 3;
+  const base = `<line x1="0" y1="${H - bottom}" x2="${W}" y2="${H - bottom}" stroke="var(--line)" stroke-width="1.4" vector-effect="non-scaling-stroke"/>`;
+  const y = v => H - bottom - Math.min(Math.max(v, 0) / max, 1) * (H - top - bottom);
+  const segs = []; let cur = [];
+  for (let i = 0; i < (values || []).length; i++) {
+    const v = values[i];
+    if (!Number.isFinite(v)) { if (cur.length) { segs.push(cur); cur = []; } continue; }
+    cur.push(`${(i / (values.length - 1) * W).toFixed(1)},${y(v).toFixed(1)}`);
+  }
+  if (cur.length) segs.push(cur);
+  const lines = segs.map(pts => `<polyline points="${pts.join(" ")}" fill="none" stroke="var(--acc)" stroke-width="1.4" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`).join("");
+  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" aria-hidden="true">${base}${lines}</svg>`;
+}
+// basalt の slotRows と同じグリッド: Slot N + 状態 / tok/s / Last 60 s (スロット
+// 毎の独立グラフ) / Output tok / Context。行は常に全スロット分keepingし、待機行は
+// 値を薄くして最後の数字だけ残す (グリッドの形を変えない)。Accept 列は
+// Strata の /metrics がスロット毎の下書き数を出さないため無い。
+function parSlotTable(latest, series, p){
+  const slots = latest && Array.isArray(latest.slots) ? latest.slots : [];
+  if (!slots.length){
+    const live = latest && latest.live || {};
+    const active = parNum(live.active);
+    return `<div class="par-note">このサーバーはスロット毎の内訳を /metrics に出していません。${active != null ? "アクティブ " + parInt(active) + " 本・" : ""}全スロット合算のデコード速度だけを描いています。</div>`;
+  }
+  const st = {
+    idle: ["待機", ""], reading: ["読み込み", "warn"], prefill: ["読み込み", "warn"],
+    generating: ["生成中", "ok"], decoding: ["生成中", "ok"],   // basalt/Strata とも decoding を返す
+    writing: ["生成中", "ok"], "": ["-", ""],
+  };
+  const maxCtx = parNum(latest.server && latest.server.max_context);
+  const ctxLabel = v => v != null && v > 0 ? (v >= 1000 ? Math.round(v / 1000) + "k" : String(v)) : "?";
+  const max = parNice(Math.max(20, ...series.map(a => Math.max(0, ...a.map(v => parNum(v) || 0)))));
+  const rows = slots.map((s, k) => {
+    const idx = s.slot == null ? k : s.slot;
+    const busy = (s.state || "") !== "idle";
+    const prompt = s.prompt_tokens != null ? s.prompt_tokens : s.held_tokens;
+    if (busy) p.slotLast[idx] = { state: s.state, tok_s: s.tok_s, generated: s.generated, prompt };
+    const shown = busy ? { state: s.state, tok_s: s.tok_s, generated: s.generated, prompt }
+                       : (p.slotLast[idx] || { state: "idle", prompt });
+    const [label, cls] = (busy ? st[s.state || ""] : st.idle) || [s.state || "-", ""];
+    const mut = busy ? "" : " mut";
+    const ctx = busy ? prompt : (s.held_tokens != null ? s.held_tokens : shown.prompt);
+    const acc = s.accept != null ? s.accept + "%" : "-";
+    return `<div class="par-srow" role="row">
+      <span class="par-slotid"><span class="nm">Slot ${idx + 1}</span><i class="${cls}">${esc(label)}</i></span>
+      <span class="par-num${mut}">${parF1(shown.tok_s)}</span>
+      <span class="par-sk">${parSpark(series[k] || [], max)}</span>
+      <span class="par-num par-gen${mut}">${parInt(shown.generated)}</span>
+      <span class="par-num par-ctx${mut}">${parInt(ctx)} / ${ctxLabel(s.n_ctx || maxCtx)}</span>
+      <span class="par-num par-acc${mut}">${acc}</span>
+    </div>`;
+  }).join("");
+  const busyN = slots.filter(s => (s.state || "") !== "idle").length;
+  return `<div class="par-slots" role="table" aria-label="スロット別の稼働と直近 60 秒">
+    <div class="par-srow par-head" role="row">
+      <span>Slot</span><span>tok/s</span><span>Last 60 s</span><span class="par-gen">Output tok</span><span class="par-ctx">Context</span><span class="par-acc">Accept</span>
+    </div>${rows}
+  </div>
+  <div class="par-foot">${busyN} / ${slots.length} スロット稼働${parNum(latest.live && latest.live.queued) > 0 ? ` · 待ち ${parInt(latest.live.queued)}` : ""}</div>`;
+}
+function renderHomeParallel(){
+  const el = $("#home-par"), sel = $("#home-par-select");
+  if (!el || !sel) return;
+  const p = parInit();
+  const servers = parServers();
+  const sig = servers.map(s => `${s.id}|${s.profile_name}|${s.backend}|${s.port || ""}`).join("|");
+  if (p.sig !== sig) {
+    sel.innerHTML = servers.length
+      ? servers.map(s => `<option value="${esc(s.id)}">${esc(s.profile_name)} · ${esc(s.backend_name)} :${esc(s.port || "?")}</option>`).join("")
+      : `<option value="">— 並列 /metrics 対応サーバーなし —</option>`;
+    p.sig = sig;
+  }
+  const stateEl = $("#home-par-state"), cntEl = $("#home-par-count"), rateEl = $("#home-par-rate");
+  if (!servers.length){
+    sel.value = "";
+    stateEl.className = "badge info";
+    stateEl.innerHTML = `<span class="dot"></span>未検出`;
+    cntEl.textContent = "";
+    rateEl.innerHTML = "-";
+    el.innerHTML = `<div class="par-empty">
+      Strata / Maya の並列内訳 (/metrics) を公開するサーバーが稼働していません。<br>
+      スロット毎のグラフを描くには、起動タブから対応サーバーを起動してください。
+    </div>`;
+    return;
+  }
+  if (!p.sid || !servers.some(s => s.id === p.sid)) {
+    p.sid = servers[0].id;
+    p.samples = [];
+    p.latest = null;
+    p.error = "";
+  }
+  sel.value = p.sid;
+  const latest = p.latest;
+  const live = latest && latest.live || {};
+  const state = live.state || "";
+  const stateMap = {
+    generating: ["ok", "生成中"], reading: ["warn", "読み込み"], idle: ["", "待機"],
+    unloaded: ["", "未ロード"], loading: ["warn", "ロード中"],
+  };
+  const [stateCls, stateLabel] = stateMap[state] || ["", state || "—"];
+  stateEl.className = "badge " + stateCls;
+  stateEl.innerHTML = `<span class="dot"></span>${esc(stateLabel)}`;
+  const parallel = parNum(live.parallel), running = parNum(live.running);
+  const bits = [];
+  if (parallel != null && parallel > 1) bits.push(`並列 ${parInt(parallel)}`);
+  else if (running != null && running > 1) bits.push(`稼働 ${parInt(running)} 本`);
+  if (parNum(live.waiting) > 0) bits.push(`待ち ${parInt(live.waiting)}`);
+  cntEl.textContent = bits.join(" · ");
+  const nowTok = parNum(live.tok_s);
+  rateEl.innerHTML = nowTok != null
+    ? `<b>${parF1(nowTok)}</b><span class="par-unit">tok/s</span><span class="par-sub">全スロット合算</span>`
+    : `<span class="par-sub">-</span>`;
+  if (!latest && !p.error) {
+    el.innerHTML = `<span class="muted"><span class="spin"></span> サーバーの /metrics を待っています…</span>`;
+    return;
+  }
+  const slots = Array.isArray(latest && latest.slots) ? latest.slots : [];
+  const slotSeries = slots.map(meta => parPadded(p.samples.map(x => {
+    const found = (x.slots || []).find(item => item.slot === meta.slot);
+    return found ? found.tok_s : null;
+  })));
+  const agg = parPadded(p.samples.map(x => x.total));
+  const values = [];
+  agg.forEach(v => { if (parNum(v) != null) values.push(v); });
+  const max = parNice(Math.max(20, ...values));
+  let chart;
+  if (p.samples.length < 2) {
+    chart = `<div class="par-chart-empty"><span class="spin"></span> 次の 1 秒サンプルを待っています…</div>`;
+  } else {
+    chart = parChart(agg, max);
+  }
+  const errNote = p.error ? `<div class="par-note err">${esc(p.error)}</div>` : "";
+  const model = latest && latest.server && latest.server.model ? latest.server.model : "";
+  const meta = `<div class="par-meta">
+    <span>${model ? esc(model) : ""}</span>
+    <span>max ${parInt(max)} tok/s</span>
+    <span>${p.samples.length} 点 / ${PAR_HIST} 秒</span>
+  </div>`;
+  el.innerHTML = `<div class="par-chart-wrap">${meta}${chart}
+    <div class="par-axis"><span>60 秒前</span><span>30 秒</span><span>現在</span></div>
+  </div>${errNote}${parSlotTable(latest, slotSeries, p)}`;
+}
 

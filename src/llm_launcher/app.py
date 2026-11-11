@@ -21,21 +21,22 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv,
-                       backend_for, fork_dir, fork_model_root, launch_json_path,
-                       port_from_argv, python_candidates, resolve_port, sections_order,
-                       supported_models)
+                       backend_for, basalt_config_for, fork_dir, fork_model_root,
+                       launch_json_path, port_from_argv, python_candidates, resolve_port,
+                       sections_order, supported_models)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
-from .bench import MAX_STAGES, BenchError, BenchManager
+from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         clone_exists, current_ref, install_tool)
 from . import oom
+from . import strata_setup
 from . import rbac
 from . import sysinfo
 from .oom import MemoryGuardError
@@ -138,10 +139,16 @@ class BenchBody(BaseModel):
     model: str = ""
     endpoint: str = "chat"            # chat | completions
     stream: bool = True               # ON で TTFT も計測
+    mode: str = "loop"                # loop=クローズドループ / stagger=デコード中に定間隔で次の送信
+    gap_s: float = Field(default=2.0, ge=0.1, le=60.0)   # stagger の送信間隔秒
     concurrency: list[int] = Field(default_factory=lambda: [1, 8])
     num_prompts: int = Field(default=24, ge=1, le=10000)
     input_len: int = Field(default=128, ge=8, le=16384)    # プロンプト語数(≈語=token)
-    output_len: int = Field(default=128, ge=1, le=8192)    # max_tokens
+    output_len: int = Field(default=128, ge=1, le=32768)   # max_tokens
+    # Decode-length controls: min_tokens forces at least that many tokens (vLLM / llama.cpp take it),
+    # ignore_eos keeps going past the first stop token.  0 / false sends neither.
+    min_tokens: int = Field(default=0, ge=0, le=32768)
+    ignore_eos: bool = False
     temperature: float | None = Field(default=0.0, ge=0.0, le=2.0)
     warmup: int = Field(default=1, ge=0, le=16)
     request_timeout: int = Field(default=180, ge=10, le=3600)
@@ -160,6 +167,18 @@ class BenchBody(BaseModel):
     def _normalize(self) -> "BenchBody":
         if self.endpoint not in ("chat", "completions"):
             raise ValueError("endpoint は chat または completions を指定してください")
+        if self.mode not in ("loop", "stagger"):
+            raise ValueError("mode は loop または stagger を指定してください")
+        if self.min_tokens > self.output_len:
+            raise ValueError("min_tokens は max_tokens 以下にしてください "
+                             f"(min_tokens={self.min_tokens} > max_tokens={self.output_len})")
+        if self.mode == "stagger":
+            # インタリーブは「先行するストリームがデコード中に次のプロンプトを届ける」
+            # 干渉計測。1 段 = num_prompts 本の同時ストリーム (並列度リストは使わず
+            # 間隔は gap_s)。本数は GPU でも現実的な範囲に抑える
+            self.num_prompts = max(2, min(self.num_prompts, 32))
+            self.concurrency = [self.num_prompts]
+            return self
         # 段数上限は MAX_STAGES。以前はソート後の先頭 8 件で切っていたため
         # 「1..32」を 10 段指定すると大きい並列度 (9..32) が静かに消えていた。
         # 上限を超えたら、最小と最大を必ず含めた等間隔に間引く (グラフの両端を保つ)。
@@ -185,6 +204,12 @@ class BenchBody(BaseModel):
         return d
 
 
+class BenchProfileBody(BaseModel):
+    """保存するベンチマークプロファイル (名前 + BenchBody の params)。"""
+    name: str = Field(min_length=1, max_length=80)
+    params: dict[str, Any]
+
+
 class CalibrateBody(BaseModel):
     """ワンクリック・キャリブレーション。profile_id のプロファイルを対象に、
     Maya / Strata / FreeToken の「この PC 向け調整」を 1 ボタンで実行する
@@ -207,6 +232,16 @@ class InstallBody(BaseModel):
     extras: str | None = None
     # clone / 切替先のブランチ (未指定ならバックエンド既定)。spec の refs 一覧内の名前だけ通る
     ref: str = ""
+
+
+class StrataModelBody(BaseModel):
+    """Strata ②: 純正 setup.py を非対話 (--yes / --no-start) で走らせる選択。
+    family / model / context は submodule が単一の源の一覧 (strata_setup) で検証される。"""
+    family: str = Field(min_length=1, max_length=64)
+    model: str = Field(min_length=1, max_length=64)
+    context: int = 131072
+    vision: str = ""      # "" = 渡さない (非対応パック), でなければ yes|no|gpu|cpu
+    gpus: str = ""        # "" / "auto" = 純正既定, "0"|"1" = 単一カード, "0,1"|"all" = layer split
 
 
 class ModelDownloadBody(BaseModel):
@@ -434,6 +469,7 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
         chosen = next((s for s in snaps if wanted and s.name.startswith(wanted)), snaps[0])
         revision = next((k for k, v in refs.items() if chosen.name.startswith(v)), None) or (wanted or "")[:10] or "main"
         gguf: list[dict[str, Any]] = []
+        basalt: list[dict[str, Any]] = []
         has_weights = False
         try:
             for f in sorted(chosen.iterdir()):
@@ -441,11 +477,13 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
                     continue
                 size = f.stat().st_size
                 suf = f.suffix.lower()
-                if suf in (".safetensors", ".bin", ".pt", ".gguf") and size > 1 << 20:
+                if suf in (".safetensors", ".bin", ".pt", ".gguf", ".basalt") and size > 1 << 20:
                     has_weights = True
                 if suf == ".gguf":
                     gguf.append({"name": f.name, "size": size})
-                if len(gguf) >= max_files:
+                if suf == ".basalt":        # Basalt の pack (単一ファイル = モデル正体)
+                    basalt.append({"name": f.name, "size": size})
+                if len(gguf) + len(basalt) >= max_files:
                     break
         except OSError:
             pass
@@ -455,6 +493,7 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
             "revision": revision,
             "has_weights": has_weights,
             "gguf": gguf,
+            "basalt": basalt,
         }))
     entries.sort(key=lambda t: t[0], reverse=True)
     result["models"] = [m for _, m in entries]
@@ -517,6 +556,7 @@ def create_app(root: Path) -> FastAPI:
     sessions_store = JsonStore(data_dir / "sessions.json", [])
     manager = ProcessManager(root, runs_store, profiles_store, settings_store)
     bench = BenchManager(bench_store, profiles_store, manager)
+    bench_profiles = BenchProfiles(JsonStore(data_dir / "bench_profiles.json", []))
     calibrations_store = JsonStore(data_dir / "calibrations.json", [])
     calibrate = CalibrationManager(root, profiles_store, calibrations_store, manager)
     # 同じ GPU を使う実走 (ベンチ / キャリブレーション) を 1 本に制限する。
@@ -988,6 +1028,20 @@ def create_app(root: Path) -> FastAPI:
         data["id"] = new_id("p")
         data["created_at"] = now()
         data["updated_at"] = now()
+        # Basalt はモデルが入っていれば保存と同時に設定 JSON も作る (フォームの値をそのまま
+        # 反映した v2 config)。モデル未設定 (mock 用途) は作らず、後から作成ボタンで補える。
+        # 複製 / インポートで他プロファイルの生成 JSON を引き継いだ場合も、この ID 専用の
+        # パスへ作り直す (共有すると片方の変更がもう片方へ漏れる)。
+        if data.get("backend") == "basalt" and _basalt_should_seed(data):
+            try:
+                _path, rel, _cfg = _basalt_config_write(_basalt_ready(data))
+            except ValueError:
+                rel = ""
+            if rel:
+                data.setdefault("values", {})["config"] = rel
+                if not isinstance(data.get("on"), dict):
+                    data["on"] = {}
+                data["on"]["config"] = True
         profiles_store.mutate(lambda lst: lst.append(data))
         return data
 
@@ -999,6 +1053,19 @@ def create_app(root: Path) -> FastAPI:
             for i, p in enumerate(lst):
                 if p["id"] == profile_id:
                     merged = {**p, **data, "updated_at": now()}
+                    # Basalt: 生成済みの設定 JSON を使っているプロファイルは、保存のたびに
+                    # フォーム値 (コンテキスト長 / KV / 並列 / GPU …) を JSON へ反映する。
+                    # 手書き JSON (別パス) や config を明示 OFF にしたプロファイルは触らない。
+                    if merged.get("backend") == "basalt" and _basalt_config_owned(merged):
+                        try:
+                            _p, rel, _c = _basalt_config_write(_basalt_ready(merged))
+                        except ValueError:
+                            rel = ""
+                        if rel:
+                            merged.setdefault("values", {})["config"] = rel
+                            if not isinstance(merged.get("on"), dict):
+                                merged["on"] = {}
+                            merged["on"]["config"] = True
                     lst[i] = merged
                     return merged
             raise HTTPException(404, "プロファイルが見つかりません")
@@ -1013,7 +1080,14 @@ def create_app(root: Path) -> FastAPI:
 
         def _del(lst: list) -> bool:
             before = len(lst)
+            gone = [p for p in lst if p["id"] == profile_id]
             lst[:] = [p for p in lst if p["id"] != profile_id]
+            # 生成した basalt の設定 JSON は孤立ファイルとして残さない
+            # (data/launch/basalt-<id>.json のみ。ユーザーの手書き JSON には触らない)
+            for p in gone:
+                if p.get("backend") == "basalt":
+                    with contextlib.suppress(OSError):
+                        _basalt_config_path(profile_id).unlink(missing_ok=True)
             return len(lst) < before
         if not profiles_store.mutate(_del):
             raise HTTPException(404, "プロファイルが見つかりません")
@@ -1152,6 +1226,109 @@ def create_app(root: Path) -> FastAPI:
         profiles_store.mutate(_set)
         return {"ok": True, "path": str(path), "sh": str(sh), "launch": launch}
 
+    # ------------------------------------------------- Basalt の設定 JSON (v2)
+    def _basalt_config_profile(profile_id: str) -> dict[str, Any]:
+        prof = manager.find_profile(profile_id)
+        if not prof:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        if prof.get("backend") != "basalt":
+            raise HTTPException(400, "このバックエンドは basalt の設定 JSON に対応していません")
+        return prof
+
+    def _basalt_config_path(profile_id: str) -> Path:
+        return root / "data" / "launch" / f"basalt-{profile_id}.json"
+
+    def _basalt_ready(prof: dict[str, Any]) -> dict[str, Any]:
+        """生成用のコピー: on に載っていない (= 呼び出し側が部分的な on を送った) 項目でも、
+        値が入っていれば有効として扱う (render_argv の旧来動作と同じ)。明示 OFF は尊重する。
+        """
+        out = dict(prof)
+        vals = dict(out.get("values") or {})
+        on = out.get("on")
+        if isinstance(on, dict):
+            on = dict(on)
+            for f in BACKENDS["basalt"]["fields"]:
+                k = f["key"]
+                if k not in on and str(vals.get(k) or "").strip():
+                    on[k] = True
+            out["on"] = on
+        return out
+
+    def _basalt_generated_path(value: str) -> bool:
+        """data/launch/basalt-*.json (このランチャーが生成した設定 JSON) を指すか。"""
+        if not value:
+            return False
+        p = Path(os.path.expanduser(str(value)))
+        if not p.is_absolute():
+            p = root / p
+        return (p.parent == root / "data" / "launch"
+                and p.name.startswith("basalt-") and p.suffix == ".json")
+
+    def _basalt_config_owned(prof: dict[str, Any]) -> bool:
+        """このランチャーが管理してよい設定 JSON か (未設定 or data/launch の生成物)。
+
+        手書き JSON を指しているプロファイルや、config を明示 OFF にしたものは触らない
+        (保存のたびに上書きしてユーザーの編集を壊さないため)。
+        """
+        v = prof.get("values") or {}
+        cur = str(v.get("config") or "").strip()
+        on = prof.get("on")
+        if isinstance(on, dict) and on.get("config") is False:
+            return False
+        return (not cur) or _basalt_generated_path(cur)
+
+    def _basalt_should_seed(prof: dict[str, Any]) -> bool:
+        """作成時に設定 JSON を作り直すか (未設定 / 生成物を引き継いだ複製・インポート)。"""
+        return _basalt_config_owned(prof)
+
+    def _basalt_config_write(prof: dict[str, Any]) -> tuple[Path, str, dict[str, Any]]:
+        """プロファイルの値から basalt_config.json (v2) を data/launch/ に書き、絶対パスを返す。
+
+        返すパスはそのままプロファイルの --config 値にする (launcher の cwd に依存しない)。
+        ValueError は「モデル未設定 / 数値の書式誤り」などで、API 側は 400 に変換する。
+        """
+        cfg = basalt_config_for(prof, root=root)
+        path = _basalt_config_path(str(prof["id"]))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return path, str(path), cfg
+
+    @app.get("/api/profiles/{profile_id}/config-json")
+    async def get_config_json(profile_id: str) -> dict[str, Any]:
+        prof = _basalt_config_profile(profile_id)
+        path = _basalt_config_path(profile_id)
+        if not path.is_file():
+            return {"ok": True, "exists": False, "path": str(path),
+                    "current": str((prof.get("values") or {}).get("config") or "")}
+        try:
+            doc = json.loads(path.read_text("utf-8"))
+        except ValueError as e:
+            raise HTTPException(400, f"設定 JSON を解析できません: {e}")
+        return {"ok": True, "exists": True, "path": str(path), "config": doc,
+                "current": str((prof.get("values") or {}).get("config") or "")}
+
+    @app.post("/api/profiles/{profile_id}/config-json", status_code=201)
+    async def create_config_json(profile_id: str) -> dict[str, Any]:
+        """現在のフォーム値から basalt の設定 JSON を作り直し、プロファイルの --config に繋ぐ。"""
+        prof = _basalt_config_profile(profile_id)
+        try:
+            path, rel, cfg = _basalt_config_write(prof)
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+
+        def _set(lst: list) -> bool:
+            for p in lst:
+                if p.get("id") == profile_id:
+                    p.setdefault("values", {})["config"] = rel
+                    if not isinstance(p.get("on"), dict):
+                        p["on"] = {}
+                    p["on"]["config"] = True
+                    p["updated_at"] = now()
+                    return True
+            return False
+        profiles_store.mutate(_set)
+        return {"ok": True, "path": str(path), "config": cfg}
+
     @app.post("/api/preview")
     async def preview_command(body: ProfileBody) -> dict[str, Any]:
         data = validate_profile(body)
@@ -1245,6 +1422,184 @@ def create_app(root: Path) -> FastAPI:
             return manager.read_log(sid, cursor)
         except KeyError:
             raise HTTPException(404, "セッションが見つかりません")
+
+    @app.get("/api/sessions/{sid}/parallel")
+    async def session_parallel(sid: str) -> dict[str, Any]:
+        """ダッシュボードのデコード速度グラフ用: 稼働中サーバーの /metrics を中継する。
+
+        Strata / Maya 系の JSON /metrics だけを対象にする。ブラウザから直接叩くと
+        CORS や API キーで失敗するため、起動中のポートへ launcher 同一オリジンで
+        プロキシし、グラフに必要な値だけを正規化して返す。
+        """
+        s = manager.sessions.get(sid)
+        if not s:
+            raise HTTPException(404, "セッションが見つかりません")
+        if not s.get("ready"):
+            raise HTTPException(503, "サーバーは起動中です")
+        port = s.get("port")
+        if not port:
+            raise HTTPException(400, "このセッションはポートを解決できていません")
+        if s.get("backend") not in ("strata", "strata-fork", "maya", "basalt"):
+            raise HTTPException(400, "このバックエンドは JSON /metrics の並列内訳に対応していません")
+        key = api_key_from_argv(s.get("argv") or [])
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+
+        def _fetch() -> dict[str, Any]:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/metrics", headers=headers)
+            with urllib.request.urlopen(req, timeout=2.0) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+
+        try:
+            data = await asyncio.to_thread(_fetch)
+        except urllib.error.HTTPError as e:
+            raise HTTPException(e.code, f"サーバーの /metrics が HTTP {e.code} を返しました")
+        except urllib.error.URLError as e:
+            raise HTTPException(502, f"サーバーの /metrics に接続できません: {e.reason}")
+        except OSError as e:
+            raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
+        except ValueError as e:
+            raise HTTPException(502, f"サーバーの /metrics を JSON として読み取れません: {e}")
+        except Exception as e:                                  # noqa: BLE001 — 内訳は補助情報なので常に 502
+            raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
+        if not isinstance(data, dict):
+            raise HTTPException(502, "サーバーの /metrics が JSON オブジェクトではありません")
+
+        live = data.get("live") if isinstance(data, dict) else None
+        live = live if isinstance(live, dict) else {}
+        slots: list[dict[str, Any]] = []
+        slot_total = queue_depth = None
+        raw_slots = live.get("slots")
+        if isinstance(raw_slots, dict):
+            # basalt 形式 (/metrics の live.slots が {total, active, queue_depth}):
+            # 行の詳細は GET /slots の slot_table。リクエストは (1 本でも) ここで
+            # スロットに割り当て済みなので、そのまま行になる。
+            slot_total = raw_slots.get("total") if isinstance(raw_slots.get("total"), (int, float)) else None
+            queue_depth = raw_slots.get("queue_depth")
+
+            def _fetch_slots() -> list[Any]:
+                req = urllib.request.Request(f"http://127.0.0.1:{port}/slots", headers=headers)
+                with urllib.request.urlopen(req, timeout=2.0) as r:
+                    rows = json.loads(r.read().decode("utf-8", "replace"))
+                return rows if isinstance(rows, list) else []
+
+            try:
+                slot_rows = await asyncio.to_thread(_fetch_slots)
+            except Exception:                                     # noqa: BLE001 — 行が無ければ履歴だけで描く
+                slot_rows = []
+            for i, row in enumerate(slot_rows):
+                if not isinstance(row, dict):
+                    continue
+                busy = bool(row.get("is_processing"))
+                tok = row.get("tok_s")
+                offered, accepted = row.get("drafts_offered"), row.get("drafts_accepted")
+                accept = (round(accepted / offered * 100)
+                          if isinstance(offered, (int, float)) and offered > 20
+                          and isinstance(accepted, (int, float)) else None)
+                slots.append({
+                    "slot": row["id"] if isinstance(row.get("id"), int) else i,
+                    "state": (row.get("state") or "decoding") if busy else "idle",
+                    "tok_s": tok if isinstance(tok, (int, float)) else 0.0,
+                    "prompt_tokens": row.get("prompt_tokens"),
+                    "prompt_read": row.get("prefill_done"),
+                    "generated": row.get("generated"),
+                    "elapsed_s": None,
+                    "held_tokens": row.get("ctx_used"),
+                    "n_ctx": row.get("n_ctx"),
+                    "accept": accept,
+                })
+        elif isinstance(raw_slots, list):
+            # Strata の slots_view (list 形式)
+            for i, item in enumerate(raw_slots):
+                if not isinstance(item, dict):
+                    continue
+                slot = item.get("slot", item.get("id", i))
+                tok = item.get("tok_s")
+                slots.append({
+                    "slot": int(slot) if isinstance(slot, int) else i,
+                    "state": item.get("state") or "idle",
+                    # basalt の slot_table と同じく待機行も 0.0 (グラフが途切れない)
+                    "tok_s": tok if isinstance(tok, (int, float)) else 0.0,
+                    "prompt_tokens": item.get("prompt_tokens"),
+                    "prompt_read": item.get("prompt_read"),
+                    "generated": item.get("generated"),
+                    "elapsed_s": item.get("elapsed_s"),
+                    "held_tokens": item.get("held_tokens"),
+                    "n_ctx": None,
+                    "accept": None,
+                })
+        # basalt の slot_table 意味づけ: 稼働中のリクエストは (1 本でも) スロット行を
+        # 使う。Strata のエンジンは単独経路では batch スロットを占有しないので、
+        # サービス側で最初の空きスロットに割り当てる (basalt がそうやっている)。
+        outside = live.get("outside_slots")
+        state_now = live.get("state") or ""
+        if (slots and isinstance(outside, (int, float)) and outside == 1
+                and state_now in ("reading", "generating", "decoding", "writing")):
+            taken = {s["slot"] for s in slots if s["state"] != "idle"}
+            free = next((i for i in range(len(slots)) if i not in taken), None)
+            if free is not None:
+                row = slots[free]
+                reading = state_now == "reading"
+                tok_now = live.get("tok_s")
+                row["state"] = "reading" if reading else "generating"
+                row["tok_s"] = tok_now if not reading and isinstance(tok_now, (int, float)) else 0.0
+                row["generated"] = live.get("generated")
+                row["prompt_tokens"] = live.get("prompt_tokens")
+                row["elapsed_s"] = live.get("elapsed_s")
+        engine = data.get("engine") if isinstance(data.get("engine"), dict) else {}
+        history = data.get("history") if isinstance(data.get("history"), dict) else {}
+
+        def _tail60(seq: Any) -> list[Any]:
+            if not isinstance(seq, list):
+                return []
+            return [v if isinstance(v, (int, float)) else None for v in seq[-60:]]
+
+        history_tok = _tail60(history.get("tok_s"))
+        slot_hist = history.get("slot_tok_s")
+        slot_hist = [_tail60(a) for a in slot_hist if isinstance(a, list)] if isinstance(slot_hist, list) else []
+        parallel = live.get("parallel")
+        if not isinstance(parallel, (int, float)):
+            parallel = slot_total
+        if not isinstance(parallel, (int, float)):
+            parallel = live.get("active")
+        if not isinstance(parallel, (int, float)):
+            parallel = len(slots) if slots else None
+        running = live.get("running")
+        if not isinstance(running, (int, float)):
+            running = live.get("active")
+        if not isinstance(running, (int, float)) and isinstance(raw_slots, dict):
+            running = raw_slots.get("active")
+        queued = live.get("queued")
+        if not isinstance(queued, (int, float)):
+            queued = queue_depth
+        fetched_at = data.get("time") if isinstance(data, dict) else None
+        if not isinstance(fetched_at, (int, float)):
+            fetched_at = time.time()
+        return {
+            "sid": sid,
+            "backend": s.get("backend"),
+            "backend_name": s.get("backend_name"),
+            "fetched_at": fetched_at,
+            "server": {
+                "model": engine.get("model_label") or engine.get("model") or "",
+                "max_context": engine.get("max_context"),
+            },
+            "live": {
+                "state": live.get("state") or "",
+                "tok_s": live.get("tok_s"),
+                "tok_s_mean": live.get("tok_s_mean"),
+                "prefill_tok_s_mean": live.get("prefill_tok_s_mean"),
+                "parallel": parallel,
+                "running": running,
+                "active": live.get("active"),
+                "writing": live.get("writing"),
+                "waiting": live.get("waiting"),
+                "admitting": live.get("admitting"),
+                "outside_slots": live.get("outside_slots"),
+                "queued": queued,
+            },
+            "history": {"tok_s": history_tok, "slot_tok_s": slot_hist},
+            "slots": slots,
+        }
 
     # ----------------------------------------------------------- backends
 
@@ -1457,6 +1812,11 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(409, str(e))
         return bench.get(rid) or {"ok": True}
 
+    @app.delete("/api/benchmarks")
+    async def clear_benchmarks() -> dict[str, Any]:
+        # 履歴の一括消去。実行中 / 待機中の run は触らず、完了分だけ消す。
+        return {"ok": True, "removed": bench.clear_all()}
+
     @app.delete("/api/benchmarks/{rid}")
     async def delete_benchmark(rid: str) -> dict[str, Any]:
         try:
@@ -1465,6 +1825,47 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(404, "ベンチマークが見つかりません")
         except BenchError as e:
             raise HTTPException(409, str(e))
+        return {"ok": True}
+
+    # ---------------------------------------------------------- benchmark profiles
+    # Named, reusable groups of benchmark settings (target launch profile, stages, decode length).
+    # They are separate from the launch profiles: the launch profile says WHAT server to start, the
+    # benchmark profile says HOW to measure it.
+
+    def _bench_body(raw: Any) -> dict[str, Any]:
+        try:
+            return BenchBody(**raw).model_dump()
+        except ValidationError as e:
+            msgs = "; ".join(f"{'.'.join(str(x) for x in err['loc'])}: {err['msg']}"
+                             for err in e.errors()[:4])
+            raise HTTPException(400, f"ベンチ設定が不正です: {msgs}")
+
+    @app.get("/api/bench-profiles")
+    async def list_bench_profiles() -> dict[str, Any]:
+        return {"profiles": bench_profiles.list()}
+
+    @app.post("/api/bench-profiles", status_code=201)
+    async def create_bench_profile(body: BenchProfileBody) -> dict[str, Any]:
+        params = _bench_body(body.params)
+        try:
+            return bench_profiles.create(body.name, params)
+        except BenchProfileError as e:
+            raise HTTPException(409, str(e))
+
+    @app.put("/api/bench-profiles/{pid}")
+    async def update_bench_profile(pid: str, body: BenchProfileBody) -> dict[str, Any]:
+        params = _bench_body(body.params)
+        try:
+            return bench_profiles.update(pid, body.name, params)
+        except KeyError:
+            raise HTTPException(404, "ベンチプロファイルが見つかりません")
+        except BenchProfileError as e:
+            raise HTTPException(409, str(e))
+
+    @app.delete("/api/bench-profiles/{pid}")
+    async def delete_bench_profile(pid: str) -> dict[str, Any]:
+        if not bench_profiles.delete(pid):
+            raise HTTPException(404, "ベンチプロファイルが見つかりません")
         return {"ok": True}
 
     # ------------------------------------------------------------- 簡易画面
@@ -1613,13 +2014,14 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, f"{BACKENDS[bid]['name']} はキャリブレーションに対応していません"
                                      " (Maya / Strata / FreeToken のプロファイルで実行できます)")
         mode = (body.mode or "").strip().lower()
-        if mode not in ("", "current", "auto"):
-            raise HTTPException(400, "mode は current / auto のどちらかです")
+        if mode not in ("", "current", "auto", "single", "multi"):
+            raise HTTPException(400, "mode は current / auto / single / multi のいずれかです")
         is_ft = CAL_BACKENDS[bid] == "freetoken"
-        if mode == "auto" and not is_ft:
-            raise HTTPException(400, "自動選定 (auto) は FreeToken 系プロファイル専用です")
-        # FreeToken の既定は「全部測りの 1 発」(校正は 1 回だけ行う運用想定のため)
-        cal_mode = mode or ("auto" if is_ft else "current")
+        if mode in ("auto", "multi", "single") and not is_ft:
+            raise HTTPException(400, f"{mode} は FreeToken 系プロファイル専用です")
+        # FreeToken の既定は「全部測りの 1 発」(校正は 1 回だけ行う運用想定のため)。
+        # single = 単一ストリーム側 (投機モード自動選定) / multi = 並行 prefill の腕比較。
+        cal_mode = ({"single": "auto"}.get(mode) or mode) or ("auto" if is_ft else "current")
         try:
             job = await calibrate.start(profile, bid, restart_after=body.restart_after,
                                         actor=current_user(request), cal_mode=cal_mode)
@@ -1669,6 +2071,15 @@ def create_app(root: Path) -> FastAPI:
                           for r in (spec.get("refs") or [])],
                  "current_ref": current_ref(root, spec), "cloned": clone_exists(root, spec),
                  "module_path": spec["module_path"], "extras": spec["extras"],
+                 # requirements 系 (pyproject の無いリポジトリ) / cmake ビルド有無は
+                 # セットアップタブのプレビュー文言組み立てに使う (Basalt 対応)。
+                 # engine_fetch = Strata の既製エンジン受信 step (strata_engine.py)。
+                 # tool = このバックエンドで実際に走る install ツール表示: venv_pip spec
+                 # (Strata) は uv が在っても pip を使うので、UI の手順名をジョブ実体と揃える
+                 "requirements": spec.get("requirements", ""),
+                 "cmake": bool(spec.get("cmake")),
+                 "engine_fetch": bool(spec.get("engine_fetch")),
+                 "tool": "pip" if spec.get("venv_pip") else install_tool(),
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
                                 if BACKENDS[bid].get("model_data") else ""),
                  # 対応モデル一覧: clone 内の docs/models.md (model_list_doc) を読んだ既知の正常構成。
@@ -1686,6 +2097,33 @@ def create_app(root: Path) -> FastAPI:
         return {"jobs": installs.list_jobs(), "active": installs.active_id,
                 "installable": _installable_public(), "cache_dir": str(hf_hub_cache_dir()),
                 "tool": install_tool()}
+
+    @app.get("/api/installs/strata-model")
+    async def strata_model_options() -> dict[str, Any]:
+        """Strata ② の選択肢: 純正 setup.py の表 (family/model/context/PC の RAM・ディスク)
+        と、すでに設定済みの strata-<model>.json。表の単一の源は submodule (strata_setup)。
+        静的パスは {jid} より前に登録すること (FastAPI は登録順マッチ)。"""
+        mod = root / INSTALL_SPECS["strata"]["module_path"]
+        # 表の読み出しは subprocess (初回 ~1s) — イベントループを止めない
+        out = dict(await asyncio.to_thread(strata_setup.load_options, mod))
+        out["configs"] = await asyncio.to_thread(strata_setup.installed_configs, mod)
+        out["venv_ready"] = (mod / ".venv" / "bin" / "python").is_file()
+        return out
+
+    @app.post("/api/installs/strata-model", status_code=201)
+    async def strata_model_start(body: StrataModelBody, request: Request) -> dict[str, Any]:
+        """Strata のモデル構成 (純正 setup.py を --yes --no-start で非対話実行)。
+        インストールと同じ install 権限・同じ履歴 / 中断 / ログのジョブ。"""
+        try:
+            # build_argv の表読み出し (初回のみ subprocess ~1s) をループ外で温めておく
+            await asyncio.to_thread(strata_setup.load_options,
+                                    root / INSTALL_SPECS["strata"]["module_path"])
+            return installs.start_strata_model(body.model_dump(),
+                                               actor=current_user(request))
+        except ActiveJobError as e:
+            raise HTTPException(409, str(e))
+        except InstallError as e:
+            raise HTTPException(400, str(e))
 
     @app.get("/api/installs/{jid}")
     async def get_install(jid: str) -> dict[str, Any]:
@@ -1791,6 +2229,17 @@ def create_app(root: Path) -> FastAPI:
         """
         return FileResponse(STATIC_DIR / "setup.html")
 
-    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+    class NoCacheStatic(StaticFiles):
+        """静的ファイルへ常に Cache-Control: no-cache を付す。JS/CSS は URL に
+        バージョン query が無いため、既定 (ヒューリスティックキャッシュ) だと
+        デプロイ後もブラウザが古い UI を保持して「反映されない」事故になる。
+        no-cache は毎回再検証するだけで、中身が変わらなければ 304 で安い。"""
+
+        async def get_response(self, path: str, scope):  # type: ignore[override]
+            resp = await super().get_response(path, scope)
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+    app.mount("/static", NoCacheStatic(directory=STATIC_DIR), name="static")
 
     return app
