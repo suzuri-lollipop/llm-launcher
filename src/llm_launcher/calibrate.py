@@ -6,6 +6,12 @@
 
   Maya   `maya.sh --calibrate --no-start --config <maya-<model>.json>`
          → 起動せずに設定を実測調整し、そのまま config へ書き込んで終了する (10-15 分 / DS4 は 25-40 分)。
+         drafter (DSpark / MTP / DFlash2) の速度計測は `--speed-calibration --no-start` を
+         別 step で逐次実行する (純正は --calibrate --no-start が --speed-calibration より先に
+         return 0 するため)。セットアップ (②) は --drafting off で計測しないので、GPU 独占の
+         計測は全てこの ⑤ に集約される (メモリガード / OOM 保護が効くのはこちら)。
+         計測対象が無い config (GLM の MTP 既定 / drafter 無し / MM3 の parallel > 1) は
+         calibrate step だけ走る (maya_speed_wanted)。
 
   Strata `strata.py engine calibrate --profile <名前> --measure --exclusive --out <report.json>`
          → `--review-result <report.json>` → `--apply-result <report.json> --exclusive` の順に実行する。
@@ -21,7 +27,7 @@
   書き戻すので次回起動から効く (Strata の --apply-result 相当)。座標降下 1 パス・
   約 15-18 セルで 40-60 分。レイテンシ内訳は fork 側の [latency] プローク
   (FREETOKEN_LATENCY) が情報源で、計測中だけ有効にしてレポートに抄録を残す
-  (profile には書かない)。--speculative lookup のプロファイルは fork 同梱の
+  (profile には書かない)。投機モード lookup のプロファイルは fork 同梱の
   python -m freetoken.calibrate_lookup を CLI 実行し (起動 JSON モードではその JSON を
   --config にそのまま渡す)、勝者 4 キーを同じ要領で書き戻す。
 
@@ -37,6 +43,8 @@
     Maya   「エンジンが起動できなかった」場合でも **終了コードは 0** のまま (警告を出して config を
            書き換えない)。終了コードだけで失敗を見ると「成功」と偽ることになるので、調整の証拠
            (config の installer.calibration) を確認して、無ければ理由付きで失敗にする (_verify_maya_tuned)。
+           drafter 速度計測も同じ癖 (GPU 使用中 / drafter 無し / 計測失敗が exit 0) なので、
+           installer.speed_calibration / mtp_calibration の計測記録を確認する (_verify_maya_speed)。
     Strata measure は 15-30 分のエンジン起動を伴うので、最初に読み取り専用の `--plan` 事前検査を走らせ、
            コンポーネント欠損 (例: 視覚エンコーダ vision/mmproj) を時間の無駄の前に止める (_plan_failure)。
 
@@ -59,6 +67,7 @@ from pathlib import Path
 from typing import Any
 
 from . import bench
+from . import maya_setup
 from .backends import (BACKENDS, backend_for, launch_json_path, load_launch_json,
                        replace_arg)
 from .oom import MemoryGuardError, apply_score, meminfo
@@ -105,7 +114,7 @@ FREETOKEN_MTP_GRID: list[tuple[str, list[str]]] = [
     ("FREETOKEN_MTP_ACCEPT_WINDOW", ["24", "128"]),     # 発動判定窓 (既定 64) を両方向
     ("FREETOKEN_MTP_RESUME_AFTER", ["32", "128"]),      # 窓失敗後の停止ステップ数 (既定=窓長)
 ]
-# chain (--speculative mtp 専用): MTP ドラフトに lookup の続きを連鎖させる v1 移植のゲート。
+# chain (--speculative-algorithm mtp 専用): MTP ドラフトに lookup の続きを連鎖させる v1 移植のゲート。
 # 効果はコピ型テキストで出るため、chain を測る run は copy プローブを 1 本追加する
 FREETOKEN_MTP_CHAIN_GRID: list[tuple[str, list[str]]] = [
     ("FREETOKEN_MTP_LOOKUP_CHAIN", ["1"]),              # 連鎖を有効化 (既定 0 = off)
@@ -183,10 +192,35 @@ def ft_candidates(param: str, env: dict[str, str]) -> list[str]:
     return [v for v in all_grid.get(param, []) if v != cur]
 
 
+SPEC_ALGO_FLAG = "--speculative-algorithm"
+# 旧 --speculative (none/mtp/lookup) は fork の upstream 統合で廃止。読み取りは両綴り、
+# 書き込みは現行フラグのみ。lookup は現行エンジンに無いのでサーバーは off で動かす
+_SPEC_FLAGS = ("--speculative", "--speculative-algorithm", "--spec-algo")
+
+
+def _with_spec(argv: list[str], mode: str) -> list[str]:
+    """投機フラグ (旧・新両綴り、= 形も) を剥がし、現行バックエンド名だけを立てる。
+    none/lookup/空は off (サーバー既定): これらをフラグ値として書くと起動が落ちる。"""
+    out: list[str] = []
+    i = 0
+    while i < len(argv):
+        if argv[i] in _SPEC_FLAGS:
+            i += 2
+            continue
+        if any(argv[i].startswith(f + "=") for f in _SPEC_FLAGS):
+            i += 1
+            continue
+        out.append(argv[i])
+        i += 1
+    if mode in ("mtp", "dflash"):
+        out += [SPEC_ALGO_FLAG, mode]
+    return out
+
+
 def ft_grid(speculative: str) -> list[tuple[str, list[str]]]:
     """プロファイルの speculative モードに対する実測グリッド。
 
-    chain の 2 キーは --speculative mtp のリクエストでしか発動しない
+    chain の 2 キーは --speculative-algorithm mtp のリクエストでしか発動しない
     (FREETOKEN_MTP_LOOKUP_CHAIN は MTP verify 専用) ので、mtp 以外では測らない。"""
     if speculative == "mtp":
         return FREETOKEN_MTP_GRID + FREETOKEN_MTP_CHAIN_GRID
@@ -287,6 +321,48 @@ def build_maya_command(root: Path, profile: dict[str, Any], python: str) -> list
     if cfg:
         argv += ["--config", cfg]
     return argv
+
+
+def build_maya_speed_command(root: Path, profile: dict[str, Any], python: str) -> list[str]:
+    """Maya の drafter 速度計測: `sh maya.sh --speed-calibration --no-start --config <cfg>`。
+
+    セットアップ (②) では計測しない (--drafting off) 方針なので、DSpark / MTP の
+    あり/なし比較はここ (⑤) で行う。純正 maya.py は --calibrate --no-start が
+    --speed-calibration より先に return 0 するため、別コマンド (別 step) で逐次実行する。
+    config が無いときは [] (step を追加しない)。"""
+    cfg = maya_config_path(root, profile)
+    if not cfg:
+        return []
+    return ["sh", str(root / "module" / "maya" / "maya.sh"),
+            "--speed-calibration", "--no-start", "--config", cfg]
+
+
+def maya_speed_wanted(cfg_path: str) -> bool:
+    """この config に drafter 速度計測の対象があるか (⑤ に speed step を足すか)。
+    純正 setup が config に書いたフラグで判定する — pack に drafter が無い /
+    MiniMax の --parallel > 1 (drafter なしでデコード) ときは計測しても意味がない:
+      GLM: --dflash (DFlash2 drafter) / DeepSeek: --dspark / MiniMax: --dspark かつ parallel <= 1
+      Qwen: --mtp (pack の MTP drafter)"""
+    try:
+        cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return False
+    if not isinstance(cfg, dict):
+        return False
+    args = [str(a) for a in (cfg.get("args") or [])]
+    fam = maya_setup.config_family(cfg)
+    if fam == "glm":
+        return "--dflash" in args[:-1]
+    if fam == "deepseek":
+        return "--dspark" in args[:-1]
+    if fam == "minimax":
+        if "--dspark" not in args[:-1]:
+            return False
+        par = maya_setup.config_parallel(cfg)
+        return par is None or par <= 1
+    if fam == "qwen":
+        return "--mtp" in args[:-1]
+    return False
 
 
 def build_strata_commands(root: Path, profile: dict[str, Any], python: str,
@@ -548,6 +624,15 @@ class CalibrationManager:
                 # verify: Maya は失敗しても exit 0 なので、調整が実際に config へ書かれたかを後で確認する
                 {"name": "calibrate", "argv": build_maya_command(self.root, profile, python),
                  "cwd": str(module_dir), "verify": cfg}]
+            # drafter (DSpark / MTP / DFlash2) の速度計測もここで集約する。セットアップ
+            # (②) は --drafting off で計測しないので、GPU 独占の計測は全てこの ⑤ の
+            # ジョブ (メモリガード / OOM 保護 / 排他制御が効く) で行う。
+            # --calibrate --no-start は --speed-calibration より先に return 0 する純正仕様
+            # なので、別 step で逐次実行する
+            if maya_speed_wanted(cfg):
+                steps.append({"name": "speed",
+                              "argv": build_maya_speed_command(self.root, profile, python),
+                              "cwd": str(module_dir), "verify": cfg})
         elif kind == "freetoken":
             cfg = ""
             try:
@@ -565,7 +650,7 @@ class CalibrationManager:
                 job_mode = "auto"
                 steps = [{"name": "auto"}]
             elif spec_mode == "lookup":
-                # --speculative lookup: fork 同梱の Strata 式 calibrator をそのまま使う
+                # 投機モード lookup: fork 同梱の Strata 式 calibrator をそのまま使う
                 # (env 家族 FREETOKEN_LOOKUP_*、コピ型プロンプト + 対照、並行上限判定は
                 # ツール側の実装)。起動 JSON モードではその JSON 自体 (calibrate_lookup
                 # spec と同一形式) を --config に渡す = 校正対象と起動構成が同一ファイル。
@@ -658,7 +743,7 @@ class CalibrationManager:
         GPU 独占は start() がこのプロファイルのサーバーを止めてくれている。
 
         apply=False は書き戻しを止める (auto モードのフェーズ A: 勝者はトーナメントで
-        決着してから 1 回だけ適用する)。spec_override はセルの --speculative を強制する
+        決着してから 1 回だけ適用する)。spec_override はセルの --speculative-algorithm を強制する
         (auto が lookup プロファイルからも mtp 最良構成を作るため)。"""
         launch = None
         with contextlib.suppress(ValueError):
@@ -728,15 +813,17 @@ class CalibrationManager:
         return report
 
     def _ft_speculative(self, profile: dict[str, Any]) -> str:
-        """プロファイルの現在の --speculative モード (起動 JSON が argv の正)。"""
+        """プロファイルの現在の投機モード (起動 JSON が argv の正)。旧 --speculative の
+        綴りも読む (移行前の起動 JSON 対策)。値は mtp/dflash/lookup/none/空 のラベル。"""
         launch = load_launch_json(self.root, profile)
         if launch is not None:
             argv = [str(a) for a in launch.get("argv") or []]
             for i, tok in enumerate(argv):
-                if tok == "--speculative" and i + 1 < len(argv):
+                if tok in _SPEC_FLAGS and i + 1 < len(argv):
                     return argv[i + 1].strip().lower()
             return ""
-        return str((profile.get("values") or {}).get("speculative") or "").strip().lower()
+        values = profile.get("values") or {}
+        return str(values.get("speculative_algorithm") or values.get("speculative") or "").strip().lower()
 
     def _ft_launch_update(self, profile: dict[str, Any], fn) -> bool:
         """起動 JSON を read-modify-write (原子的差し替え)。config 主体モードでなければ False。"""
@@ -754,22 +841,29 @@ class CalibrationManager:
         return True
 
     def _ft_write_env(self, profile: dict[str, Any], updates: dict[str, str]) -> None:
-        """勝者の env を書き戻す。起動 JSON 主体モードでは JSON の env へ (校正の正)、
-        レガシーではプロファイル store へ (env と _resolved_env 両方: process 側は
-        _resolved_env を優先するため)。"""
+        """勝者の env を書き戻す。起動 JSON 主体モードでは JSON の env へ (校正の正)。
+        このとき勝者キーは profile 側の env からも除去する: 起動時のマージは
+        profile.env が JSON を上書きするため、実験中に残った古い値 (例: PIPED 勝者の
+        もとで居残る MIXED=1024) が敗者のノブを復活させる。JSON が唯一の正であることは
+        変わらない。レガシーではプロファイル store へ (env と _resolved_env 両方:
+        process 側は _resolved_env を優先するため)。"""
         done = self._ft_launch_update(
             profile,
             lambda doc: doc.setdefault("env", {}).update(
                 {str(k): str(v) for k, v in updates.items()}))
-        if done:
-            return
 
         def patch(data: list[Any]) -> bool:
             for p in data:
                 if isinstance(p, dict) and p.get("id") == profile["id"]:
-                    p.setdefault("env", {}).update(updates)
-                    if isinstance(p.get("_resolved_env"), dict):
-                        p["_resolved_env"].update(updates)
+                    if done:
+                        for k in updates:
+                            (p.get("env") or {}).pop(k, None)
+                            if isinstance(p.get("_resolved_env"), dict):
+                                p["_resolved_env"].pop(k, None)
+                    else:
+                        p.setdefault("env", {}).update(updates)
+                        if isinstance(p.get("_resolved_env"), dict):
+                            p["_resolved_env"].update(updates)
                     return True
             return False
 
@@ -1086,7 +1180,7 @@ class CalibrationManager:
 
         「mtp(+chain) / lookup / none のどれがこの箱で最速か」は誰も実測していなかった
         (プロファイルの現在値が校正経路を分岐させるだけだった) ので、1 ジョブで決め、
-        勝者の --speculative と env ファミリーをまとめて適用する。判定: 単流スコア最優、
+        勝者の投機フラグと env ファミリーをまとめて適用する。判定: 単流スコア最優、
         ただし並行上限で並行最優に FT_AUTO_PAR_LOSS を超えて負ける構成は差し替え
         (fork ツールの MAX_PARALLEL_LOSS と同じ哲学)。勝者には品質中立の転送/グラフ系
         env 微調整 (フェーズ D) も行う。所要 ≈ 2-3 時間。"""
@@ -1230,29 +1324,35 @@ class CalibrationManager:
         improvement = (round((cur_single / none_single - 1) * 100, 1)
                        if none_single else None)
 
-        # ---- 適用: --speculative (起動 JSON argv / values) + 勝者 env ファミリー
+        # ---- 適用: 投機フラグ (起動 JSON argv / values) + 勝者 env ファミリー。
+        # lookup 勝者でもサーバーは off (現行エンジンに lookup バックエンドは無い)
         launch_path = launch_json_path(self.root, profile)
         spec_mode_now = mode.split("-")[0]        # lookup-mb → lookup
+        armed = spec_mode_now if spec_mode_now in ("mtp", "dflash") else ""
         if launch_path is not None and launch_path.is_file():
             self._ft_launch_update(
                 profile,
                 lambda doc: doc.__setitem__(
-                    "argv", replace_arg([str(a) for a in doc.get("argv") or []],
-                                        "--speculative", spec_mode_now)))
+                    "argv", _with_spec([str(a) for a in doc.get("argv") or []], spec_mode_now)))
         else:
             def patch(data: list[Any]) -> bool:
                 for p in data:
                     if isinstance(p, dict) and p.get("id") == profile["id"]:
-                        p.setdefault("values", {})["speculative"] = spec_mode_now
+                        values = p.setdefault("values", {})
+                        values["speculative_algorithm"] = armed
+                        values.pop("speculative", None)
                         return True
                 return False
 
             if not self.profiles.mutate(patch):
                 raise CalibrateError("計測中にプロファイルが消えたため、モードを保存できませんでした")
-            profile.setdefault("values", {})["speculative"] = spec_mode_now
+            values = profile.setdefault("values", {})
+            values["speculative_algorithm"] = armed
+            values.pop("speculative", None)
         if winner_env:
             self._ft_write_env(profile, winner_env)
-        self._append_log(job, f"[auto] 勝者: --speculative {spec_mode_now}"
+        spec_label = f"{SPEC_ALGO_FLAG} {armed}" if armed else f"投機 off ({spec_mode_now})"
+        self._append_log(job, f"[auto] 勝者: {spec_label}"
                               + (f" + env {len(winner_env)} キー" if winner_env else "")
                               + f" ({rule})")
 
@@ -1268,7 +1368,7 @@ class CalibrationManager:
             (report_dir / f"calibration-{job['id']}.json").write_text(
                 json.dumps(report, ensure_ascii=False, indent=2), "utf-8")
         return {"tuned": True, "backend": "freetoken-auto", "applied": True,
-                "settings": {"--speculative": spec_mode_now, **winner_env},
+                "settings": {SPEC_ALGO_FLAG: armed or "off", **winner_env},
                 "improvement_pct": improvement, "latency": winner.get("latency", ""),
                 "rule": rule}
 
@@ -1390,7 +1490,7 @@ class CalibrationManager:
                        base_env: dict[str, str], label: str,
                        overrides: dict[str, Any],
                        spec: str | None) -> tuple[dict[str, Any], "Path | None"]:
-        """セル用 clone (env 差し替え + 任意で --speculative 強制) を作る。
+        """セル用 clone (env 差し替え + 任意で --speculative-algorithm 強制) を作る。
 
         起動 JSON 主体モードでは argv の差し替えに実ファイルが要るので、一時 JSON を
         data/calibrations/ に書く (呼び出し側が finally で削除する)。"""
@@ -1405,14 +1505,16 @@ class CalibrationManager:
                 launch = load_launch_json(self.root, profile)
             if launch is not None:
                 doc = dict(launch)
-                doc["argv"] = replace_arg([str(a) for a in launch.get("argv") or []],
-                                          "--speculative", spec)
+                doc["argv"] = _with_spec([str(a) for a in launch.get("argv") or []], spec)
                 tmp_cfg = (self.root / "data" / "calibrations"
                            / f"cell-{job['id']}-{label}.json")
                 tmp_cfg.write_text(json.dumps(doc, ensure_ascii=False), "utf-8")
                 clone["values"] = {**(profile.get("values") or {}), "config": str(tmp_cfg)}
             else:
-                clone["values"] = {**(profile.get("values") or {}), "speculative": spec}
+                values = {**(profile.get("values") or {}),
+                          "speculative_algorithm": spec if spec in ("mtp", "dflash") else ""}
+                values.pop("speculative", None)
+                clone["values"] = values
         return clone, tmp_cfg
 
     async def _ft_run_cell(self, job: dict[str, Any], profile: dict[str, Any],
@@ -1638,6 +1740,15 @@ class CalibrationManager:
                         why = _verify_maya_tuned(job, step["verify"])
                         if why:
                             raise CalibrateError(why)
+                    if step["name"] == "speed" and step.get("verify"):
+                        # drafter 速度計測も exit 0 で「計測しなかった」があり得る
+                        # (GPU 使用中 / drafter 無し / 計測失敗)。config の計測記録を確認する
+                        why, rec = _verify_maya_speed(job, step["verify"])
+                        if why:
+                            raise CalibrateError(why)
+                        # speed_record: 末尾の result[step名] = payload (プレーンテキストの
+                        # Maya 出力は {}) に上書きされない別のキーで要約に渡す
+                        result["speed_record"] = rec
                     if step["name"] == "review" and isinstance(payload, dict):
                         # Strata の JSON: {"schema_version":1, "ok": <applicable>, "review": {...}}
                         review = payload.get("review") if isinstance(payload.get("review"), dict) else payload
@@ -1707,6 +1818,35 @@ def _verify_maya_tuned(job: dict[str, Any], cfg_path: str) -> str:
     return "Maya の調整は完了しませんでした (config に調整結果が書かれていません — ログ参照)"
 
 
+def _verify_maya_speed(job: dict[str, Any], cfg_path: str) -> tuple[str, dict[str, Any]]:
+    """Maya の `--speed-calibration` が本当に計測したかを確かめる (成功なら ("", 記録))。
+
+    純正は計測できなくても exit 0 で終わる (GPU 使用中 / pack に drafter 無し / 計測失敗は
+    警告のみ)。成功の証拠は config の installer.speed_calibration (DSpark / DFlash2) または
+    installer.mtp_calibration (Qwen) の計測記録 — skipped (選択のみ) / failed は失敗扱い。"""
+    try:
+        cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as e:
+        return f"Maya の config を確認できません ({cfg_path}): {e}", {}
+    if not isinstance(cfg, dict):
+        return f"Maya の config が JSON オブジェクトではありません ({cfg_path})", {}
+    inst = cfg.get("installer") or {}
+    key = "mtp_calibration" if maya_setup.config_family(cfg) == "qwen" else "speed_calibration"
+    rec = inst.get(key)
+    if isinstance(rec, dict) and rec.get("date") and not rec.get("failed") and not rec.get("skipped"):
+        return "", rec
+    lines = (job.get("logs") or [])[-40:]
+    for line in reversed(lines):
+        low = line.lower()
+        if ("did not finish" in low or "needs the gpu" in low or "no speed calibration" in low
+                or "not on this pc" in low or "no mtp drafter" in low or "could not be measured" in low):
+            return "Maya の drafter 速度計測は完了しませんでした: " + line.strip(), {}
+    for line in reversed(lines):
+        if "the engine said:" in line.lower():
+            return "Maya のエンジンが起動できませんでした: " + line.split(":", 1)[1].strip(), {}
+    return "Maya の drafter 速度計測は完了しませんでした (config に計測結果が書かれていません — ログ参照)", {}
+
+
 def _plan_failure(payload: dict[str, Any] | None) -> str:
     """Strata `engine calibrate --plan` の失敗理由 (読み取り専用の事前検査)。
 
@@ -1739,7 +1879,13 @@ def _plan_failure(payload: dict[str, Any] | None) -> str:
 def _summary(kind: str, result: dict[str, Any]) -> dict[str, Any]:
     """ジョブ内の CLI 結果を UI 用の短い要約にする。"""
     if kind == "maya":
-        return {"tuned": True, "backend": "maya"}
+        out: dict[str, Any] = {"tuned": True, "backend": "maya"}
+        speed = result.get("speed_record") or {}
+        if speed:
+            # drafter 計測の結果 (kept: dspark / none / dflash2 / mtp。Qwen の記録は
+            # off/on の実測値だけなので "measured" と出す)
+            out["drafter"] = speed.get("kept") or "measured"
+        return out
     if kind == "freetoken":
         rep = result.get("freetoken") or {}
         if rep.get("backend") in ("freetoken-lookup", "freetoken-multi", "freetoken-auto"):
