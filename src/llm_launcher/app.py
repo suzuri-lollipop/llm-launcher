@@ -1337,6 +1337,28 @@ def create_app(root: Path) -> FastAPI:
         return {"family": fam, "kv_ok": fam in ("glm", "qwen"), "tp_ok": tp_ok,
                 "gpu": cur, "gpus": usable, "gpu_multi": True}
 
+    def _config_gpu_count(doc: dict[str, Any], usable: list[int]) -> int:
+        """config の gpu が指すカード数。未設定 = CUDA_VISIBLE_DEVICES を絞らない =
+        全 usable が見える (純正 child_env / gpu_list と同じ見立て)。"""
+        g = doc.get("gpu")
+        if isinstance(g, list):
+            return len(g) or len(usable) or 1
+        if g is None or str(g).strip() == "":
+            return len(usable) or 1
+        return len([x for x in str(g).split(",") if x.strip()]) or 1
+
+    def _require_launch_config(profile: dict[str, Any]) -> None:
+        """config 主体のバックエンド (Strata / Maya) は config 無しでは起動させない。
+        純正 maya.sh は --config 無しだと「直近に使った config」を黙って拾うため、
+        別モデル / 別 GPU 設定で起動する事故になる (2026-11-16 実害: config 未紐付けの
+        プロファイルが maya-ds4.json (gpu 2 枚) で起動した)。custom_only は独自コマンドなので対象外。"""
+        bid = profile.get("backend") or ""
+        if bid in ("maya", "strata", "strata-fork") and not profile.get("custom_only") \
+                and not str((profile.get("values") or {}).get("config") or "").strip():
+            raise HTTPException(400, "このプロファイルには起動 config (strata-<model>.json / maya-<model>.json) が"
+                                     "紐付いていません。セットアップウィザードでモデル設定を実行するか、"
+                                     "プロファイル編集で config を指定してください")
+
     @app.get("/api/profiles/{profile_id}/config-args")
     async def get_config_args(profile_id: str) -> dict[str, Any]:
         """③ のプリフィル用: config の編集可能ノブの現在値を返す。
@@ -1359,9 +1381,11 @@ def create_app(root: Path) -> FastAPI:
     async def update_config_args(profile_id: str, body: dict[str, Any]) -> dict[str, Any]:
         """③ の保存: ホワイトリストのノブだけ書き戻す。
         args 系 (--max-context / --kv / --tp) は args と args_written へ、
-        Strata の gpu は config 直下 (gpu / layer_split / gpus_asked) へ。
-        Maya は家系別: GLM / Qwen / MiniMax GGUF は gpu (layer split)、
-        DeepSeek / MiniMax EXL3 は --tp (KV 形式はエンジン固有で編集させない)。"""
+        gpu は config 直下 (Strata: gpu / layer_split / gpus_asked、Maya: gpu)。
+        Maya は全家系で gpu (カード選択) を編集できる。DS4 / MM3-EXL3 は --tp も
+        持つが、純正 maya.py と同じく選んだカード枚数から導出する (min(2, 枚数)) —
+        --tp だけ書いて gpu を放置すると「tp=1 なのに 2 枚 layer split」になる
+        (2026-11-16 実害: gpu:[0,1] + --tp 1 で 2 枚起動 / 2 枚計測)。"""
         prof = manager.find_profile(profile_id)
         if not prof:
             raise HTTPException(404, "プロファイルが見つかりません")
@@ -1373,13 +1397,11 @@ def create_app(root: Path) -> FastAPI:
         is_strata = (prof.get("backend") or "") in ("strata", "strata-fork")
         is_maya = (prof.get("backend") or "") == "maya"
         doc = _config_args_doc(p)
-        # Maya は家系別に編集できるノブが違う (エンジン実装が単一の源):
-        # GLM / Qwen = --kv + gpu (layer split)、DeepSeek / MiniMax EXL3 = --tp
+        # Maya の家系別ノブ: GLM / Qwen = --kv + gpu、DS4 / MM3-EXL3 = gpu + --tp (導出)
         maya_info = _maya_config_info(doc) if is_maya else None
         gpu_val = updates.pop("gpu", None)
-        if gpu_val is not None and not is_strata and (not is_maya or maya_info["tp_ok"]):
-            raise HTTPException(400, "このモデルは GPU 分割を --tp (Tensor Parallel) で設定します"
-                                if is_maya else "このバックエンドは gpu 編集に対応していません")
+        if gpu_val is not None and not is_strata and not is_maya:
+            raise HTTPException(400, "このバックエンドは gpu 編集に対応していません")
         clean: dict[str, str] = {}
         for flag, val in updates.items():
             sval = str(val).strip()
@@ -1423,8 +1445,21 @@ def create_app(root: Path) -> FastAPI:
                     doc["layer_split"] = doc.get("layer_split") or "auto"
             if is_strata:
                 doc["gpus_asked"] = True      # 人が選んだ = 起動時に純正が再び聞かない
+            if is_maya and maya_info["tp_ok"] and "--tp" not in updates:
+                # 純正 maya.py と同じ: --tp は選んだカード枚数から導出 (min(2, 枚数))。
+                # カード選択と矛盾する --tp を残さない (tp=1 + gpu 2 枚 = 2 枚 layer split)
+                tp = str(min(2, len(sel)))
+                doc["args"] = replace_arg(doc["args"], "--tp", tp)
+                if isinstance(doc.get("args_written"), list):
+                    doc["args_written"] = replace_arg(doc["args_written"], "--tp", tp)
             changed = True
         for flag, sval in clean.items():
+            if flag == "--tp" and is_maya:
+                # gpu 書き戻し後のカード数に対して検証する (このループは gpu ブロックの後)。
+                # gpu 未設定 = CUDA_VISIBLE_DEVICES を絞らない = 全 usable が見える
+                cards = _config_gpu_count(doc, maya_info["gpus"])
+                if int(sval) > cards:
+                    raise HTTPException(400, f"TP 数がカード数を超えています: --tp {sval} (使える GPU: {cards} 枚)")
             doc["args"] = replace_arg(doc["args"], flag, sval)
             if isinstance(doc.get("args_written"), list):
                 doc["args_written"] = replace_arg(doc["args_written"], flag, sval)
@@ -1489,6 +1524,7 @@ def create_app(root: Path) -> FastAPI:
         bid = profile.get("backend")
         if bid not in BACKENDS:
             raise HTTPException(400, "このプロファイルにバックエンドが設定されていません")
+        _require_launch_config(profile)
         already = [s for s in manager.sessions.values()
                    if s["profile_id"] == body.profile_id
                    and s["status"] in ("running", "starting", "stopping")]
@@ -1533,6 +1569,7 @@ def create_app(root: Path) -> FastAPI:
         profile = manager.find_profile(old["profile_id"])
         if not profile:
             raise HTTPException(400, "元のプロファイルが削除されています")
+        _require_launch_config(profile)   # 停止する前に検査 (config 無しで止めだけしない)
         await manager.stop(sid)
         try:
             # 停止後にメモリガードへ掛かることがあるので force は同じ形で引き継ぐ
