@@ -703,7 +703,9 @@ function mdSync() {
     const st = mdT();
     if (mode === "dl") {
       btn.textContent = "次へ (稼働設定)";
-      btn.disabled = !st.available || !st.venv_ready || !W.mdStFam || !W.mdStModel;
+      const sizeOpt = $("#md-size").selectedOptions[0];
+      btn.disabled = !st.available || !st.venv_ready || !W.mdStFam || !W.mdStModel
+        || !!(sizeOpt && sizeOpt.disabled);   // 取得済み (グレー) の選択では開始しない
       $("#md-dest").textContent = isMaya
         ? "ダウンロードと設定は Maya 本体の手順が走ります — エンジンビルド (初回) と pack 作成も含みます。中断しても続きから再開できます"
         : "ダウンロードと設定は Strata 本体の手順が走ります — 中断しても続きから再開できます";
@@ -732,7 +734,10 @@ function mdSync() {
   const btn = $("#md-start");
   if (mode === "dl") {
     btn.textContent = "次へ (稼働設定)";
-    btn.disabled = !$("#md-repo").value.trim() && !$("#md-sel").value;
+    const repo = $("#md-repo").value.trim();
+    const selOpt = $("#md-sel").selectedOptions[0];
+    // repo id 手入力は明示 intent なので許可。一覧選択は取得済み (グレー) を弾く
+    btn.disabled = repo ? false : (!$("#md-sel").value || !!(selOpt && selOpt.disabled));
     const sp = spec();
     $("#md-dest").textContent = sp && sp.model_data
       ? `保存先: ${sp.name} のモデルフォルダ (起動設定に自動で反映されます)`
@@ -772,9 +777,16 @@ async function renderModel() {
       : shape === "gguf" ? ((m.gguf || []).length || m.has_weights)
       : m.has_weights));
   } catch { mdLocal = []; }
+  /* ダウンロード択の一覧: 取得済みは選択不可 (グレー) — 済みモデルは
+     「ダウンロード済みのモデルを使う」側で選ぶ (再ダウンロードの誤起動防止) */
+  const haveRepo = r => mdLocal.some(x => x.repo_id === r);
+  const firstAvail = ms.findIndex(m => !haveRepo(m.repo_id));
   $("#md-sel").innerHTML = ms.length
-    ? ms.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
-        + `${esc(m.repo_id)}${m.name ? " — " + esc(m.name) : ""}</option>`).join("")
+    ? ms.map((m, i) => {
+        const got = haveRepo(m.repo_id);
+        return `<option value="${esc(m.repo_id)}"${i === (firstAvail >= 0 ? firstAvail : 0) ? " selected" : ""}${got ? " disabled" : ""}>`
+          + `${esc(m.repo_id)}${m.name ? " — " + esc(m.name) : ""}${got ? " (ダウンロード済み)" : ""}</option>`;
+      }).join("")
     : '<option value="">(このバックエンドに対応モデル一覧がありません)</option>';
   $("#md-local").innerHTML = mdLocal.length
     ? mdLocal.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`

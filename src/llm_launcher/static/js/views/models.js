@@ -271,7 +271,7 @@ function mmDlSync() {
   if (cat.dataset.sig !== sig) {
     cat.dataset.sig = sig;
     cat.innerHTML = `<option value="">対応モデルから選択 (${supported.length})</option>`
-      + supported.map(s => `<option value="${esc(s.repo_id)}">${esc(s.name || s.repo_id)}${s.downloaded ? " (取得済み)" : ""}</option>`).join("");
+      + supported.map(s => `<option value="${esc(s.repo_id)}"${s.downloaded ? " disabled" : ""}>${esc(s.name || s.repo_id)}${s.downloaded ? " (取得済み — 再利用は棚卸しから)" : ""}</option>`).join("");
   }
   $("#mm-dl-cat-wrap").style.display = supported.length && !wizard ? "" : "none";
   ["#mm-dl-repo", "#mm-dl-rev", "#mm-dl-patterns", "#mm-dl-kbps"].forEach(s => { const el = $(s); if (el) el.disabled = wizard; });
