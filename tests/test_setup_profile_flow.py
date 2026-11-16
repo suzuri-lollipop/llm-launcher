@@ -136,9 +136,9 @@ def test_adopt_local_creates_config_when_weights_present():
 
 def test_profile_mode_reads_tables_from_options_not_installs_api():
     st = _block("async function loadStrata()", "/* 現在バックエンドの表")
-    assert "if (profileFlow()) return (W.options && W.options.strata)" in st
+    assert "W.mdStrata = (W.options && W.options.strata)" in st
     my = _block("async function loadMaya()", "/* 現在バックエンドの表")
-    assert "if (profileFlow()) return (W.options && W.options.maya)" in my
+    assert "W.mdMaya = (W.options && W.options.maya)" in my
 
 
 # ---------------------------------------------------------------- ③④⑤ の再利用と完了
@@ -249,3 +249,23 @@ def test_setup_options_needs_profiles_edit_not_install(tmp_path, auth_on, fast_k
         assert st == 200
 
     asyncio.run(go())
+
+
+def test_profile_loaders_populate_mdt():
+    """profile モードの loadStrata / loadMaya は W.mdStrata / W.mdMaya にも表を入れる。
+    mdT() / mdAdoptLocalTable がここを参照するため、入れないと済みモデル選択が
+    無反応で先に進めない (2026-11-16 実害: 「このモデルで続ける」が効かなかった)。"""
+    st = _block("async function loadStrata()", "/* 現在バックエンドの表")
+    assert "W.mdStrata = (W.options && W.options.strata)" in st
+    my = _block("async function loadMaya()", "/* 現在バックエンドの表")
+    assert "W.mdMaya = (W.options && W.options.maya)" in my
+
+
+def test_downloaded_option_labels_frontload_quant():
+    """済みモデルの選択肢は量子化キー + 実サイズを先頭に置く — 家族名が先頭を
+    占めて末尾だけ違うモデル (Mix-128G / Mix-256G) が見分けられない問題の修正。"""
+    fn = _block("async function renderModelTable(backend)", "function mdStFullIn(")
+    assert 'esc(x.model + " · " + (x.gb || "?") + " GB — " + x.label)' in fn
+    # 選択中の完全名はヒント (md-dest) にも出す
+    sync = _block("function mdSync()", "async function renderModel()")
+    assert "${sel.label} — 重みはこの PC に在ります" in sync
