@@ -548,17 +548,25 @@ function setMdModeLabels(backend) {
   $("#md-later").classList.toggle("hidden", profileFlow() || backend === "strata" || backend === "maya");
 }
 async function loadStrata() {
-  // profile モードは setup-options が読んだ表を使う (/api/installs/* は install 権限)
-  if (profileFlow()) return (W.options && W.options.strata)
-    || { available: false, families: {}, contexts: [], configs: [], venv_ready: false };
+  // profile モードは setup-options が読んだ表を使う (/api/installs/* は install 権限)。
+  // W.mdStrata にも入れる — mdT() / mdAdoptLocalTable がここを参照するため
+  // (入れないと済みモデル選択が無反応で先に進めない。2026-11-16 実害)
+  if (profileFlow()) {
+    W.mdStrata = (W.options && W.options.strata)
+      || { available: false, families: {}, contexts: [], configs: [], venv_ready: false };
+    return W.mdStrata;
+  }
   if (W.mdStrata) return W.mdStrata;
   try { W.mdStrata = await api("/api/installs/strata-model"); }
   catch { W.mdStrata = { available: false, families: {}, contexts: [], configs: [], venv_ready: false }; }
   return W.mdStrata;
 }
 async function loadMaya() {
-  if (profileFlow()) return (W.options && W.options.maya)
-    || { available: false, families: {}, configs: [], venv_ready: false };
+  if (profileFlow()) {
+    W.mdMaya = (W.options && W.options.maya)
+      || { available: false, families: {}, configs: [], venv_ready: false };
+    return W.mdMaya;
+  }
   if (W.mdMaya) return W.mdMaya;
   try { W.mdMaya = await api("/api/installs/maya-model"); }
   catch { W.mdMaya = { available: false, families: {}, configs: [], venv_ready: false }; }
@@ -714,7 +722,7 @@ function mdSync() {
       btn.disabled = !$("#md-strata-exist").value;
       const sel = (st.downloaded || []).find(x => x.key === $("#md-strata-exist").value);
       $("#md-dest").textContent = sel
-        ? `重みはこの PC に在ります (${sel.gb || "?"} GB) — 再取得はありません`
+        ? `${sel.label} — 重みはこの PC に在ります (${sel.gb || "?"} GB) / 再取得はありません`
         : "";
     }
     return;
@@ -857,13 +865,15 @@ async function renderModelTable(backend) {
     const f = fams[fid];
     for (const [m, d] of Object.entries(f.models || {})) {
       if (mdStFullIn(f, m)) dl.push({ key: fid + "/" + m, fam: fid, model: m,
-                                      label: (f.title || fid) + " · " + (d.label || m),
+                                      label: (d.label || m),
                                       gb: (d.have || {}).gb });
     }
   }
   st.downloaded = dl;
+  /* 選択肢は「量子化キー + 実サイズ」を先頭に — 家族名が長く先頭を占めると
+     末尾だけ違うモデル (Mix-128G / Mix-256G) が見分けられない (2026-11-16 報告) */
   $("#md-strata-exist").innerHTML = dl.map((x, i) => `<option value="${esc(x.key)}"${i === 0 ? " selected" : ""}>`
-    + `${esc(x.label + " — " + (x.gb || "?") + " GB")}</option>`).join("")
+    + `${esc(x.model + " · " + (x.gb || "?") + " GB — " + x.label)}</option>`).join("")
     || (profileFlow()
       ? '<option value="">(ダウンロード済みのモデルがありません — 先に通常のセットアップでダウンロードしてください)</option>'
       : '<option value="">(ダウンロード済みのモデルがありません)</option>');
