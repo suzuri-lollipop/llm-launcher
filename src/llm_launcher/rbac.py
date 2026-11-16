@@ -49,8 +49,9 @@ CAPS: tuple[dict[str, Any], ...] = (
      "desc": "組み込みベンチマークの実行と履歴"},
     {"key": "calibrate", "label": "キャリブレーション", "default": False,
      "desc": "Maya / Strata のワンクリック・キャリブレーション (エンジン起動とconfig書き換えを伴う)"},
-    {"key": "install", "label": "インストール / モデルDL", "default": False,
-     "desc": "FreeToken 系の UI インストール (clone / .venv / pip) と Hugging Face モデルダウンロード"},
+    {"key": "install", "label": "インストール / モデルDL / モデル管理", "default": False,
+     "desc": "UI インストール (clone / .venv / pip) と Hugging Face モデルダウンロード、"
+             "全バックエンド横断のモデル管理 (一覧 / 削除)"},
     {"key": "profiles.edit", "label": "プロファイル編集", "default": False,
      "desc": "新規・編集・削除・インポート・コマンドプレビュー"},
     {"key": "backends.edit", "label": "バックエンド設定", "default": False,
@@ -128,6 +129,13 @@ def required_cap(method: str, path: str) -> str | None:
         return CORE                    # 起動 / 停止 / 再起動
     if p in ("/api/system", "/api/oom"):
         return "dashboard" if m == "GET" else "oom.edit"
+    if p == "/api/profiles/setup-options":
+        # プロファイル作成ウィザード (/setup?flow=profile) の読み取り専用選択肢。
+        # インストール権限は不要 (プロファイル編集と同じ開示範囲)。ジョブ履歴 / ログは含まない
+        return "profiles.edit"
+    if p.startswith("/api/profiles") and p.endswith("/config-args"):
+        # Strata / Maya の config args (ウィザード ③)。閲覧は設定値と同じ開示範囲
+        return "config.read" if m == "GET" else "profiles.edit"
     if p.startswith("/api/profiles"):
         return CORE if m == "GET" else "profiles.edit"
     if p == "/api/preview" or p.startswith("/api/hf-models"):
@@ -143,6 +151,9 @@ def required_cap(method: str, path: str) -> str | None:
         return "calibrate"
     if p.startswith("/api/installs"):
         # clone / pip install / HF ダウンロード。実行も履歴閲覧も同じ権限 (calibrate と同じ方針)
+        return "install"
+    if p.startswith("/api/models"):
+        # 全バックエンド横断のモデル棚卸し / 削除。モデルDL と同じ install 権限
         return "install"
     return None
 

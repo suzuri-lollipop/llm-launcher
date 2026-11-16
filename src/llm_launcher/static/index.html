@@ -57,6 +57,7 @@
 <symbol id="i-phone" viewBox="0 0 24 24"><path d="M6.62 10.79c1.44 2.83 3.76 5.14 6.59 6.59l2.2-2.2c.27-.27.67-.36 1.02-.24 1.12.37 2.33.57 3.57.57.55 0 1 .45 1 1V20c0 .55-.45 1-1 1-9.39 0-17-7.61-17-17 0-.55.45-1 1-1h3.5c.55 0 1 .45 1 1 0 1.25.2 2.45.57 3.57.11.35.03.74-.25 1.02l-2.2 2.2z"/></symbol>
 <symbol id="i-external" viewBox="0 0 24 24"><path d="M19 19H5V5h7V3H5c-1.11 0-2 .9-2 2v14c0 1.1.89 2 2 2h14c1.1 0 2-.9 2-2v-7h-2v7zM14 3v2h3.59l-9.83 9.83 1.41 1.41L19 6.41V10h2V3h-7z"/></symbol>
 <symbol id="i-logout" viewBox="0 0 24 24"><path d="M17 7l-1.41 1.41L16.17 11H9v2h7.17l-.58.58L17 15l4-4-4-4zM5 5h7V3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h7v-2H5V5z"/></symbol>
+<symbol id="i-layers" viewBox="0 0 24 24"><path d="M11.99 18.54l-7.37-5.73L3 14.07l9 7 9-7-1.63-1.27-7.38 5.74zM12 16l7.36-5.73L21 9l-9-7-9 7 1.63 1.27L12 16z"/></symbol>
 </svg>
 <div id="login">
   <div class="box">
@@ -131,6 +132,7 @@
     <button class="mitem" data-tab="bench" id="mi-bench"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-chart /></svg></span>ベンチマーク<span class="nbadge hidden" id="nb-bench"></span></button>
     <button class="mitem" data-tab="calibrate" id="mi-calibrate"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-target /></svg></span>キャリブレーション<span class="nbadge hidden" id="nb-cal"></span></button>
     <button class="mitem hidden" data-tab="setup" id="mi-setup"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-box /></svg></span>セットアップ<span class="nbadge run hidden" id="nb-ins"></span></button>
+    <button class="mitem hidden" data-tab="models" id="mi-models"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-layers /></svg></span>モデル管理</button>
     <button class="mitem" data-tab="profiles" id="mi-profiles"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-clipboard /></svg></span>プロファイル</button>
     <button class="mitem" data-tab="backends" id="mi-backends"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-gear /></svg></span>バックエンド</button>
     <button class="mitem hidden" data-tab="users" id="mi-users"><span class="ico"><svg class=ic aria-hidden=true><use href=#i-users /></svg></span>ユーザー管理</button>
@@ -159,6 +161,7 @@
 <script src="/static/js/views/bench.js"></script>
 <script src="/static/js/views/calibrate.js"></script>
 <script src="/static/js/views/setup.js"></script>
+<script src="/static/js/views/models.js"></script>
 <script src="/static/js/boot.js"></script>
 </body>
 </html>

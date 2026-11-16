@@ -31,19 +31,49 @@ def collect_dataclass_defaults(paths, want_classes):
 
 
 def collect_module_constants(path):
-    """`NAME = [ ... ]` / `NAME = ( ... )` を {name: [items]} で返す。"""
+    """`NAME = [ ... ]` / `NAME = ( ... )` を {name: [items]} で返す。
+
+    レジストリ dict (`KV_FORMATS = {f.name: f for f in (A, B, ...)}`) は各メンバーの
+    コンストラクタ第1引数 (名前文字列) の列として解決する。choices 側の
+    `*(name for name in KV_FORMATS if ...)` がこの列を引く。
+    """
     consts: dict[str, list] = {}
     tree = ast.parse(Path(path).read_text(encoding="utf-8"))
-    for stmt in tree.body:
-        if isinstance(stmt, ast.Assign):
-            for t in stmt.targets:
-                if isinstance(t, ast.Name) and isinstance(stmt.value, (ast.List, ast.Tuple)):
-                    vals = []
-                    for e in stmt.value.elts:
-                        if isinstance(e, ast.Constant) and isinstance(e.value, str):
-                            vals.append(e.value)
-                    if vals:
-                        consts[t.id] = vals
+
+    def assigns():
+        for stmt in tree.body:
+            if isinstance(stmt, ast.Assign):
+                for t in stmt.targets:
+                    if isinstance(t, ast.Name):
+                        yield t.id, stmt.value
+            elif (isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+                    and stmt.value is not None):
+                yield stmt.target.id, stmt.value
+
+    for name, value in assigns():
+        if isinstance(value, (ast.List, ast.Tuple)):
+            vals = [e.value for e in value.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)]
+            if vals:
+                consts[name] = vals
+        elif (isinstance(value, ast.Call) and value.args
+                and isinstance(value.args[0], ast.Constant)
+                and isinstance(value.args[0].value, str)):
+            consts[name] = [value.args[0].value]
+    for name, value in assigns():
+        if not isinstance(value, ast.DictComp) or len(value.generators) != 1:
+            continue
+        gen = value.generators[0]
+        key = value.key
+        if not (isinstance(key, ast.Attribute) and key.attr == "name"
+                and isinstance(key.value, ast.Name) and isinstance(gen.target, ast.Name)
+                and key.value.id == gen.target.id and not gen.ifs
+                and isinstance(gen.iter, (ast.Tuple, ast.List))):
+            continue
+        vals = [v for e in gen.iter.elts if isinstance(e, ast.Name)
+                for v in consts.get(e.id, [])]
+        if vals:
+            consts[name] = vals
     return consts
 
 

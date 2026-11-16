@@ -294,9 +294,12 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     # モデルを使う」でモデル名を並べる — JSON 名は UI に出さない (2026-11-09 の指摘)
     assert "ダウンロード済み" in js
     assert "strata-<model>.json をそのまま" not in js   # JSON 選択導線の回帰禁止
-    # GPU 数の選択 (対応家系のみ) と単一 GPU 家系の注記
-    assert "mdStFillGpus" in js and "multi_gpu" in js
-    assert 'id="md-gpu"' in html
+    # GPU の使い方は ③ 稼働設定へ移動 (FreeToken 基準の GPU 分割質問と同じ位置)。
+    # ② はモデル構成だけを担当し、GPU 質問は出さない (2026-11-11 の揃え直し)
+    assert "mdStFillGpus" not in js
+    assert 'id="md-gpu"' not in html
+    assert 'flag: "gpu", config: true' in js
+    assert "multi_gpu" in js          # 単一 GPU 家系の注記は ② に残る
     tab = (static / "js" / "views" / "setup.js").read_text("utf-8")
     assert "モデル準備" in tab             # 📦 履歴の step / タイトル
 

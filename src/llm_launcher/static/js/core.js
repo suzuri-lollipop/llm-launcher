@@ -17,6 +17,7 @@ const S = {
   bench: null,           // ベンチマーク状態 (bmInit() で初期化)
   cal: null,             // キャリブレーション状態 (calInit() で初期化)
   ins: null,             // セットアップ状態 (insInit() で初期化)
+  mm: null,              // モデル管理状態 (mmInit() で初期化)
 };
 const $ = (q, el=document) => el.querySelector(q);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({
@@ -169,7 +170,8 @@ document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => {
 });
 /* ロールで開けるタブ。起動 / 稼働中は常に開ける (メンテナーの基本操作)。users は管理者のみ */
 const TAB_CAP = { home: "dashboard", history: "history", playground: "playground",
-                  bench: "bench", calibrate: "calibrate", setup: "install", profiles: "profiles.edit", backends: "backends.edit" };
+                  bench: "bench", calibrate: "calibrate", setup: "install", models: "install",
+                  profiles: "profiles.edit", backends: "backends.edit" };
 function tabAllowed(tab) {
   if (tab === "users") return AUTH.isAdmin;
   const cap = TAB_CAP[tab];
@@ -183,7 +185,7 @@ function tabAllowed(tab) {
    直接リンクされたダイアログは列表だけ開いてダイアログ側を捨てる (戻るとアプリ外へ出るため)。
 */
 const ROUTE_TABS = ["home","launch","running","history","profiles","backends",
-                    "users","playground","bench","calibrate","setup"];
+                    "users","playground","bench","calibrate","setup","models"];
 let _openDialog = null;   // 開いているダイアログ {kind, arg, mode}
 let _firstApply = true;   // 初回 (ダイヤルアップ / 直接リンク) のルート解決
 function routeUrl(tab, kind, arg, mode) {
@@ -275,6 +277,7 @@ function renderAll(force) {
   if (S.tab === "bench") renderBench();
   if (S.tab === "calibrate") renderCalibrate();
   if (S.tab === "setup") renderSetup();
+  if (S.tab === "models") renderModels();
 }
 function renderTabBadges() {
   const n = liveSessions().length;

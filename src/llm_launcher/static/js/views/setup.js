@@ -10,6 +10,8 @@ VIEWS.setup = `
       <p class="muted" style="margin:12px 0 4px">1 画面 1 質問のセットアップ画面を用意しました。<br>
         案内にしたがって <b>インストール → モデルのダウンロード → 調整 (任意)</b> を順番に実行できます。</p>
       <button class="primary" style="max-width:300px;margin:14px auto 0" onclick="location.href='/setup'">セットアップを開始する</button>
+      <p style="margin:12px 0 0"><button class="ghost" style="min-height:34px;font-size:12.5px" onclick="location.href='/setup?flow=profile'"><svg class=ic aria-hidden=true><use href=#i-clipboard /></svg> プロファイル作成 + キャリブレーションのみ</button></p>
+      <p class="muted" style="margin-top:6px;font-size:12px">インストール / モデルダウンロードが済みの環境向け — ダウンロード済みモデルから選んで設定と調整だけを行います</p>
       <p class="muted" id="ins-run-note" style="margin-top:12px;font-size:12px"></p>
     </div>
   </section>
@@ -22,7 +24,8 @@ const INS_ST = {queued: ["info", "待機"], running: ["warn", "実行中"], done
                 failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "中断 (launcher 再起動)"]};
 const INS_STEPS = {clone: "clone", branch: "ブランチ切替", venv: "venv 作成", precheck: "確認",
                    install: "uv pip install", cmake: "cmake 設定", "cmake-build": "cmake ビルド",
-                   engine: "エンジン受信", model: "モデル準備 (Strata)", verify: "import 確認"};
+                   engine: "エンジン受信", tools: "tools (pip + llama.cpp)",
+                   model: "モデル準備 (Strata / Maya)", verify: "import 確認"};
 /* install ステップの実体は uv があれば uv pip、無い環境だけ venv の pip。
    手順名はサーバーが返す tool (実行する argv と同じ判定) で出す。 */
 const insToolLabel = tool => tool === "pip" ? "pip install" : "uv pip install";
@@ -51,7 +54,9 @@ async function insPoll(force) {
       // 完了時の後処理は 1 回だけ: DL はモデル一覧を再スキャン、install は検出を再取得
       if (!S.ins.notified[act.id]) {
         if (act.kind === "download" && act.status === "done") {
-          S.ins.notified[act.id] = 1; loadHf(true); toast("モデルのダウンロードが完了しました");
+          S.ins.notified[act.id] = 1; loadHf(true);
+          if (S.mm && S.mm.data) mmRefresh(true);   // モデル管理タブの棚卸しも最新化
+          toast("モデルのダウンロードが完了しました");
         } else if (act.kind === "install" && act.status === "done") {
           S.ins.notified[act.id] = 1; await refresh(false);
           await insAfterInstall(act);       // 「インストール後に計走」の約束をここで果たす
@@ -90,7 +95,8 @@ async function insStart() {
   if (S.ins.active) { toast("別のセットアップジョブが実行中です"); return; }
   if (calBusy()) return toast("キャリブレーション実行中は開始できません (GPU 独占 / 同時に 1 件)");
   const nm = insName(bid), sp = insSpec(bid), ref = insRef(bid);
-  const tl = insToolLabel(S.ins.tool);
+  const tl = sp && sp.tools_step ? "純正 tools_step (pip + llama.cpp ソース)"
+                                 : insToolLabel((sp && sp.tool) || S.ins.tool);
   const what = !ref ? `clone / .venv 作成 / ${tl}`
     : (!sp || !sp.cloned ? `${ref} を clone → .venv 作成 → ${tl}`
       : (sp.current_ref === ref ? `既存 clone (${ref}) のまま .venv 作成 / ${tl}`
@@ -98,7 +104,7 @@ async function insStart() {
   const calloc = calUiOn() && $("#ins-cal").checked === true && !!sp && calSupports(sp.id);
   if (!confirm(`${nm} をインストールしますか?\n${what} を実行します (初回は数 GB をダウンロード)`
     + (calloc ? "\n\n完了後、このバックエンドのプロファイルがあれば キャリブレーション を自動で続けます"
-                 + " (GPU を独占、Maya ~10-15分 / Strata ~15-30分 / FreeToken ~3-4時間)" : ""))) return;
+                 + " (GPU を独占、Maya GLM ~10-15分 / DS4 ~35-70分 / Strata ~15-30分 / FreeToken ~3-4時間)" : ""))) return;
   S.ins.busy = true; renderSetup();
   try {
     const job = await api("/api/installs", {method: "POST", body: {backend: bid, clean: $("#ins-clean").checked === true,
@@ -376,12 +382,15 @@ function renderSetup() {
   const tl = insToolLabel((sp && sp.tool) || S.ins.tool);
   /* 手順の末尾: requirements 系 (pyproject の無い Basalt など) は -r + cmake ビルド、
      Strata (engine_fetch) は -r + 公式リリースからのエンジン受信、
+     Maya (tools_step) は純正 tools_step (pip + llama.cpp ソース。エンジンビルドは ②)、
      packaging 系は従来どおり -e ".[extras]"。cmake / engine は実在チェック込みの verify で締める */
-  const tail = sp.requirements
-    ? `${tl} -r ${sp.requirements}`
-      + (sp.cmake ? " → cmake configure + build (bin) → import + エンジン確認" : "")
-      + (sp.engine_fetch ? " → エンジン受信 (公式リリース) → import + エンジン確認" : "")
-    : `${tl} -e ".[${sp.extras}]"`;
+  const tail = sp.tools_step
+    ? "純正 tools_step (pip + llama.cpp ソース) → import + 導入確認"
+    : (sp.requirements
+      ? `${tl} -r ${sp.requirements}`
+        + (sp.cmake ? " → cmake configure + build (bin) → import + エンジン確認" : "")
+        + (sp.engine_fetch ? " → エンジン受信 (公式リリース) → import + エンジン確認" : "")
+      : `${tl} -e ".[${sp.extras}]"`);
   $("#ins-preview").textContent = !sp ? "" : (!sp.cloned
     ? `git clone --depth 1 ${ref ? "-b " + ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → ${tail}`
     : (sp.current_ref === ref

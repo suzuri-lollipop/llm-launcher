@@ -34,10 +34,21 @@ from llm_launcher.store import JsonStore
 ROOT = Path(__file__).resolve().parents[1]
 MAYA_PY = ROOT / "module" / "maya" / "maya.py"
 STRATA_PY = ROOT / "module" / "strata" / "strata.py"
+MAYA_DS4_CFG = ROOT / "module" / "maya" / "maya-ds4.json"
 
 pytestmark = pytest.mark.skipif(
     not MAYA_PY.exists() or not STRATA_PY.exists(),
     reason="module/maya または module/strata が未クローン",
+)
+# DS4 の実 config を参照するテストは、その config が無い環境 (ウィザードでのセットアップ前)
+# では skip する — 未クローン skip と同じ「環境依存は正直に skip」の立場
+needs_ds4_cfg = pytest.mark.skipif(
+    not MAYA_DS4_CFG.exists(),
+    reason="module/maya/maya-ds4.json が無い (DS4 未セットアップの環境)",
+)
+needs_maya_cfg = pytest.mark.skipif(
+    not any((ROOT / "module" / "maya").glob("maya-*.json")),
+    reason="module/maya に maya-*.json が無い (Maya 未セットアップの環境)",
 )
 
 
@@ -49,6 +60,7 @@ def _profile(**kw):
             "values": {"config": "module/strata/strata-x.json"}, "on": {}, **kw}
 
 
+@needs_ds4_cfg
 def test_maya_command_uses_calibrate_no_start_and_config():
     cfg = ROOT / "module" / "maya" / "maya-ds4.json"
     argv = calibrate.build_maya_command(ROOT, {"values": {"config": str(cfg)}}, "py")
@@ -60,6 +72,7 @@ def test_maya_command_uses_calibrate_no_start_and_config():
     assert argv.index("--no-start") > argv.index("--calibrate")
 
 
+@needs_maya_cfg
 def test_maya_config_defaults_to_newest_module_config():
     argv = calibrate.build_maya_command(ROOT, {"values": {}}, "py")
     assert "--config" in argv
@@ -262,8 +275,11 @@ class _FakeManager:
     def build_argv(self, profile):
         import sys
         v = profile.get("values") or {}
-        return [sys.executable, "-m", "freetoken", "--port", str(v.get("port") or "1919"),
-                "--speculative", str(v.get("speculative") or "none")]
+        argv = [sys.executable, "-m", "freetoken", "--port", str(v.get("port") or "1919")]
+        mode = str(v.get("speculative_algorithm") or v.get("speculative") or "")
+        if mode in ("mtp", "dflash"):
+            argv += ["--speculative-algorithm", mode]
+        return argv
 
 
 def _mgr(tmp_path: Path, root: Path, fake: _FakeManager):
@@ -325,6 +341,150 @@ def test_maya_success_requires_config_calibration_record(tmp_path):
     job = asyncio.run(go())
     assert job["status"] == "done"
     assert json.loads(cfg.read_text())["installer"]["calibration"]["date"]
+
+
+# ---------------------------------------------------------------- Maya drafter 速度計測 (⑤ 集約)
+
+def _fake_maya_ds4_speed(tmp_path: Path, speed_ok: bool = True) -> Path:
+    """drafter 付き DS4 config 用の偽 maya.sh。--calibrate では installer.calibration を、
+    --speed-calibration では installer.speed_calibration を書く (本物と同じく計測失敗も
+    exit 0 で終わり、failed 記録だけ残す)。"""
+    mod = tmp_path / "module" / "maya"
+    mod.mkdir(parents=True, exist_ok=True)
+    cfg = mod / "maya-ds4.json"
+    cfg.write_text(json.dumps({"args": ["--pack", "/p", "--dspark", "none"],
+                               "exe": "/x/maya-ds4", "tokenizer": "y",
+                               "model_name": "deepseek-v4.1-flash"}), encoding="utf-8")
+    helper = mod / "_fake_cal.py"
+    speed_line = (
+        "    inst['speed_calibration'] = {'date': '2026-01-01 00:00', 'kept': 'dspark',"
+        " 'dspark_tok_s': 40, 'no_drafting_tok_s': 36}\n" if speed_ok else
+        "    inst['speed_calibration'] = {'date': '2026-01-01 00:00', 'failed': 'engine exited'}\n")
+    helper.write_text(
+        "import json, sys\n"
+        "p, flag = sys.argv[1], sys.argv[2]\n"
+        "d = json.load(open(p))\n"
+        "inst = d.setdefault('installer', {})\n"
+        "if flag == 'cal':\n"
+        "    inst['calibration'] = {'date': '2026-01-01 00:00', 'tok_s': '8'}\n"
+        "else:\n" + speed_line +
+        "json.dump(d, open(p, 'w'))\n", encoding="utf-8")
+    body = (
+        'if echo "$@" | grep -q -- --speed-calibration; then\n'
+        f'  python3 "{helper}" "{cfg}" speed\n'
+        + ('  echo "speed calibration: the DSpark drafter is faster on this PC"\n' if speed_ok else
+           '  echo "  [!] the speed calibration did not finish (engine exited): nothing changed"\n')
+        + 'else\n'
+        f'  python3 "{helper}" "{cfg}" cal\n'
+        '  echo "tuned for this PC: --tp 2"\n'
+        'fi\n')
+    (mod / "maya.sh").write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    (mod / "maya.sh").chmod(0o755)
+    return cfg
+
+
+def _huge_mem(monkeypatch):
+    # DS4 のメモリガード (110 GB) を通すのに十分な空き (既存の _big_mem は 60 GB なので別名)
+    monkeypatch.setattr(calibrate, "meminfo",
+                        lambda: {"MemAvailable": 200 * (1 << 30), "SwapFree": 0})
+
+
+def test_maya_ds4_job_adds_speed_step(tmp_path, monkeypatch):
+    """drafter 付き DS4 config の ⑤ は calibrate → speed の 2 step。セットアップ (②) は
+    --drafting off で計測しないので、GPU 独占の計測はこのジョブ (ガード付き) に集約される。"""
+    cfg = _fake_maya_ds4_speed(tmp_path)
+    _huge_mem(monkeypatch)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    prof = {"id": "p_m", "name": "maya", "backend": "maya", "values": {"config": str(cfg)}}
+
+    async def go():
+        job = await mgr.start(prof, "maya")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.05)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert job["steps"] == ["calibrate", "speed"]
+    assert job["report"]["drafter"] == "dspark"
+    inst = json.loads(cfg.read_text())["installer"]
+    assert inst["calibration"]["date"] and inst["speed_calibration"]["kept"] == "dspark"
+
+
+def test_maya_speed_failure_is_detected_even_though_exit_code_is_zero(tmp_path, monkeypatch):
+    """計測失敗も exit 0 (本物の契約)。failed 記録 / ログの警告を拾って failed にする。"""
+    cfg = _fake_maya_ds4_speed(tmp_path, speed_ok=False)
+    _huge_mem(monkeypatch)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    prof = {"id": "p_m", "name": "maya", "backend": "maya", "values": {"config": str(cfg)}}
+
+    async def go():
+        job = await mgr.start(prof, "maya")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.05)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "failed"
+    assert "drafter" in job["error"] and "did not finish" in job["error"], job["error"]
+
+
+def test_maya_speed_wanted_matrix(tmp_path):
+    """speed step の要否は純正 setup が config に書いたフラグで決まる:
+    pack に drafter が無い / MM3 の parallel > 1 / GLM の MTP 既定は計測対象外。"""
+    def cfg(args: list, exe: str = "/x/maya", inst: dict | None = None) -> str:
+        p = tmp_path / f"c{len(list(tmp_path.iterdir()))}.json"
+        p.write_text(json.dumps({"args": args, "exe": exe,
+                                 **({"installer": inst} if inst else {})}), encoding="utf-8")
+        return str(p)
+    assert calibrate.maya_speed_wanted(cfg(["--glm-pack", "/p"])) is False          # GLM MTP 既定
+    assert calibrate.maya_speed_wanted(cfg(["--glm-pack", "/p", "--dflash", "/d"])) is True
+    assert calibrate.maya_speed_wanted(cfg(["--pack", "/p", "--dspark", "none"],
+                                           exe="/x/maya-ds4")) is True
+    assert calibrate.maya_speed_wanted(cfg(["--pack", "/p"], exe="/x/maya-ds4")) is False
+    assert calibrate.maya_speed_wanted(cfg(["--pack", "/p", "--dspark", "off"],
+                                           exe="/x/maya-mm3")) is True
+    assert calibrate.maya_speed_wanted(cfg(["--pack", "/p", "--dspark", "off", "--parallel", "2"],
+                                           exe="/x/maya-mm3")) is False
+    assert calibrate.maya_speed_wanted(cfg(["--pack", "/p", "--native", "/g", "--ple-gguf", "/g",
+                                            "--mtp", "/p/mtp"])) is True
+    assert calibrate.maya_speed_wanted(cfg(["--pack", "/p", "--native", "/g",
+                                            "--ple-gguf", "/g"])) is False
+    assert calibrate.maya_speed_wanted(str(tmp_path / "no-such.json")) is False
+
+
+def test_build_maya_speed_command(tmp_path):
+    mod = tmp_path / "module" / "maya"
+    mod.mkdir(parents=True)
+    cfg = mod / "maya-ds4.json"
+    cfg.write_text("{}", encoding="utf-8")
+    prof = {"values": {"config": str(cfg)}}
+    argv = calibrate.build_maya_speed_command(tmp_path, prof, "py")
+    assert argv[:2] == ["sh", str(mod / "maya.sh")]
+    assert "--speed-calibration" in argv and "--no-start" in argv
+    assert argv[argv.index("--config") + 1] == str(cfg)
+    assert "--calibrate" not in argv
+    # config が無い (最新 maya-*.json の fallback も無い) ときは step を作らない
+    empty = tmp_path / "empty-root"
+    empty.mkdir()
+    assert calibrate.build_maya_speed_command(empty, {"values": {}}, "py") == []
+
+
+def test_verify_maya_speed_rejects_skipped_record(tmp_path):
+    """「計測せず drafter なしを選択しただけ」(skipped) は計測の証拠にならない。"""
+    cfg = tmp_path / "maya-ds4.json"
+    cfg.write_text(json.dumps({"args": ["--pack", "/p", "--dspark", "none"], "exe": "/x/maya-ds4",
+                               "installer": {"speed_calibration":
+                                             {"date": "2026-01-01", "skipped": "chosen",
+                                              "kept": "none"}}}), encoding="utf-8")
+    why, rec = calibrate._verify_maya_speed({"logs": []}, str(cfg))
+    assert why and rec == {}
+    # 計測記録 (kept あり) は成功
+    cfg.write_text(json.dumps({"args": ["--pack", "/p", "--dspark", "none"], "exe": "/x/maya-ds4",
+                               "installer": {"speed_calibration":
+                                             {"date": "2026-01-01", "kept": "none",
+                                              "dspark_tok_s": 30, "no_drafting_tok_s": 36}}}),
+                   encoding="utf-8")
+    why, rec = calibrate._verify_maya_speed({"logs": []}, str(cfg))
+    assert why == "" and rec["kept"] == "none"
 
 
 def test_strata_job_runs_create_measure_review_apply_and_reports_settings(tmp_path):
@@ -534,6 +694,7 @@ def test_on_startup_keeps_finished_jobs_and_their_log(tmp_path):
 # oom_score_adj が掛かっていなかったこと (ProcessManager はモデルサーバーだけを保護する)。
 
 
+@needs_ds4_cfg
 def test_memory_guard_rejects_ds4_when_ram_and_swap_are_short(monkeypatch):
     """DS4 は専門家のコピー 81 GB + エンジン 9 GB + 余裕 20 GB = 110 GB を要求する。
     実測では MemAvailable 118.8 GB でもピークは 117.2 GB になり oomd に kill されたので、
@@ -1028,7 +1189,9 @@ def test_freetoken_lookup_start_builds_cli_spec(tmp_path):
     spec_path = next((tmp_path / "data" / "calibrations").glob(f"calibration-{job['id']}.spec.json"))
     spec = json.loads(spec_path.read_text())
     assert spec["port"] == 1933
-    assert spec["argv"][:2] == ["-m", "freetoken"] and "--speculative" in spec["argv"]
+    assert spec["argv"][:2] == ["-m", "freetoken"]
+    # lookup は現行エンジンのバックエンドではないので argv には立てない (off)
+    assert "--speculative-algorithm" not in spec["argv"]
     # 前回の勝者 env を基準腕に漏らさない (ツールの規則を先に守る) / 他 env は保持
     assert spec["env"] == {"X": "1"}
     # MTP プロファイルは従来どおり in-process sweep
@@ -1221,6 +1384,43 @@ def test_freetoken_multi_none_winner_still_clears_stale_knobs(tmp_path):
     saved = json.loads((tmp_path / "profiles.json").read_text())[0]["env"]
     # 「この PC では併発しない」も正直に起動構成へ: 実験中に残った ON を消す
     assert saved["FREETOKEN_PIPED_PREFILL"] == "0"
+
+
+def test_freetoken_multi_config_mode_clears_stale_profile_override(tmp_path):
+    """config 主体モードでは勝者は起動 JSON へ書かれるが、起動時のマージは
+    JSON <- profile.env 上書き。profile 側に古い実験値 (MIXED=1024) が残ると
+    敗者のノブが復活するため、勝者キーは profile 側からも除去する。"""
+    j = _write_launch_json(tmp_path, prof_id="p_ftm2",
+                           env={"FREETOKEN_PIPED_PREFILL": "1",
+                                "FREETOKEN_MIXED_PREFILL_TOKENS": "0"})
+    prof = _ft_multi_profile(env={"X": "1", "FREETOKEN_MIXED_PREFILL_TOKENS": "1024",
+                                  "FREETOKEN_CHUNK_TIMING": "1"})
+    prof["values"]["config"] = str(j)
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+
+    async def fake_step(job, step):
+        name, doc, env = _multi_doc(job["id"], "piped-sf")
+        (tmp_path / "data" / "calibrations" / name).write_text(json.dumps(doc))
+        return 0, ""
+    mgr._run_step = fake_step
+
+    async def go():
+        job = await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    saved = json.loads((tmp_path / "profiles.json").read_text())[0]["env"]
+    assert "FREETOKEN_MIXED_PREFILL_TOKENS" not in saved   # 古い 1024 を居残らせない
+    assert saved["X"] == "1" and saved["FREETOKEN_CHUNK_TIMING"] == "1"  # 無関係 env は保持
+    launch = json.loads(j.read_text())["env"]
+    assert launch["FREETOKEN_MIXED_PREFILL_TOKENS"] == "0"
+    assert launch["FREETOKEN_ADMIT_SHORT_FIRST"] == "1024"
+    # 起動時マージ (backends.render_argv: JSON <- profile 上書き) が勝者値になる
+    assert {**launch, **saved}["FREETOKEN_MIXED_PREFILL_TOKENS"] == "0"
 
 
 def test_freetoken_multi_missing_report_fails_job(tmp_path):
@@ -1675,13 +1875,15 @@ def test_auto_demotes_single_winner_that_loses_at_parallel(tmp_path):
     assert mb_call[3] == 4                            # par_n = --max-running-requests
     rep = job["report"]
     assert rep["backend"] == "freetoken-auto" and rep["applied"] is True
-    # 単流最優 lookup (66) は並行 86 < 95*0.98 → lookup-mb に差し替え
-    assert rep["settings"]["--speculative"] == "lookup"
+    # 単流最優 lookup (66) は並行 86 < 95*0.98 → lookup-mb に差し替え。
+    # lookup 勝者でもサーバーは off (現行エンジンに lookup バックエンドは無い)
+    assert rep["settings"]["--speculative-algorithm"] == "off"
     assert rep["settings"]["FREETOKEN_LOOKUP_MAX_BATCH"] == "4"
     assert rep["settings"]["FREETOKEN_LOOKUP_MIN_ACCEPTANCE"] == "0.7"
     assert "差し替え" in rep["rule"] and rep["improvement_pct"] == 32.0
     saved = json.loads((tmp_path / "profiles.json").read_text())[0]
-    assert saved["values"]["speculative"] == "lookup"
+    assert saved["values"]["speculative_algorithm"] == ""
+    assert "speculative" not in saved["values"]
     assert saved["env"]["FREETOKEN_LOOKUP_MAX_BATCH"] == "4"
 
 
@@ -1717,11 +1919,12 @@ def test_auto_mtp_winner_writes_mtp_env_and_mode(tmp_path):
         return mgr.jobs[j["id"]]
     job = asyncio.run(go())
     rep = job["report"]
-    assert rep["settings"]["--speculative"] == "mtp"
+    assert rep["settings"]["--speculative-algorithm"] == "mtp"
     assert rep["settings"]["FREETOKEN_MTP_MIN_P"] == "0.3"
     assert rep["improvement_pct"] == 40.0
     saved = json.loads((tmp_path / "profiles.json").read_text())[0]
-    assert saved["values"]["speculative"] == "mtp"     # lookup → mtp へ書き換え
+    assert saved["values"]["speculative_algorithm"] == "mtp"   # lookup → mtp へ書き換え
+    assert "speculative" not in saved["values"]
     assert saved["env"]["FREETOKEN_MTP_MIN_P"] == "0.3"
 
 
@@ -1739,7 +1942,7 @@ def test_auto_lookup_phase_failure_only_drops_lookup(tmp_path):
     assert job["status"] == "done", job.get("error")
     assert [c[0] for c in calls["final"] if c[0].startswith("final-")] == ["final-none", "final-mtp"]
     assert any("lookup CLI が失敗" in ln for ln in job["logs"])
-    assert job["report"]["settings"]["--speculative"] == "mtp"
+    assert job["report"]["settings"]["--speculative-algorithm"] == "mtp"
 
 
 def test_auto_config_mode_writes_launch_json(tmp_path):
@@ -1757,7 +1960,8 @@ def test_auto_config_mode_writes_launch_json(tmp_path):
     job = asyncio.run(go())
     assert job["status"] == "done", job.get("error")
     doc = json.loads(j.read_text())
-    assert doc["argv"][doc["argv"].index("--speculative") + 1] == "lookup"   # none → lookup
+    # lookup 勝者: 旧 --speculative は剥がされ、現行フラグは立たない (off)
+    assert "--speculative" not in doc["argv"] and "--speculative-algorithm" not in doc["argv"]
     assert doc["env"]["FREETOKEN_LOOKUP_MAX_BATCH"] == "4"
     assert doc["env"]["X"] == "1"
     saved = json.loads((tmp_path / "profiles.json").read_text())[0]
@@ -1827,7 +2031,7 @@ def test_auto_mtp_phase_failure_only_drops_mtp(tmp_path):
     assert job["status"] == "done", job.get("error")
     assert [c[0] for c in calls["final"] if c[0].startswith("final-")] == ["final-none", "final-lookup", "final-lookup-mb"]
     assert any("MTP sweep 失敗" in ln for ln in job["logs"])
-    assert job["report"]["settings"]["--speculative"] == "lookup"
+    assert job["report"]["settings"]["--speculative-algorithm"] == "off"
 
 
 def test_auto_phase_d_micro_tuning_adopts_only_safe_wins(tmp_path):
@@ -1941,7 +2145,7 @@ def test_auto_micro_adopts_wiring_for_mtp_winner(tmp_path):
     job = asyncio.run(go())
     assert job["status"] == "done", job.get("error")
     rep = job["report"]
-    assert rep["settings"]["--speculative"] == "mtp"
+    assert rep["settings"]["--speculative-algorithm"] == "mtp"
     assert rep["settings"]["FREETOKEN_MTP_WIRING"] == "norm_mix_fc"
     assert rep["improvement_pct"] == 50.0                    # 75/50 - 1
     saved = json.loads((tmp_path / "profiles.json").read_text())[0]

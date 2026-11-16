@@ -214,6 +214,7 @@ def test_config_json_maps_each_section():
     # パスは config ファイル基準の相対解決になるため絶対化する
     assert entry["model"] == "/r/models/Q.basalt"
     # --gpu / --parallel / --vision / --alias は basalt の分類どおりモデル側
+    # (gpu は MODEL_OPTIONS 所属。server に書くと純正パーサが拒否する)
     assert entry["gpu"] == "0,1"
     assert entry["parallel"] == 4
     assert entry["slot-full-context"] is True
@@ -225,6 +226,41 @@ def test_config_json_maps_each_section():
                              "lazy": True, "max-payload-mib": 64}
     # api-key は config に書けない (CLI のみ)
     assert "api-key" not in json.dumps(cfg)
+
+
+BASALT_VENV_PY = ROOT / "module" / "basalt" / ".venv" / "bin" / "python"
+
+
+@pytest.mark.skipif(not BASALT_VENV_PY.exists(), reason="basalt の .venv が無い (純正パーサで検証できない)")
+def test_generated_config_passes_basalt_own_parser(tmp_path: Path):
+    """生成 basalt_config.json とインストール雛形が純正 serve/config.py のローダを通ること。
+    分類の取り違え (gpu を server へ書く等) を純正パーサが弾くことを相互検証で固定する
+    (2026-11-11 のコード監査で追加。gpu は models[] / engine が正)。"""
+    import subprocess
+
+    def load(doc: dict) -> subprocess.CompletedProcess:
+        p = tmp_path / "basalt_config.json"
+        p.write_text(json.dumps(doc), encoding="utf-8")
+        code = ("import sys; sys.path.insert(0, sys.argv[1]);"
+                "from serve.config import build_parser, load_config_file;"
+                "load_config_file(sys.argv[2], build_parser()); print('ok')")
+        return subprocess.run([str(BASALT_VENV_PY), "-c", code,
+                               str(ROOT / "module" / "basalt"), str(p)],
+                              capture_output=True, text=True, timeout=60)
+
+    prof = _profile(model="models/Q.basalt", gpu="0,1", host="0.0.0.0", port="8080",
+                    parallel="4", kv="int8", max_context="32768")
+    cfg = backends.basalt_config_for(prof, root=tmp_path)
+    r = load(cfg)
+    assert r.returncode == 0 and "ok" in r.stdout, r.stderr
+    seed = INSTALL_SPECS["basalt"]["config_seed"]["doc"]
+    r = load(seed)
+    assert r.returncode == 0 and "ok" in r.stdout, r.stderr
+    # 取り違え形式 (gpu が server 側) は純正パーサが拒否する = 分類が正しい証拠
+    bad = json.loads(json.dumps(cfg))
+    bad["server"]["gpu"] = bad["models"][0].pop("gpu")
+    r = load(bad)
+    assert r.returncode != 0 and "model setting" in r.stderr
 
 
 def test_config_json_honours_off_fields_and_requires_model():
@@ -409,8 +445,10 @@ def test_basalt_is_strata_family_for_stop_drain():
 
 
 def test_hf_cache_scan_recognizes_basalt_packs(tmp_path: Path):
-    """.basalt pack を has_weights として認識し、ファイル一覧 (basalt) を出すこと。
-    これが無いと「ダウンロード済みのモデルを使う」や編集画面の HF ピッカーから消える。"""
+    """.basalt pack はファイル一覧 (basalt) に出すこと。これが無いと basalt の
+    「ダウンロード済みのモデルを使う」や編集画面の HF ピッカーから消える。
+    一方 has_weights (汎用重み) には含めない — 含めると FreeToken 等
+    他バックエンドの一覧に basalt pack が漏れてしまう (2026-11-11 報告)。"""
     from llm_launcher.app import scan_hf_cache
 
     repo = tmp_path / "models--jesdga--Qwen3.8-Flash-Next-Basalt"
@@ -422,8 +460,13 @@ def test_hf_cache_scan_recognizes_basalt_packs(tmp_path: Path):
     (snap / "README.md").write_text("docs")
     m = next(x for x in scan_hf_cache(tmp_path)["models"]
              if x["repo_id"] == "jesdga/Qwen3.8-Flash-Next-Basalt")
-    assert m["has_weights"] is True
+    assert m["has_weights"] is False
     assert [f["name"] for f in m["basalt"]] == ["Qwen3.8-FN-NVFP4-DQ6_K.basalt"]
+    # 汎用重みが同居する repo は従来どおり has_weights (DIR 指定で他バックエンドも使える)
+    (snap / "model.safetensors").write_bytes(b"x" * ((1 << 20) + 1))
+    m2 = next(x for x in scan_hf_cache(tmp_path)["models"]
+              if x["repo_id"] == "jesdga/Qwen3.8-Flash-Next-Basalt")
+    assert m2["has_weights"] is True
 
 
 @pytestmark_table

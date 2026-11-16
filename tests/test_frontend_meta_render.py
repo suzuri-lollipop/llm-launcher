@@ -43,6 +43,22 @@ def test_usage_counts_are_number_normalised():
     assert "Number(m.usage.prompt_tokens)" in SRC
 
 
+def test_playground_thinking_toggle_is_forwarded():
+    """思考トグルがエンジンへ届くこと: Qwen3 系は既定で本文より先に思考が流れ、
+    オフにできないとプレイグラウンドは生成開始が遅く見える (プロキシが
+    chat_template_kwargs を捨てていた回帰)。"""
+    assert 'id="pg-think"' in SRC
+    assert 'enable_thinking: $("#pg-think").checked' in SRC
+    assert 'thinking: $("#pg-think") ? $("#pg-think").checked : true' in SRC
+
+
+def test_playground_thinking_phase_shows_reasoning_live():
+    """本文未開始の思考フェーズは推論 details を開く: 折りたたみ + 「考え中…」
+    だけだと生成が開始されていないように誤認される。"""
+    assert "const thinking = m.streaming && !m.content;" in SRC
+    assert re.search(r'class="pg-reason"\$\{thinking \? " open" : ""\}', SRC)
+
+
 def test_legitimate_escaping_survives():
     """esc() removals must stay surgical — these carry untrusted text."""
     for needle in ("esc(m.reasoning)",        # assistant reasoning body

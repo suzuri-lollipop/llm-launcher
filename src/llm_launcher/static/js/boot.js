@@ -7,6 +7,7 @@ pgInit();
 bmInit();
 calInit();
 insInit();
+mmInit();
 $("#pg-input").addEventListener("keydown", e => {
   if (e.key !== "Enter" || e.shiftKey) return;
   if (e.isComposing || e.keyCode === 229) return;   // IME 変換中の Enter では送信しない
