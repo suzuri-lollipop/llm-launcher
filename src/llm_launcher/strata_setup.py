@@ -141,25 +141,37 @@ print(json.dumps({"families": fams, "contexts": list(getattr(S, "CONTEXTS", []))
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL = 60.0
+# 読み出し失敗は長くキャッシュしない (maya_setup と同じ規律): 短いバックオフで
+# 再試行し、その間は直近の成功表を返す — 高負荷時の timeout でウィザードが死ぬのを防ぐ
+_FAIL: dict[str, float] = {}
+_FAIL_RETRY = 10.0
+_GOOD_MAX_AGE = 600.0
+_READ_TIMEOUT = 180.0
 
 VISIONS = ["yes", "no", "gpu", "cpu"]
 
 
 def load_options(module_dir: Path) -> dict[str, Any]:
-    """submodule 純正の表を JSON で読む。未 clone / 読み出し失敗なら {"available": false}。"""
+    """submodule 純正の表を JSON で読む。未 clone / 読み出し失敗なら {"available": false}。
+    失敗時は直近の成功表 (10 分以内) を返し、短いバックオフで再試行する。"""
     if not (module_dir / "setup.py").is_file():
         return {"available": False, "families": {}, "contexts": [], "pc": {}}
     key = str(module_dir)
+    now = time.monotonic()
     hit = _CACHE.get(key)
-    if hit and time.monotonic() - hit[0] < _CACHE_TTL:
+    if hit and now - hit[0] < _CACHE_TTL:
         return hit[1]
+    stale = hit[1] if hit and now - hit[0] < _GOOD_MAX_AGE else None
+    unavailable = {"available": False, "families": {}, "contexts": [], "pc": {}}
+    if key in _FAIL and now - _FAIL[key] < _FAIL_RETRY:
+        return stale if stale is not None else unavailable
     py = module_dir / ".venv" / "bin" / "python"
     if not py.exists():
         py = Path(sys.executable)
     out: dict[str, Any] = {"available": False, "families": {}, "contexts": [], "pc": {}}
     try:
         proc = subprocess.run([str(py), "-c", _DUMP_SNIPPET], cwd=str(module_dir),
-                              capture_output=True, text=True, timeout=30,
+                              capture_output=True, text=True, timeout=_READ_TIMEOUT,
                               env=dict(os.environ, PYTHONNOUSERSITE="1"))
         text = proc.stdout.strip()
         data = None
@@ -180,8 +192,12 @@ def load_options(module_dir: Path) -> dict[str, Any]:
             out = data
     except Exception:  # noqa: BLE001 — 表が読めないだけでセットアップ全体を止めない
         pass
-    _CACHE[key] = (time.monotonic(), out)
-    return out
+    if out.get("available"):
+        _CACHE[key] = (time.monotonic(), out)
+        _FAIL.pop(key, None)
+        return out
+    _FAIL[key] = time.monotonic()
+    return stale if stale is not None else out
 
 
 _SHARD_RE = re.compile(r"^(.*-)(\d{5})-of-(\d{5})(\.\w+)$")
@@ -295,10 +311,12 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
         raise ValueError("context が不正です")
     if vision and vision not in VISIONS:
         raise ValueError(f"vision が不正です ({'/'.join(VISIONS)})")
+    if not (module_dir / "setup.py").is_file():
+        raise ValueError("Strata のソースが未取得です (git submodule update --init module/strata)")
     data = load_options(module_dir)
     if not data.get("available"):
-        raise ValueError("Strata セットアップの表を読めません "
-                         "(module/strata を submodule update --init で更新してください)")
+        raise ValueError("Strata セットアップの表を読み出せませんでした "
+                         "(PC が高負荷の可能性があります — 少し待ってから再試行してください)")
     fams: dict[str, Any] = data.get("families") or {}
     if fam not in fams or not fams[fam].get("models"):
         raise ValueError(f"family が一覧にありません: {fam}")

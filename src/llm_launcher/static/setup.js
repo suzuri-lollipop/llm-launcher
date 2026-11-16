@@ -648,7 +648,7 @@ function mdStHint() {
   const isMaya = W.backend === "maya";
   const name = isMaya ? "Maya" : "Strata";
   const pc = st.pc || {}; const parts = [];
-  if (!st.available) parts.push(`${name} のモデル一覧が読めません — 前に戻って ① インストールを先に実行してください`);
+  if (!st.available) parts.push(`${name} のモデル一覧を読み出せませんでした (PC が高負荷の可能性) — 少し待ってからもう一度お試しください`);
   else if (!st.venv_ready) parts.push(`${name} の実行環境 (.venv) がまだありません — 前に戻って ① インストールを実行してください`);
   if (d.about) parts.push(d.about);
   const h = d.have || {};
