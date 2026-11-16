@@ -422,11 +422,33 @@ def _choices(node: ast.AST, defaults: dict, consts: dict | None = None) -> list[
                 result.append(e.value)
             elif isinstance(e, ast.Starred):
                 src: list[str] = []
-                nm = ast.unparse(e.value).strip()
-                if nm in consts:
-                    src = [str(x) for x in consts[nm]]
-                elif nm in defaults:
-                    src = re.findall(r'"([^"]+)"', defaults[nm])
+                inner = e.value
+                gen = (inner.generators[0]
+                       if isinstance(inner, ast.GeneratorExp) and len(inner.generators) == 1
+                       else None)
+                if gen is not None and isinstance(gen.iter, ast.Name) and gen.iter.id in consts:
+                    # *(name for name in REGISTRY if name != X.name): レジストリ列を展開し除外フィルタを適用
+                    src = [str(x) for x in consts[gen.iter.id]]
+                    for cond in gen.ifs:
+                        if not (isinstance(cond, ast.Compare) and len(cond.ops) == 1
+                                and isinstance(cond.ops[0], ast.NotEq)
+                                and isinstance(cond.left, ast.Name)
+                                and isinstance(gen.target, ast.Name)
+                                and cond.left.id == gen.target.id):
+                            continue
+                        comp = cond.comparators[0]
+                        if isinstance(comp, ast.Constant) and isinstance(comp.value, str):
+                            src = [x for x in src if x != comp.value]
+                        elif (isinstance(comp, ast.Attribute) and comp.attr == "name"
+                                and isinstance(comp.value, ast.Name)
+                                and comp.value.id in consts):
+                            src = [x for x in src if x not in consts[comp.value.id]]
+                else:
+                    nm = ast.unparse(inner).strip()
+                    if nm in consts:
+                        src = [str(x) for x in consts[nm]]
+                    elif nm in defaults:
+                        src = re.findall(r'"([^"]+)"', defaults[nm])
                 result.extend(x for x in src if x not in result)
     return result
 
