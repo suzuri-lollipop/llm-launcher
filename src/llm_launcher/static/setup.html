@@ -16,7 +16,7 @@
   <section class="step" id="s-login">
     <div class="kicker">セットアップ</div>
     <h1>続けるにはログインしてください</h1>
-    <p class="sub">セットアップには <b>インストール権限</b> を持つアカウントが必要です。</p>
+    <p class="sub" id="login-sub">セットアップには <b>インストール権限</b> を持つアカウントが必要です。</p>
     <div class="foot-btns"><span class="spacer"></span>
       <a class="btn" href="/">ログインする</a></div>
   </section>
@@ -25,7 +25,7 @@
   <section class="step" id="s-perm">
     <div class="kicker">セットアップ</div>
     <h1>この画面を使う権限がありません</h1>
-    <p class="sub">セットアップ (インストール) は管理者 / インストール権限のあるアカウントだけで実行できます。</p>
+    <p class="sub" id="perm-sub">セットアップ (インストール) は管理者 / インストール権限のあるアカウントだけで実行できます。</p>
     <div class="foot-btns"><span class="spacer"></span>
       <a class="btn" href="/">ホームへ戻る</a></div>
   </section>
@@ -34,19 +34,39 @@
   <section class="step" id="s-welcome">
     <div class="kicker">セットアップ</div>
     <h1>環境をセットアップします</h1>
-    <p class="sub tight">このウィザードでは次の 3 つだけを順番に行います。</p>
+    <p class="sub tight">設定をまとめて終えてから、ダウンロード / セットアップを実行します。</p>
     <ol class="plan">
       <li><span class="n">1</span><span>バックエンドのインストール</span></li>
-      <li><span class="n">2</span><span>モデルのダウンロード</span></li>
-      <li><span class="n">3</span><span>調整 <span class="note">(任意)</span></span></li>
+      <li><span class="n">2</span><span>モデルと設定を選ぶ <span class="note">(稼働設定 / 接続設定)</span></span></li>
+      <li><span class="n">3</span><span>ダウンロード / セットアップ → 調整 <span class="note">(任意)</span></span></li>
     </ol>
     <div class="foot-btns"><span class="spacer"></span>
       <button class="btn" data-go="s-backend">はじめる</button></div>
+    <p class="hint" style="margin-top:14px">インストール / ダウンロードが済みなら
+      <a href="/setup?flow=profile">プロファイル作成と調整 (キャリブレーション) だけ</a> もできます。</p>
+  </section>
+
+  <!-- 1p. ようこそ (プロファイル作成 + 調整のみ: /setup?flow=profile) -->
+  <section class="step" id="s-welcome-profile">
+    <div class="kicker">セットアップ — プロファイル</div>
+    <h1>プロファイルを作って調整します</h1>
+    <p class="sub tight">インストール / モデルダウンロードが済みの環境で、起動プロファイルの作成と
+      この PC 向けの調整 (キャリブレーション) だけを行います。新しいダウンロードは起きません。</p>
+    <ol class="plan">
+      <li><span class="n">1</span><span>バックエンドとダウンロード済みのモデルを選ぶ</span></li>
+      <li><span class="n">2</span><span>稼働設定 <span class="note">(コンテキスト長 / KV / GPU / 並列数)</span></span></li>
+      <li><span class="n">3</span><span>接続設定 <span class="note">(ホスト / ポート / APIキー)</span></span></li>
+      <li><span class="n">4</span><span>調整 (キャリブレーション) <span class="note">(任意)</span></span></li>
+    </ol>
+    <div class="foot-btns"><span class="spacer"></span>
+      <button class="btn" data-go="s-backend">はじめる</button></div>
+    <p class="hint" style="margin-top:14px">バックエンドのインストール / モデルのダウンロードが必要なときは
+      <a href="/setup">通常のセットアップ</a> へ。</p>
   </section>
 
   <!-- 2. バックエンド選択 (Google のアカウント選択風ラジオ一覧) -->
   <section class="step" id="s-backend">
-    <div class="kicker">ステップ 1 / 5 — インストール</div>
+    <div class="kicker" id="be-kicker">ステップ 1 / 5 — インストール</div>
     <h1>インストールするソフトを選択</h1>
     <p class="sub">セットアップするバックエンドを選んでください。</p>
     <div class="opt-list" id="be-list"></div>
@@ -117,7 +137,7 @@
 
   <!-- 5. モデル選択 (2択: 一覧からダウンロード / 済みモデルを使う) -->
   <section class="step" id="s-model">
-    <div class="kicker">ステップ 2 / 5 — モデル</div>
+    <div class="kicker" id="md-kicker">ステップ 2 / 5 — モデル</div>
     <h1>使うモデルを決めます</h1>
     <p class="sub tight" id="md-sub">新しいモデルをダウンロードするか、この PC ですでにダウンロード済みのモデルを使うかを選んでください。</p>
     <div class="opt-list" id="md-modes">
@@ -128,7 +148,8 @@
         <span class="txt"><span class="t1" id="md-local-mode-t1">ダウンロード済みのモデルを使う</span>
         <span class="t2" id="md-local-mode-t2">この PC にあるモデルから選びます (再取得しません)</span></span></label>
     </div>
-    <!-- Strata 用: 純正 setup.py を --yes (非対話) で走らせる選択面板 (renderModel が切替) -->
+    <!-- Strata / Maya 用: 純正セットアップ (setup.py / maya.py) を --yes (非対話) で
+         走らせる選択面板 (renderModel が切替。id は strata のまま共通利用) -->
     <div class="hidden" id="md-strata">
       <div class="field sel-fixed"><select id="md-family"></select>
         <label for="md-family">モデルの家系</label></div>
@@ -136,11 +157,10 @@
         <label for="md-size">サイズ (量子化)</label></div>
       <div class="field sel-fixed"><select id="md-ctx"></select>
         <label for="md-ctx">コンテキスト長</label></div>
-      <div class="field sel-fixed hidden" id="md-gpu-field"><select id="md-gpu"></select>
-        <label for="md-gpu">GPU の使い方</label></div>
+      <!-- GPU の使い方 (複数枚共有) は ③ 稼働設定で聞く (FreeToken 基準の GPU 分割質問と同じ位置) -->
       <label class="opt" id="md-vision-opt"><input type="checkbox" id="md-vision" checked>
         <span class="txt"><span class="t1">画像も読ませる (ビジョン)</span>
-        <span class="t2">ON のままなら Strata がこの PC に合う読み方 (VRAM に応じて GPU/CPU エンコーダ) を選びます。オフにすると画像リクエストは使えません</span></span></label>
+        <span class="t2" id="md-vision-t2">ON のままなら Strata がこの PC に合う読み方 (VRAM に応じて GPU/CPU エンコーダ) を選びます。オフにすると画像リクエストは使えません</span></span></label>
       <p class="hint" id="md-strata-hint"></p>
     </div>
     <div class="field sel-fixed hidden" id="md-strata-exist-field"><select id="md-strata-exist"></select>
@@ -208,7 +228,7 @@
 
   <!-- 5c. 稼働設定 (キャリブレーションの前に決める最小限の値) -->
   <section class="step" id="s-config">
-    <div class="kicker">ステップ 3 / 5 — 稼働設定</div>
+    <div class="kicker" id="cf-kicker">ステップ 3 / 5 — 稼働設定</div>
     <h1>最基本的な値を決めます</h1>
     <p class="sub" id="cf-sub">これらの値はキャリブレーションの計測とサーバー起動に使われます。後からダッシュボードでも変更できます。</p>
     <div class="field"><input id="cf-name" type="text" placeholder=" " autocomplete="off" spellcheck="false">
@@ -222,7 +242,7 @@
     </div>
   </section>
   <section class="step" id="s-net">
-    <div class="kicker">ステップ 4 / 5 — 接続設定</div>
+    <div class="kicker" id="nt-kicker">ステップ 4 / 5 — 接続設定</div>
     <h1>アクセス方法を決めます</h1>
     <p class="sub" id="nt-sub">サーバーの待ち受け先と API キーです。後からダッシュボードでも変更できます。</p>
     <div class="field"><input id="nt-host" type="text" placeholder=" " autocomplete="off" spellcheck="false">
@@ -244,7 +264,7 @@
 
   <!-- 6. 調整 (キャリブレーション) -->
   <section class="step" id="s-cal">
-    <div class="kicker">ステップ 5 / 5 — 調整 (任意)</div>
+    <div class="kicker" id="ca-kicker">ステップ 5 / 5 — 調整 (任意)</div>
     <h1>この PC に合わせますか?</h1>
     <p class="sub" id="ca-sub">調整 (キャリブレーション) はこの機械向けの性能調整です。実行中は GPU を独占します。</p>
     <div class="opt-list" id="ca-list">
@@ -265,10 +285,12 @@
   <!-- 7. 完了 -->
   <section class="step" id="s-done">
     <div class="ok-icon">✓</div>
-    <h1>セットアップが完了しました</h1>
-    <p class="sub">ダッシュボードでモデルを起動し、チャットやベンチマークが使える状態です。</p>
+    <h1 id="dn-title">セットアップが完了しました</h1>
+    <p class="sub" id="dn-sub">ダッシュボードでモデルを起動し、チャットやベンチマークが使える状態です。</p>
     <ul class="sum" id="dn-sum"></ul>
-    <div class="foot-btns"><span class="spacer"></span>
+    <div class="foot-btns">
+      <a class="btn-text hidden" id="dn-profiles" href="/#/profiles">プロファイル管理へ</a>
+      <span class="spacer"></span>
       <a class="btn" href="/">ダッシュボードへ</a></div>
   </section>
 
