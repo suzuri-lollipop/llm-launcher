@@ -152,6 +152,10 @@ pre.cmdprev{
   background:#f8f9fa;border:1px solid var(--line);border-radius:var(--r2);
   height:320px;overflow:auto;padding:10px 12px;margin-top:10px;
   font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-all;color:#3c4043}
+.bm-text{
+  background:#f8f9fa;border:1px solid var(--line);border-radius:var(--r2);
+  max-height:340px;overflow:auto;padding:10px 12px;margin:0;
+  font-family:ui-monospace,Menlo,Consolas,monospace;font-size:11.5px;white-space:pre-wrap;word-break:break-word;color:#3c4043}
 details.adv{border:1px solid var(--line);border-radius:var(--r2);margin-top:12px;background:var(--bg2)}
 details.adv summary{padding:10px 12px;font-size:13px;color:var(--sub);cursor:pointer;min-height:42px;display:flex;align-items:center}
 details.adv .inner{padding:0 12px 12px}

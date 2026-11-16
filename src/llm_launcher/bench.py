@@ -41,6 +41,13 @@ SAMPLE_EVERY = 1.0
 MAX_SAMPLES = 180
 MAX_REQS = 256        # フェーズ記録 (reqs) の段あたり保存点数上限 (超えら等間隔間引き)
 MAX_STORE_BYTES = 8_000_000  # bench.json の概算上限 (超えたら古い完了分から整理)
+# デコード出力 (生成テキスト) の記録: 「出力が止まらない」等の判断を結果だけで
+# できるように、リクエスト毎に生成テキストと finish_reason を残す。全文は保存量
+# が膨らむため、1 本あたり TEXT_REQ_MAX 文字を上限に先頭 + 末尾だけ保存する
+# (繰り返しループは末尾に出る)。段全体でも TEXT_STAGE_BUDGET を超えないよう、
+# リクエスト数が多いときは 1 本あたりの上限を自動的に縮める。
+TEXT_REQ_MAX = 4000
+TEXT_STAGE_BUDGET = 240_000
 
 # 生成中の「人間の体感停止」の閾値: ストリームのチャンク間隔がこれを超えたら
 # 1 回と数える (stall_count)。最長停止 (stall_worst_s / gap_max) は閾値と無関係に
@@ -206,6 +213,24 @@ def est_tokens(s: str) -> int:
     return max(1, round(cjk * 0.6 + words))
 
 
+def _text_fields(full: str, cap: int) -> dict[str, Any]:
+    """生成テキストの保存形 (先頭 + 末尾・文字数上限つき)。cap<=0 は保存しない。
+
+    tx=全文 (上限内) または先頭半分 / tx2=末尾半分 (超過時のみ) / txn=切り詰め前の
+    全文字数。UI は「…中略…」を挟んで表示する。キー名はフェーズスロット (reqs) と
+    共通 — 読み手スレッドが live スロットへそのまま write できる。"""
+    if cap <= 0:
+        return {}
+    out: dict[str, Any] = {"txn": len(full)}
+    if len(full) <= cap:
+        out["tx"] = full
+    else:
+        head = cap // 2
+        out["tx"] = full[:head]
+        out["tx2"] = full[len(full) - (cap - head):]
+    return out
+
+
 # ------------------------------------------------------------------- http
 
 
@@ -245,7 +270,8 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
                  stream: bool, timeout: float,
                  auth: dict[str, str] | None = None,
                  stop: threading.Event | None = None,
-                 live: "dict[str, float] | None" = None) -> dict[str, Any]:
+                 live: "dict[str, Any] | None" = None,
+                 text_cap: int = 0) -> dict[str, Any]:
     """OpenAI 互換リクエストを 1 本実行し、所要時間・TTFT・トークン数を返す。
 
     例外は投げず ok/error で結果を返す (ワーカー側を集計しやすくするため)。
@@ -254,7 +280,11 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
     live を渡すと、content が届くたびに est_tokens(piece) を即时加算する
     (単一書きのスレッド専用スロット)。サンプラーがこの合計の 1 秒あたりの
     増分を測ることで、「完了時にまとめて確定」ではなく「その秒に実際に生成された
-    トークン」を経時記録できる。"""
+    トークン」を経時記録できる。
+    text_cap>0 で生成テキスト (先頭 + 末尾・上限つき) を tx/tx2/txn に返し、
+    live スロットにも同じキーで書く (中断で打ち切られても途中までの生成が残る)。
+    finish_reason は常に返す (stop=自然終了 / length=max_tokens 打ち切りが
+    「出力が止まらない」かの判断材料になる)。warmup は text_cap=0 で文字を捨てる。"""
     t0 = time.perf_counter()
     req = urllib.request.Request(
         base + path,
@@ -328,6 +358,7 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
     ttf: float | None = None
     usage: dict[str, Any] = {}
     text_parts: list[str] = []
+    fr: str | None = None      # finish_reason (stop=自然終了 / length=max_tokens 打ち切り)
     # ストリーム停止の計測: 直前の content チャンク到着からの間隔を追い、
     # 最長間隔 (gap_max) と STALL_S 以上の間隔の回数 (stalls) を記録する。
     # 送信->最初のトークンは TTFT として別途記録されるため含めない。
@@ -353,14 +384,18 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
             # TTFT は取れない (一括応答なので最初のトークン時刻が存在しない)。
             # ttft=None のまま decode 速度を割らないよう、呼び出し側が除外する。
             _finish_timer()
+            tf = _text_fields(txt, text_cap)
             if live is not None:
                 # 非ストリームは「到着」が存在しないので、確定した全部を一度に加算する
                 # (経時グラフ上は完了の瞬間のバースになる — それが実態)
                 live["f"] += int(out) if out is not None else est
+                live.update(tf)
             return {"ok": True, "secs": time.perf_counter() - t0, "ttft": None,
                     "out_tokens": int(out) if out is not None else est,
                     "in_tokens": usage.get("prompt_tokens"),
                     "gap_max": None, "stalls": 0,
+                    "finish_reason": ch.get("finish_reason"),
+                    **tf,
                     "estimated": "completion_tokens" not in usage or "prompt_tokens" not in usage}
         # SSE を「改行までのデータ」単位で読む。
         # - `for line in resp` (io のバッファ経由) はサーバーが接続を閉じるまで返らない
@@ -369,28 +404,40 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
         # ため、HTTPResponse にラップされる前の生ソケットから読み、行は自前で分割する。
         # shutdown (中断) で recv は即座に EOF を返し、届いている行は処理してから抜ける。
         sock = resp.fp.raw._sock
+        # ヘッダ読み込み (begin) が最初の SSE イベントまで fp のバッファに
+        # 引き込んでいることがある (ヘッダと初トークンが同じ TCP セグメントで届く
+        # 高速サーバー)。生ソケットだけ読むとその分が失われるため先に吸い出す。
+        # peek はバッファが空なら 1 回だけ raw read する (timeout + shutdown で
+        # 中断可能)。失敗しても buf=b"" で従来どおり生ソケット読みへフォールバック。
         buf = b""
+        with contextlib.suppress(Exception):
+            peeked = resp.fp.peek()
+            if peeked:
+                buf = resp.fp.read(len(peeked))
         cancelled = False
         done = False
         while not done and not cancelled:
             if _stopped():
                 cancelled = True
                 break
-            chunk = b""
-            try:
-                chunk = sock.recv(65536)
-            except OSError:
-                # タイムアウト (request_timeout 経過) や shutdown による中断
-                if _stopped():
-                    cancelled = True
+            # バッファに完全な行が残っているなら (先読みで吸い出した分を含む)
+            # recv を待たずに処理する — 既に届いている初トークンを次のチャンク
+            # 到着まで寝かせない (TTFT / デコード出力の先頭を正確にする)。
+            if b"\n" not in buf:
+                try:
+                    chunk = sock.recv(65536)
+                except OSError:
+                    # タイムアウト (request_timeout 経過) や shutdown による中断
+                    if _stopped():
+                        cancelled = True
+                        break
+                    raise
+                if not chunk:
+                    # EOF: サーバーが閉じた、または中断で shutdown した。中断なら
+                    # 「完了」ではなく cancelled として扱う (統計に完了扱いで入らないよう)
+                    cancelled = _stopped()
                     break
-                raise
-            if not chunk:
-                # EOF: サーバーが閉じた、または中断で shutdown した。中断なら
-                # 「完了」ではなく cancelled として扱う (統計に完了扱いで入らないよう)
-                cancelled = _stopped()
-                break
-            buf += chunk
+                buf += chunk
             *lines, buf = buf.split(b"\n")
             for raw in lines:
                 line = raw.strip()
@@ -407,6 +454,8 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
                 if isinstance(evt.get("usage"), dict):
                     usage = evt["usage"]
                 ch = (evt.get("choices") or [{}])[0] if evt.get("choices") else {}
+                if ch.get("finish_reason"):
+                    fr = str(ch["finish_reason"])   # 最後の non-null が確定値
                 delta = ch.get("delta") if isinstance(ch.get("delta"), dict) else None
                 if delta is not None:
                     piece = (delta.get("content") or delta.get("reasoning_content")
@@ -441,18 +490,24 @@ def _one_request(base: str, path: str, payload: dict[str, Any],
                     text_parts.append(piece)
                     if live is not None:
                         live["f"] += est_tokens(piece)   # 到着した分をその場で数える
-            if not chunk:
-                break          # サーバーが閉じた (EOF)
-    est = est_tokens("".join(text_parts))
+    full = "".join(text_parts)
+    est = est_tokens(full)
     out = usage.get("completion_tokens")
     out = int(out) if out is not None else est
     if not out and est:
         out = est
     _finish_timer()
+    tf = _text_fields(full, text_cap)
+    if live is not None:
+        # 読み手スレッドがスロットへ直接書く (tx/tx2/txn の単一書き手)。
+        # 中断 (cancelled) でもここは通る = 打ち切り時点までの生成テキストが残る。
+        live.update(tf)
     res = {"ok": True, "secs": time.perf_counter() - t0, "ttft": ttf,
            "out_tokens": out, "in_tokens": usage.get("prompt_tokens"),
            "gap_max": round(gap_max, 4) if gap_max is not None else None,
            "stalls": stalls,
+           "finish_reason": fr,
+           **tf,
            "estimated": "completion_tokens" not in usage or "prompt_tokens" not in usage}
     if cancelled:
         # 中断で途中終了したリクエストは統計 (tok/s) に混ぜない
@@ -680,7 +735,8 @@ class BenchManager:
                              timeout: float, auth: dict[str, str] | None,
                              stop: threading.Event,
                              cancelled: "Callable[[], bool] | None" = None,
-                             live: "dict[str, float] | None" = None) -> dict[str, Any]:
+                             live: "dict[str, Any] | None" = None,
+                             text_cap: int = 0) -> dict[str, Any]:
         """_one_request を 1 本のスレッドで実行して結果を返す。
 
         stop は中断シグナル (ソケット shutdown で読みを起こす)。cancelled は
@@ -693,7 +749,8 @@ class BenchManager:
 
         def run() -> None:
             try:
-                q.put(_one_request(base, path, body, stream, timeout, auth, stop, live=live))
+                q.put(_one_request(base, path, body, stream, timeout, auth, stop, live=live,
+                                   text_cap=text_cap))
             except BaseException as e:  # noqa: BLE001
                 q.put(e)
 
@@ -985,6 +1042,9 @@ class BenchManager:
         warm = int(params["warmup"])
         stream = bool(params["stream"])
         timeout = float(params["request_timeout"])
+        # デコード出力の保存上限 (1 本あたり)。リクエスト数が多い段は段全体の
+        # 予算 (TEXT_STAGE_BUDGET) に収まるよう自動で縮める (bench.json 肥大防止)。
+        text_cap = max(200, min(TEXT_REQ_MAX, TEXT_STAGE_BUDGET // max(1, n)))
         # 同時に張りすぎるとサーバー側の backlog や GIL 争奪で計測自体が歪む
         # (128 並列で偽サーバーが Connection reset を返した)。実運用の GPU サーバーも
         # これ以上は捌けないので、同時接続を 64 で頭打ちにする。
@@ -1027,7 +1087,7 @@ class BenchManager:
         # 増やし、サンプラーはその合計の 1 秒あたり増分 = agg (生成 tok/s 合算) を
         # 記録する。従来の win (完了確定分の累積差分) は旧データ互換のため残す。
         series: list[dict[str, Any]] = []
-        slots: list[dict[str, float]] = []   # リクエスト 1 本 = 1 スロット (単一書き手)
+        slots: list[dict[str, Any]] = []     # リクエスト 1 本 = 1 スロット (単一書き手)
         live = {"inf": 0}                    # インフライト数 (ワーカーが更新)
         run["progress"]["series"] = series
         iv = {"v": SAMPLE_EVERY, "dec": False}
@@ -1047,6 +1107,15 @@ class BenchManager:
             st = sl.get("st")
             if isinstance(st, float):
                 out["st"] = round(st, 3)
+            # デコード出力 (生成テキスト): tx=先頭 (or 全文) / tx2=末尾 (中略時のみ) /
+            # txn=全文字数 / fr=finish_reason。完了したリクエストにだけ付く。
+            if sl.get("tx") is not None:
+                out["tx"] = sl["tx"]
+                if sl.get("tx2") is not None:
+                    out["tx2"] = sl["tx2"]
+                out["txn"] = int(sl.get("txn") or 0)
+            if sl.get("fr"):
+                out["fr"] = sl["fr"]
             return out
 
         async def _sampler() -> None:
@@ -1081,17 +1150,23 @@ class BenchManager:
             live["inf"] += 1
             # フェーズ追跡スロット: s=送信 a=最初のトークン d=最後のトークン
             # e=確定(ストリームクローズ/応答読み切り) f=届いたトークン推定。
-            # 1 スロットの各キーは単一の書き手だけが更新する (s/e=ワーカー, a/d/f/g=読み手)。
+            # 1 スロットの各キーは単一の書き手だけが更新する
+            # (s/e/in/fr=ワーカー, a/d/f/g/tx/tx2/txn=読み手)。
             slot: dict[str, Any] = {"f": 0.0, "s": time.perf_counter(), "w": time.time()}
             slots.append(slot)
             try:
                 r = await self._one_in_thread(base, path, make_body(i), stream, timeout, auth, k,
-                                              lambda: self._cancelled(run), live=slot)
+                                              lambda: self._cancelled(run), live=slot,
+                                              text_cap=text_cap)
             finally:
                 live["inf"] -= 1
                 slot["e"] = time.perf_counter()
             if r.get("ok") and r.get("in_tokens") is not None:
                 slot["in"] = int(r["in_tokens"])   # サーバー内訳との突合キー
+            # finish_reason をスロットへ (生成テキスト tx/tx2/txn は読み手スレッドが
+            # live.update で直接書く — 中断で打ち切られても途中までの生成が残る)。
+            if r.get("finish_reason"):
+                slot["fr"] = str(r["finish_reason"])
             # 中断後に戻ってきた結果 (打ち切り or たまたま完了) は集計に入れない。
             # ここを素通りさせると「中断したのに ok=N」が保存される。
             if r.get("cancelled") or self._cancelled(run):
