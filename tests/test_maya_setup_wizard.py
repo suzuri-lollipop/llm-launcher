@@ -12,7 +12,7 @@ Maya の純正 maya.sh / maya.py は対話インストーラだが、--yes / --d
      で読み、選択肢をホワイトリスト検証するだけ)。エンジンビルド + pack + 速度計測も
      純正のこの中で走る。
   ③ 稼働設定は家系別: GLM / Qwen / MiniMax GGUF = --kv + gpu (layer split)、
-     DeepSeek / MiniMax EXL3 = --tp (--kv はエンジン固有で編集させない)。
+     DeepSeek / MiniMax EXL3 = gpu + --tp (カード枚数から導出。--kv はエンジン固有で編集させない)。
 見張る対象:
   1. spec の形 (venv_pip / tools_step / check_files)
   2. start_install の計画 — uv が在っても pip、install でなく tools step、
@@ -24,7 +24,8 @@ Maya の純正 maya.sh / maya.py は対話インストーラだが、--yes / --d
   6. /api/installs/maya-model の GET/POST と {jid} ルートとの衝突がないこと
   7. ② ジョブの result.parallel は args の --parallel (Maya の config 形)、
      config が出来ない完了は失敗として記録すること (maya.py は 0 で返るため)
-  8. ③ config-args の家系別ガード (GLM に --tp / DS4 に --kv / DS4 に gpu は 400)
+  8. ③ config-args の家系別ガード (GLM に --tp / DS4 に --kv は 400) と
+     DS4 の gpu 編集が --tp をカード枚数から導出すること (min(2, 枚数)、純正同款)
 """
 from __future__ import annotations
 
@@ -729,21 +730,55 @@ def test_glm_config_asks_kv_and_gpu_not_tp(client, monkeypatch):
                   json={"updates": {"gpu": "5"}}).status_code == 400
 
 
-def test_ds4_config_asks_tp_not_kv_nor_gpu(client, monkeypatch):
-    """DeepSeek (maya-ds4): --tp は編集可、--kv はエンジン固有 (編集不可)、gpu も --tp 側。"""
+def test_ds4_config_gpu_selection_derives_tp(client, monkeypatch):
+    """DeepSeek (maya-ds4): --kv はエンジン固有 (編集不可)。GPU の使い方 (gpu) は
+    全家系で編集でき、--tp は選んだカード枚数から導出される (純正 maya.py と同じ
+    min(2, 枚数))。--tp だけ書いて gpu を放置すると「tp=1 なのに 2 枚 layer split」
+    で起動 / 計測される (2026-11-16 実害: gpu:[0,1] + --tp 1)。"""
     c, root = client
     _seed_maya_gpus(monkeypatch, root)
-    _maya_cfg(root, "maya-ds4.json",
-              {"exe": "/x/maya-ds4", "args": ["--pack", "/p", "--max-context", "65536", "--tp", "2"]})
+    p = _maya_cfg(root, "maya-ds4.json",
+                  {"exe": "/x/maya-ds4", "args": ["--pack", "/p", "--max-context", "65536", "--tp", "2"],
+                   "gpu": [0, 1]})
     pid = _profile(c, "module/maya/maya-ds4.json")
     r = c.get(f"/api/profiles/{pid}/config-args").json()
     assert r["family"] == "deepseek" and r["kv_ok"] is False and r["tp_ok"] is True
+    assert r["gpu"] == "0,1" and r["gpus"] == [0, 1]
     assert c.post(f"/api/profiles/{pid}/config-args",
                   json={"updates": {"--kv": "int8"}}).status_code == 400
+    # 単一カード → gpu は int + --tp は 1 に導出 (「GPU 分割数 1」はこれで実現する)
+    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0"}})
+    assert r.status_code == 200, r.text
+    doc = json.loads(p.read_text("utf-8"))
+    assert doc["gpu"] == 0 and "layer_split" not in doc
+    assert doc["args"][doc["args"].index("--tp") + 1] == "1"
+    # 2 枚 → --tp 2 に導出
+    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0,1"}})
+    assert r.status_code == 200, r.text
+    doc = json.loads(p.read_text("utf-8"))
+    assert doc["gpu"] == [0, 1]
+    assert doc["args"][doc["args"].index("--tp") + 1] == "2"
+    # カード数を超える --tp は拒否 (gpu 未設定 = 全 usable が見える)
     assert c.post(f"/api/profiles/{pid}/config-args",
-                  json={"updates": {"gpu": "0"}}).status_code == 400
+                  json={"updates": {"--tp": "4"}}).status_code == 400
     assert c.post(f"/api/profiles/{pid}/config-args",
-                  json={"updates": {"--tp": "4"}}).status_code == 200
+                  json={"updates": {"--tp": "2"}}).status_code == 200
+    # gpu 選択と矛盾する明示 --tp は拒否 (単一カード + tp 2)
+    assert c.post(f"/api/profiles/{pid}/config-args",
+                  json={"updates": {"gpu": "0", "--tp": "2"}}).status_code == 400
+
+
+def test_wizard_maya_gpu_question_derives_tp():
+    """③ の GPU の使い方は全家系で聞く。DS4 / MM3-EXL3 は選択から --tp を導出
+    (純正 min(2, 枚数)) — --tp だけ聞いて config の gpu を放置しない。"""
+    import llm_launcher
+
+    js = (Path(llm_launcher.__file__).parent / "static" / "setup.js").read_text("utf-8")
+    assert "tpFromGpus: W.cfgArgs.tp_ok === true" in js
+    assert 'updates["--tp"] = vals.tp;' in js
+    assert "Math.min(2, n)" in js
+    # DS4 でもカード選択の選択肢が組み立つ (flag === "gpu" の options ブロック)
+    assert 'if (cfg.tp && cfg.tp.flag === "gpu") {' in js
 
 
 def test_settings_first_flow_binds_config_after_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

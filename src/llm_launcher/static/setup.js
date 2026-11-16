@@ -1206,10 +1206,10 @@ function cfRecommend(backend, hw, sel, engine) {
     rec.vis = { v: "dynamic", why: "エンジンが必要時に読む (常駐VRAMなし)" };
   if (!hw) return rec;   // GPU 不明 → 環境ベースの推奨は出さない (workload 推奨だけ)
 
-  /* 使うカードの VRAM 合計: strata/basalt はカード選択に従う。
+  /* 使うカードの VRAM 合計: strata/basalt/maya はカード選択に従う。
      他は TP 数 n 枚分 (既定 1、大きいカード順)。同一構成想定で n × 最小 VRAM。 */
   let cards = hw.gpus;
-  if (backend === "strata" || backend === "basalt") {
+  if (backend === "strata" || backend === "basalt" || backend === "maya") {
     const g = String(sel.gpu ?? "auto").trim();
     if (g && g !== "auto") {
       const idx = g.split(",").map(s => s.trim());
@@ -1572,17 +1572,21 @@ async function renderConfig() {
   }
   /* Maya: 家系別の質問出し分け (エンジン実装が単一の源)。
      GLM / Qwen / MiniMax GGUF = --kv + GPU の使い方 (config の gpu = layer split。--tp は無い)。
-     DeepSeek / MiniMax EXL3 = --tp (--kv は無い: KV はエンジン固有の形式)。
+     DeepSeek / MiniMax EXL3 = GPU の使い方 + --tp (導出)。--kv は無い (KV はエンジン固有)。
      Qwen は --parallel 非対応 (1 リクエストずつ) — 並列数の質問自体を出さない
      (2 以上を保存すると起動が check_parallel で失敗するため)。 */
   if (W.backend === "maya" && W.cfgArgs.family) {
     if (W.cfgArgs.kv_ok === false) delete cfg.kv;
     if (W.cfgArgs.family === "qwen") delete cfg.par;
-    if (W.cfgArgs.tp_ok === false) {
-      cfg.tp = { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方 (複数GPU共有)", short: "GPU",
-                 hint: "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます",
-                 opts: [], cur: v => v };
-    }
+    /* GPU の使い方は全家系で聞く (純正 choose_gpus と同じ立場)。DS4 / MM3-EXL3 は
+       カード選択から --tp を純正同款 min(2, 枚数) で導出する — --tp だけ聞いて
+       config の gpu を放置すると「tp=1 なのに 2 枚 layer split」で起動 / 計測される
+       (2026-11-16 実害: gpu:[0,1] + --tp 1)。保存は cf-go の tpFromGpus が担う */
+    cfg.tp = { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方 (複数GPU共有)", short: "GPU",
+               hint: W.cfgArgs.tp_ok
+                 ? "使うカードを選びます。Tensor Parallel (--tp) は枚数から自動で決まり (純正同じ: min(2, 枚数))、調整 (⑤) が実測で詰めます"
+                 : "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます",
+               opts: [], cur: v => v, tpFromGpus: W.cfgArgs.tp_ok === true };
   }
   /* 設定先行フロー: コンテキスト長は ② で既に選んでいる (セットアップが config に書く)。
      ③ で二重に聞かない */
@@ -1764,6 +1768,17 @@ $("#cf-go").addEventListener("click", async () => {
     vals[sec.key] = (sec.perUser && !raw && Number.isFinite(per)) ? String(per * par) : el.value;
     if (on) on[sec.key] = true;
     if (sec.config && sec.flag) updates[sec.flag] = vals[sec.key];
+    /* Maya DS4 / MM3-EXL3: --tp は GPU 選択から導出 (純正 maya.py と同じ min(2, 枚数))。
+       auto = 現状のカード構成 (config の gpu、無ければ全 usable) を維持する */
+    if (sec.tpFromGpus) {
+      const g = String(vals[sec.key] || "auto").trim();
+      const cur = String(W.cfgArgs.gpu || "auto").trim();
+      const base = g !== "auto" ? g : (cur !== "auto" ? cur : (W.cfgArgs.gpus || []).join(","));
+      const n = Math.max(1, base.split(",").filter(x => x.trim() !== "").length);
+      vals.tp = String(Math.min(2, n));
+      if (on) on.tp = true;
+      updates["--tp"] = vals.tp;
+    }
     chosen.push((sec.short || sec.label.split(" ")[0]) + " "
       + ((opt && opt.dataset.t1) || el.value)
       + (sec.perUser && !raw ? `×${par}並列` : ""));

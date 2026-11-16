@@ -77,10 +77,12 @@ def test_post_config_args_appends_missing_flag(client):
     c, root = client
     p = _config(root, args=["--pack", "/p"])
     pid = _profile(c, "maya", "module/strata/strata-x.json")
-    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"--tp": "2"}})
+    # --tp 1 は常に有効 (GPU 未検出環境のカード数フォールバック = 1)。
+    # 2 枚以上を要求する値はカード数検証に掛かるためここでは 1 を使う
+    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"--tp": "1"}})
     assert r.status_code == 200, r.text
     a = json.loads(p.read_text("utf-8"))["args"]
-    assert a[-2:] == ["--tp", "2"]
+    assert a[-2:] == ["--tp", "1"]
 
 
 def test_post_config_args_whitelist(client):
@@ -182,8 +184,8 @@ def test_post_config_args_gpu_validation(client, monkeypatch):
     assert r.status_code == 400
     r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0"}})
     assert r.status_code == 200
-    # maya は gpu 編集非対応 (TP は --tp の args 側)
-    pid = _profile(c, "maya", "module/strata/strata-x.json")
+    # Strata / Maya 以外のバックエンドは gpu 編集非対応
+    pid = _profile(c, "vllm", "module/strata/strata-x.json")
     r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0"}})
     assert r.status_code == 400
 
