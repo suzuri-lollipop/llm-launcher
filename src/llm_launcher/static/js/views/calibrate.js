@@ -204,7 +204,8 @@ function calStatusBadge(r) {
 }
 const CAL_STEP_LABEL = {create: "profile 作成", measure: "measure", review: "review", apply: "apply",
                         parallel: "並列校正",
-                        calibrate: "実測調整", sweep: "MTP sweep", "calibrate-lookup": "lookup sweep",
+                        calibrate: "実測調整", speed: "drafter 速度計測",
+                        sweep: "MTP sweep", "calibrate-lookup": "lookup sweep",
                         "calibrate-multi": "multi 並行校正",
                         auto: "自動選定", "phase-mtp": "MTP 実測", "phase-lookup": "lookup 実測",
                         tournament: "決勝"};

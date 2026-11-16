@@ -36,7 +36,7 @@ VIEWS.bench = `
         <div><label class="f" for="bm-decode">デコード長</label><select id="bm-decode" onchange="bmDecodeUI()" style="width:150px"><option value="custom">カスタム</option><option value="shortest">最短 (8 tok)</option><option value="longest">最長 (8192 tok)</option></select></div>
         <div><label class="f" for="bm-outlen">max_tokens</label><input type="number" id="bm-outlen" min="1" max="32768" value="128" style="width:96px"></div>
         <div><label class="f" for="bm-mintok">min_tokens</label><input type="number" id="bm-mintok" min="0" max="32768" value="0" style="width:96px"></div>
-        <label class="switch" style="align-self:flex-end"><input type="checkbox" id="bm-ignoreeos"><span class="track"></span><span class="lab" style="font-size:12.5px">EOS 無視</span></label>
+        <label class="switch" style="align-self:flex-end"><input type="checkbox" id="bm-ignoreeos" onchange="bmEosNote()"><span class="track"></span><span class="lab" style="font-size:12.5px">EOS 無視</span></label>
         <div><label class="f" for="bm-temp">temperature</label><input type="number" id="bm-temp" min="0" max="2" step="0.05" value="0" style="width:88px"></div>
         <div><label class="f" for="bm-endpoint">エンドポイント</label><select id="bm-endpoint" style="width:170px"><option value="chat">/v1/chat/completions</option><option value="completions">/v1/completions</option></select></div>
         <label class="switch" style="align-self:flex-end"><input type="checkbox" id="bm-stream" checked><span class="track"></span><span class="lab" style="font-size:12.5px">stream (TTFT計測)</span></label>
@@ -293,12 +293,22 @@ function bmDecodeUI() {
   } else if (mode === "longest") {
     $("#bm-outlen").value = 8192; $("#bm-mintok").value = 8192; $("#bm-ignoreeos").checked = true;
   }
-  $("#bm-decode-note").textContent = mode === "shortest"
+  $("#bm-decode-note").dataset.base = mode === "shortest"
     ? "最短: max_tokens=8。デコードの立ち上がり/TTFT 寄りの計測になります (トークン数が少ないと decode tok/s は不安定)。"
     : mode === "longest"
       ? "最長: max_tokens=8192 + min_tokens=8192 + EOS 無視。min_tokens / ignore_eos を解釈しないサーバーでは 400 になることがあります (その場合はカスタムで min_tokens=0 に)。"
       : "カスタム: max_tokens / min_tokens / EOS 無視を個別に指定します。min_tokens は max_tokens 以下にしてください。";
+  bmEosNote();
   bmPersist();
+}
+/* EOS 無視 ON の注意書き: 「デコードが長い = 不具合」と誤認しないよう、
+   max_tokens まで生成が止まらないことをフォームの時点で明示する */
+function bmEosNote() {
+  const el = $("#bm-decode-note"); if (!el) return;
+  const cb = $("#bm-ignoreeos");
+  el.textContent = (el.dataset.base || "") + (cb && cb.checked
+    ? " ⚠ EOS 無視 ON: モデルが自然に止めようとしても max_tokens まで生成し続けます (デコード時間が長くなります。結果の「デコード出力」で finish_reason を確認できます)。"
+    : "");
 }
 /* ---- benchmark profiles (data/bench_profiles.json): what to measure, separate from the launch profile ---- */
 async function bmProfileList() {
@@ -583,6 +593,53 @@ function bmPhaseBlock(title, reqs, nowSec, truncated) {
     (pm
       ? `<b>キュー待ち</b> = サーバーが他の生成を捌いている間待たされた時間 (サーバー側 TTFT − プレフィル)。<b>プレフィル</b> = プロンプトの読み込み・初期計算 (サーバー報告の prompt_ms)。薄い灰の残り幅は最初のトークンの配信。いずれもサーバー (/metrics) が報告した値で、実測の「送信→最初のトークン」枠の中に配置しています`
       : `<b>待ち</b> = 送信 → 最初のトークン (サーバーのキュー積み込み + プレフィル + 配送をまとめた実測値。このサーバーは内訳を公開しないため分割できません。strata 系では完了後に自動で分割表示へ変わります)`) + `</div>`;
+}
+/* ---- デコード出力 (生成テキスト) ----------------------------------------
+   reqs の tx (先頭 or 全文) / tx2 (末尾・中略時のみ) / txn (全文字数) /
+   fr (finish_reason) を表示する。「出力が止まらない不具合か」を結果だけで
+   判断できるよう、自然停止 (stop) か長さ上限 (length) かをバッジで明示する。
+   記録機能の追加前の古い履歴には tx が無い (呼び出し側で注記を出す)。 */
+const BM_TEXT_SHOW_MAX = 32;   // 一度に展開表示する上限 (残りは JSON エクスポートで)
+function bmFinishBadge(fr) {
+  if (!fr) return "";
+  const map = {stop: ["ok", "自然停止 (EOS/stop)"], length: ["warn", "長さ上限 (max_tokens)"]};
+  const [cls, lab] = map[fr] || ["", fr];
+  return `<span class="badge ${cls}" title="finish_reason: ${esc(fr)}"><span class="dot"></span>${esc(lab)}</span>`;
+}
+async function bmCopyText(id) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  try { await navigator.clipboard.writeText(el.textContent); toast("デコード出力をコピーしました"); }
+  catch { toast("コピー権限がありません。手動選択でお願いします"); }
+}
+function bmTextBlock(title, reqs, key, params) {
+  const rows = (reqs || []).map((r, i) => ({r, i})).filter(o => o.r && o.r.tx != null);
+  if (!rows.length) return "";
+  const shown = rows.slice(0, BM_TEXT_SHOW_MAX);
+  const items = shown.map(({r, i}) => {
+    const cut = r.tx2 != null;
+    const chars = r.txn != null ? r.txn : (r.tx || "").length + (r.tx2 || "").length;
+    const dec = r.a != null && r.d != null ? ` · デコード ${bmF1(r.d - r.a)}s` : "";
+    const preId = `bmtx-${key}-${i}`;
+    const body = esc(r.tx || "") +
+      (cut ? `\n\n<span class="muted">… 中略 (全文 ${chars.toLocaleString()} 文字のうち先頭と末尾を保存) …</span>\n\n` + esc(r.tx2 || "") : "");
+    return `<details class="adv" data-detailkey="${esc(key)}:tx${i}" style="margin-top:6px">
+      <summary><span class="mono" style="font-size:12px">#${i + 1} · ${r.n || 0} tok${dec} · 全文 ${chars.toLocaleString()} 文字${cut ? " (中略)" : ""}</span>&nbsp;${bmFinishBadge(r.fr)}</summary>
+      <div class="inner">
+        <div class="row" style="margin-bottom:4px"><span class="grow"></span>
+          <button class="ghost" style="min-height:28px;font-size:11.5px" onclick="bmCopyText('${preId}')"><svg class=ic aria-hidden=true><use href=#i-clipboard /></svg> コピー</button></div>
+        <pre class="bm-text" id="${preId}" data-logkey="${preId}">${body}</pre>
+      </div>
+    </details>`;
+  }).join("");
+  const eos = params && params.ignore_eos
+    ? `<div class="muted" style="font-size:11px;margin-top:4px">※ この実行は <b>EOS 無視 ON</b>: モデルが自然に止めようとしても max_tokens (${esc(String(params.output_len))}) に達するまで生成し続けます。「長さ上限」で終わるのは想定どおりです (デコード時間 ≈ max_tokens ÷ decode tok/s)。</div>` : "";
+  return `<div class="row" style="gap:8px;margin-top:12px;align-items:center;flex-wrap:wrap">
+      <b style="font-size:13px">${esc(title)}</b>
+      <span class="muted" style="font-size:11px">各リクエストが実際に生成したテキスト (行をクリックで展開)</span></div>` +
+    items +
+    (rows.length > shown.length ? `<div class="muted" style="font-size:11px;margin-top:4px">他 ${rows.length - shown.length} 件は表示を省略しています (JSON エクスポートに含まれます)</div>` : "") +
+    `<div class="muted" style="font-size:11px;margin-top:6px">finish_reason: <b>自然停止</b> = モデルが自分で終了 (EOS/stop) / <b>長さ上限</b> = max_tokens で打ち切り。長い出力は先頭 + 末尾のみ保存 (中略)。「出力が止まらない」かの判断材料になります。</div>` + eos;
 }
 /* 実行中カードのライブチャート: 完了段の series に実行中段を重ねる (強調描画) */
 function bmLiveChart(run) {
@@ -934,6 +991,8 @@ function renderBenchActive(run) {
     ${bmLiveChart(run)}
     ${(pr.reqs || []).length ? bmPhaseBlock("フェーズ (ライブ)", pr.reqs, secs) : ""}
     ${(run.stages || []).length ? bmStageTable(run.stages, "a:" + run.id) : ""}
+    ${(run.stages || []).map(st => bmTextBlock(`デコード出力 (${st.concurrency}${ulab})`, st.reqs, `a:${run.id}:s${st.concurrency}`, run.params)).join("")}
+    ${(pr.reqs || []).some(q => q && q.tx != null) ? bmTextBlock("デコード出力 (ライブ)", pr.reqs, `a:${run.id}:live`, run.params) : ""}
   </div>`;
   logScrollBack(el, _ls);
 }
@@ -1015,6 +1074,9 @@ function renderBenchCompare() {
       ${bmLiveChart(r)}
       ${(r.stages || []).length ? bmStageTable(r.stages, "c:" + r.id) : ""}
       ${(r.stages || []).map(st => bmPhaseBlock(`フェーズ (${st.concurrency}${st.mode === "stagger" ? " 本" : "p"})`, st.reqs, st.wall_secs, st.reqs_truncated)).join("")}
+      ${(r.stages || []).map(st => bmTextBlock(`デコード出力 (${st.concurrency}${st.mode === "stagger" ? " 本" : "p"})`, st.reqs, `c:${r.id}:s${st.concurrency}`, r.params)).join("")}
+      ${(r.stages || []).length && !(r.stages || []).some(st => (st.reqs || []).some(q => q && q.tx != null))
+        ? `<div class="muted" style="font-size:11px;margin-top:8px">※ この履歴にはデコード出力の記録がありません (記録機能の追加前の実行です)。新しいベンチマークから生成テキストと finish_reason が記録されます。</div>` : ""}
       <div class="muted mono" style="margin-top:6px;font-size:11px;overflow-wrap:anywhere">model: ${esc(r.model || "-")} · session: ${esc(r.session_id || "-")}${r.auto_started ? " (自動起動)" : ""}${r.stopped_after ? " · 停止済み" : ""}${r.port ? ` · :${r.port}` : ""}</div>
       ${r.stop_error ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--err)">サーバーの自動停止に失敗: ${esc(r.stop_error)}</div>` : ""}
       ${r.server_left_running ? `<div class="muted" style="margin-top:4px;font-size:11px;color:var(--warn)">※ launcher 再起動時に自動起動したサーバーが残っています。サーバータブで停止してください</div>` : ""}

@@ -23,6 +23,7 @@ VIEWS.playground = `
             <div><label class="f" for="pg-topp">top_p</label><input type="number" id="pg-topp" step="0.01" min="0" max="1" placeholder="0.95" style="width:96px"></div>
             <div><label class="f" for="pg-mtok">max_tokens</label><input type="number" id="pg-mtok" min="1" placeholder="(既定)" style="width:96px"></div>
             <label class="switch" style="align-self:flex-end"><input type="checkbox" id="pg-stream" checked><span class="track"></span><span class="lab" style="font-size:12.5px">ストリーム</span></label>
+            <label class="switch" style="align-self:flex-end" title="オフにすると思考 (reasoning) を省略し、本文の生成をすぐ開始します"><input type="checkbox" id="pg-think" checked><span class="track"></span><span class="lab" style="font-size:12.5px">思考</span></label>
           </div>
         </div>
       </details>
@@ -60,6 +61,7 @@ function pgInit() {
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") el.value = v; };
   set("#pg-sys", d.sys); set("#pg-temp", d.temp); set("#pg-topp", d.topp); set("#pg-mtok", d.mtok);
   if (d.stream === false) $("#pg-stream").checked = false;
+  if (d.thinking === false) $("#pg-think").checked = false;
 }
 function pgPersist() {
   if (!S.pg) return;
@@ -71,6 +73,7 @@ function pgPersist() {
       sid: S.pg.sid, model: S.pg.model, convos,
       sys: v("#pg-sys"), temp: v("#pg-temp"), topp: v("#pg-topp"), mtok: v("#pg-mtok"),
       stream: $("#pg-stream") ? $("#pg-stream").checked : true,
+      thinking: $("#pg-think") ? $("#pg-think").checked : true,
     }));
   } catch { /* 保存容量超過などは無視 */ }
 }
@@ -192,8 +195,11 @@ function pgMsgHtml(m, i) {
   const body = m.error
     ? `<span class="pg-err"><svg class=ic aria-hidden=true><use href=#i-alert /></svg> ${esc(m.error)}</span>` + (src ? pgMd(src) : "")
     : (src ? pgMd(src) : (m.streaming ? `<span class="muted">考え中…</span>` : "<i class=\"muted\">(空)</i>"));
+  // 思考フェーズ (本文未開始) は推論を開いてライブ表示する: 折りたたみのままだと
+  // 「考え中…」だけが数十秒見え、生成が開始されていないように誤認される
+  const thinking = m.streaming && !m.content;
   const reason = m.reasoning
-    ? `<details class="pg-reason"><summary><svg class=ic aria-hidden=true><use href=#i-chat /></svg> 推論 (${m.reasoning.length.toLocaleString()} 字)</summary><div class="rb">${esc(m.reasoning)}</div></details>` : "";
+    ? `<details class="pg-reason"${thinking ? " open" : ""}><summary><svg class=ic aria-hidden=true><use href=#i-chat /></svg> 推論 (${m.reasoning.length.toLocaleString()} 字)${thinking ? " · 思考中…" : ""}</summary><div class="rb">${esc(m.reasoning)}</div></details>` : "";
   // bits は <svg> を含む HTML 断片。必ず esc せず join すること
   // (esc するとアイコンが文字列としてベタ表示されていた)。格納値は数値・定数のみ。
   const bits = [];
@@ -295,7 +301,8 @@ async function pgSend() {
   inp.value = "";
   d.streaming = true; d.ctrl = new AbortController();
   renderPlayground(); pgPersist();
-  const body = {messages: history, stream: $("#pg-stream").checked};
+  const body = {messages: history, stream: $("#pg-stream").checked,
+                enable_thinking: $("#pg-think").checked};
   if (d.model) body.model = d.model;
   const num = id => { const v = $(id).value.trim(); return v === "" ? null : parseFloat(v); };
   const temp = num("#pg-temp"), topp = num("#pg-topp"), mtok = num("#pg-mtok");

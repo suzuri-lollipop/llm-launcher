@@ -3,12 +3,17 @@
 ダッシュボードはブラウザから各サーバーの /metrics を直接叩けない (CORS / API
 キー / ポート違い) ため、launcher が起動中ポートへ中継し、グラフに必要な
 スロット内訳と 60 秒合算履歴だけを正規化して返す。
+
+Strata / Maya / Basalt は JSON /metrics、vLLM / SGLang / llama.cpp は Prometheus
+テキスト (+ llama.cpp は /slots)、FreeToken 系は /v1/stats が対象。
 """
 from __future__ import annotations
 
 import json
 import asyncio
+import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from llm_launcher import rbac
@@ -194,3 +199,211 @@ def test_parallel_basalt_metrics_format(tmp_path: Path, monkeypatch):
     assert body["slots"][1]["state"] == "idle" and body["slots"][1]["accept"] is None
     hist = body["history"]["slot_tok_s"]
     assert len(hist) == 4 and len(hist[0]) == 60 and hist[0][-1] == 41.2
+
+
+# ---------------------------------------------------------------- 他バックエンド
+# vLLM / SGLang (Prometheus) ・ llama.cpp (/slots + Prometheus) ・ FreeToken (/v1/stats)
+
+def _run_session(tmp_path: Path, backend: str, backend_name: str, sid: str = "s_new") -> None:
+    data = tmp_path / "data"
+    data.mkdir(parents=True)
+    runs = [{"id": sid, "profile_id": "p_new", "profile_name": backend_name,
+             "backend": backend, "backend_name": backend_name, "port": 8124,
+             "health_path": "/health", "ready": True, "status": "running",
+             "pid": 1, "argv": []}]
+    (data / "runs.json").write_text(json.dumps(runs), "utf-8")
+    (data / "profiles.json").write_text("[]", "utf-8")
+
+
+def _fake_clock(monkeypatch, app_mod, clock: list[float]) -> None:
+    """app.py の time 参照だけを差し替える (asyncio のループ時計は壊さない)。"""
+    monkeypatch.setattr(app_mod, "time",
+                        SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 1793940000.0))
+
+
+def test_parallel_freetoken_stats(tmp_path: Path, monkeypatch):
+    """FreeToken 系は /v1/stats のスライディング窓 (decode_tps) を合算 tok/s に使う。
+    リクエスト毎の内訳は無いので slots は空 (フロントは合算グラフだけ描く)。"""
+    _run_session(tmp_path, "freetoken-fork", "FreeToken (fork)")
+    stats = {"model": {"id": "qwen3.8-flash", "ctx": 262144},
+             "throughput": {"decode_tps": 61.3, "prefill_tps": 900.0},
+             "requests": {"active": 2, "completed": 10}}
+
+    def fake_urlopen(req, timeout=2.0):
+        assert req.full_url.endswith("/v1/stats")
+        return FakeResponse(json.dumps(stats).encode("utf-8"))
+
+    import llm_launcher.app as app_mod
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen", fake_urlopen)
+    app = create_app(tmp_path)
+    status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_new/parallel"))
+    assert status == 200
+    assert body["backend"] == "freetoken-fork"
+    assert body["live"]["tok_s"] == 61.3 and body["live"]["state"] == "generating"
+    assert body["live"]["active"] == 2 and body["live"]["prefill_tok_s_mean"] == 900.0
+    assert body["server"]["model"] == "qwen3.8-flash"
+    assert body["server"]["max_context"] == 262144
+    assert body["slots"] == []
+    assert body["history"]["tok_s"] == [61.3]
+
+
+def test_parallel_vllm_prometheus_counter_rate(tmp_path: Path, monkeypatch):
+    """vLLM は generation_tokens_total (counter) のポーリング差分が tok/s。
+    初回は差分なし (None)、2 点目から速度になる。モデル / 最大コンテキストは
+    /v1/models を初回だけ引く。"""
+    _run_session(tmp_path, "vllm", "vLLM")
+    clock = [100.0]
+    counters = {"gen": 1000.0, "prompt": 5000.0}
+
+    def fake_urlopen(req, timeout=2.0):
+        if req.full_url.endswith("/v1/models"):
+            return FakeResponse(json.dumps(
+                {"data": [{"id": "qwen3", "max_model_len": 32768}]}).encode("utf-8"))
+        text = (
+            "# HELP vllm:generation_tokens_total Number of generation tokens processed.\n"
+            "# TYPE vllm:generation_tokens_total counter\n"
+            f'vllm:generation_tokens_total{{model_name="qwen3"}} {counters["gen"]}\n'
+            f'vllm:prompt_tokens_total{{model_name="qwen3"}} {counters["prompt"]}\n'
+            'vllm:num_requests_running{model_name="qwen3"} 2\n'
+            'vllm:num_requests_waiting{model_name="qwen3"} 1\n')
+        return FakeResponse(text.encode("utf-8"))
+
+    import llm_launcher.app as app_mod
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen", fake_urlopen)
+    _fake_clock(monkeypatch, app_mod, clock)
+    app = create_app(tmp_path)
+    status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_new/parallel"))
+    assert status == 200
+    assert body["live"]["tok_s"] is None            # 初回は差分が取れない
+    assert body["live"]["running"] == 2 and body["live"]["queued"] == 1
+    assert body["live"]["state"] == "generating"
+    assert body["server"]["model"] == "qwen3" and body["server"]["max_context"] == 32768
+
+    clock[0] += 2.0
+    counters["gen"] += 84.0                          # 84 tok / 2 s = 42 tok/s
+    counters["prompt"] += 200.0
+    status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_new/parallel"))
+    assert status == 200
+    assert body["live"]["tok_s"] == 42.0
+    assert body["live"]["prefill_tok_s_mean"] == 100.0
+    assert body["history"]["tok_s"] == [None, 42.0]
+
+
+def test_parallel_sglang_gauge(tmp_path: Path, monkeypatch):
+    """SGLang は gen_throughput gauge がそのまま tok/s (--enable-metrics 前提)。"""
+    _run_session(tmp_path, "sglang", "SGLang")
+
+    def fake_urlopen(req, timeout=2.0):
+        if req.full_url.endswith("/v1/models"):
+            return FakeResponse(json.dumps({"data": [{"id": "qwen3"}]}).encode("utf-8"))
+        text = ('sglang:gen_throughput{model_name="qwen3"} 55.5\n'
+                'sglang:num_running_reqs{model_name="qwen3"} 3\n'
+                'sglang:num_queue_reqs{model_name="qwen3"} 2\n')
+        return FakeResponse(text.encode("utf-8"))
+
+    import llm_launcher.app as app_mod
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen", fake_urlopen)
+    app = create_app(tmp_path)
+    status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_new/parallel"))
+    assert status == 200
+    assert body["live"]["tok_s"] == 55.5            # gauge は初回から値が出る
+    assert body["live"]["running"] == 3 and body["live"]["queued"] == 2
+    assert body["server"]["model"] == "qwen3"
+    assert body["slots"] == []
+
+
+def test_parallel_llamacpp_slots_and_metrics(tmp_path: Path, monkeypatch):
+    """llama.cpp は /slots の n_decoded 差分でスロット別 tok/s、合算は
+    tokens_predicted_total の差分。プロンプト読み込み中は reading 表示。"""
+    _run_session(tmp_path, "llamacpp", "llama.cpp")
+    clock = [100.0]
+    state = {"predicted": 1000.0, "slots": [
+        {"id": 0, "n_ctx": 8192, "is_processing": True, "id_task": 7,
+         "n_prompt_tokens": 100, "n_prompt_tokens_processed": 40,
+         "next_token": [{"has_next_token": True, "n_decoded": 0}]},
+        {"id": 1, "n_ctx": 8192, "is_processing": False},
+    ]}
+
+    def fake_urlopen(req, timeout=2.0):
+        url = req.full_url
+        if url.endswith("/slots"):
+            return FakeResponse(json.dumps(state["slots"]).encode("utf-8"))
+        if url.endswith("/props"):
+            return FakeResponse(json.dumps(
+                {"model_alias": "qwen3-gguf",
+                 "default_generation_settings": {"n_ctx": 8192}}).encode("utf-8"))
+        text = (f'llamacpp:tokens_predicted_total {state["predicted"]}\n'
+                'llamacpp:requests_processing 1\n'
+                'llamacpp:requests_deferred 0\n')
+        return FakeResponse(text.encode("utf-8"))
+
+    import llm_launcher.app as app_mod
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen", fake_urlopen)
+    _fake_clock(monkeypatch, app_mod, clock)
+    app = create_app(tmp_path)
+    status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_new/parallel"))
+    assert status == 200
+    s0, s1 = body["slots"]
+    assert s0["state"] == "reading" and s0["tok_s"] == 0.0   # まだ差分なし
+    assert s1["state"] == "idle"
+    assert body["live"]["parallel"] == 2
+    assert body["server"]["model"] == "qwen3-gguf"
+    assert body["server"]["max_context"] == 8192
+
+    clock[0] += 1.0
+    state["predicted"] += 20.0
+    state["slots"][0]["n_prompt_tokens_processed"] = 100
+    state["slots"][0]["next_token"][0]["n_decoded"] = 20
+    status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_new/parallel"))
+    assert status == 200
+    s0, s1 = body["slots"]
+    assert s0["state"] == "generating" and s0["tok_s"] == 20.0
+    assert s0["generated"] == 20 and s0["n_ctx"] == 8192
+    assert s1["tok_s"] == 0.0
+    assert body["live"]["tok_s"] == 20.0
+    assert body["history"]["tok_s"][-1] == 20.0
+
+
+def test_parallel_llamacpp_metrics_only(tmp_path: Path, monkeypatch):
+    """--slots なし (501) でも --metrics の gauge で合算グラフは描ける。"""
+    _run_session(tmp_path, "llamacpp", "llama.cpp")
+
+    def fake_urlopen(req, timeout=2.0):
+        url = req.full_url
+        if url.endswith("/slots"):
+            raise urllib.error.HTTPError(url, 501, "Not Implemented", None, None)
+        if url.endswith("/props"):
+            raise urllib.error.HTTPError(url, 404, "Not Found", None, None)
+        text = ('llamacpp:predicted_tokens_seconds 33.3\n'
+                'llamacpp:requests_processing 1\n')
+        return FakeResponse(text.encode("utf-8"))
+
+    import llm_launcher.app as app_mod
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen", fake_urlopen)
+    app = create_app(tmp_path)
+    status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_new/parallel"))
+    assert status == 200
+    assert body["slots"] == []
+    assert body["live"]["tok_s"] == 33.3 and body["live"]["running"] == 1
+
+
+def test_prometheus_parse_and_counter_reset():
+    """系列はラベルを畳んで合計する。counter の巻き戻し (サーバー再起動) は
+    その 1 点を None にして、次の差分から再開する。"""
+    from llm_launcher.parallel_metrics import RateTracker, parse_prometheus
+    sums, labels = parse_prometheus(
+        '# HELP vllm:generation_tokens_total x\n'
+        'vllm:generation_tokens_total{model_name="m",engine="0"} 10\n'
+        'vllm:generation_tokens_total{model_name="m",engine="1"} 5\n'
+        'vllm:nan_metric NaN\n')
+    assert sums == {"vllm:generation_tokens_total": 15.0}
+    assert labels["model_name"] == "m"
+    tr = RateTracker()
+    assert tr.counter_rate("c", 100.0, 10.0) is None
+    assert tr.counter_rate("c", 110.0, 12.0) == 5.0
+    assert tr.counter_rate("c", 1.0, 14.0) is None      # 再起動で巻き戻り
+    assert tr.counter_rate("c", 3.0, 15.0) == 2.0
+    assert tr.slot_rate("task-1", 10, 20.0) is None
+    assert tr.slot_rate("task-1", 30, 22.0) == 10.0
+    tr.prune_slots(set())
+    assert tr.slot_rate("task-1", 5, 24.0) is None      # 破棄済みはまた初回扱い

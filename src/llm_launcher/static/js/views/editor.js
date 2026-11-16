@@ -142,6 +142,9 @@ function hfPickerHtml(f) {
       if (!(m.gguf || []).length && m.has_weights !== false)
         opts.push({v: m.snapshot, label: `${tag}${m.repo_id} · (ggufなし・ディレクトリ指定)`});
     } else {
+      // 他 (vLLM / SGLang / FreeToken 系) は汎用重みのある DIR だけ。
+      // .basalt pack は basalt 専用 (has_weights に含まれない) なのでここには出さない
+      if (!m.has_weights) continue;
       opts.push({v: m.snapshot, label: `${tag}${m.repo_id}${m.revision ? " · rev " + m.revision : ""}`});
     }
   }

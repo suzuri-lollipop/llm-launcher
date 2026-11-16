@@ -27,15 +27,19 @@ from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
 from .backends import (SECTIONS_JA, BACKENDS, FORK_CLONE_DIRS, api_key_from_argv,
                        backend_for, basalt_config_for, fork_dir, fork_model_root,
-                       launch_json_path, port_from_argv, python_candidates, resolve_port,
-                       sections_order, supported_models)
+                       launch_json_path, port_from_argv, python_candidates, replace_arg,
+                       resolve_port, sections_order, supported_models)
 from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         clone_exists, current_ref, install_tool)
+from .models import (ModelError, build_inventory, delete_entry, hf_hub_cache_dir,
+                     scan_data_models, scan_hf_cache)
+from . import maya_setup
 from . import oom
+from . import parallel_metrics as pm
 from . import strata_setup
 from . import rbac
 from . import sysinfo
@@ -244,6 +248,21 @@ class StrataModelBody(BaseModel):
     gpus: str = ""        # "" / "auto" = 純正既定, "0"|"1" = 単一カード, "0,1"|"all" = layer split
 
 
+class MayaModelBody(BaseModel):
+    """Maya ②: 純正 maya.py を非対話 (--yes / --no-start / --plain / --download-model) で
+    走らせる選択。family / model / context は submodule が単一の源の一覧 (maya_setup) で
+    検証される。エンジンビルド (家系別) もこのジョブの中で純正どおり走る。
+    設定先行フローでは ③ の回答 (GPU / 並列数) もここに載る: gpus はエンジンビルド /
+    速度計測の対象カードを、parallel は config の --parallel (DS4 / MM3 の推奨
+    コンテキスト計算にも効く) をセットアップ時点で決める。"""
+    family: str = Field(min_length=1, max_length=64)     # glm|deepseek|minimax|qwen
+    model: str = Field(min_length=1, max_length=128)     # 家系別の quant キー (表のキーそのもの)
+    context: int = 32768
+    vision: str = ""      # "" = 純正既定 (ON), "off" = --no-vision (対応モデルだけ)
+    gpus: str = ""        # "" / "auto" = 純正既定 (usable 全部), "0" = 単一, "0,1"|"all" = 分割
+    parallel: int | None = Field(default=None, ge=1, le=8)   # Qwen は非対応 (build_argv が拒否)
+
+
 class ModelDownloadBody(BaseModel):
     """Hugging Face Hub からのモデルダウンロード。backend に model_data 系を指定すると
     そのバックエンドのデータフォルダ (freetoken-fork なら Freetoken-data) へ落ちる。"""
@@ -258,6 +277,14 @@ class ModelDownloadBody(BaseModel):
     max_kbps: int = 0
 
 
+class ModelDeleteBody(BaseModel):
+    """モデル管理: 棚卸しエントリ (GET /api/models の id) の削除。
+    パスは直接受け取らない — 常に棚卸しから解決し、置き場ルート配下だけ消す。"""
+    id: str = Field(min_length=1, max_length=1024)
+    # プロファイルが参照していても削除する (UI は参照一覧を見せて確認後に送る)
+    force: bool = False
+
+
 class PlaygroundChatBody(BaseModel):
     """プレイグラウンドのチャット要求。起動中セッションの OpenAI 互換 API へ透過転送する。"""
     messages: list[dict[str, Any]] = Field(min_length=1)
@@ -266,6 +293,8 @@ class PlaygroundChatBody(BaseModel):
     temperature: float | None = Field(default=None, ge=0.0, le=2.0)
     top_p: float | None = Field(default=None, gt=0.0, le=1.0)
     max_tokens: int | None = Field(default=None, ge=1)
+    # None = サーバー既定 (Qwen3 系は思考 ON)。False で本文前の思考を省略できる
+    enable_thinking: bool | None = None
 
 
 # --------------------------------------------------------------- 認証のボディ
@@ -390,114 +419,9 @@ def json_as_sse(obj: dict[str, Any]) -> bytes:
             "data: [DONE]\n\n").encode("utf-8")
 
 
-def hf_hub_cache_dir() -> Path:
-    """huggingface_hub の既定キャッシュパス解決 (HF_HUB_CACHE > HF_HOME > ~/.cache)。"""
-    env = os.environ.get("HF_HUB_CACHE")
-    if env:
-        return Path(env).expanduser()
-    home = os.environ.get("HF_HOME")
-    base = Path(home).expanduser() if home else Path.home() / ".cache" / "huggingface"
-    return base / "hub"
-
-
-def scan_data_models(models_root: Path, max_files: int = 400) -> list[dict[str, Any]]:
-    """setup.sh / UI が <data>/models/<org>--<name> へ置いたモデルを一覧化する。
-    scan_hf_cache と同じ形のレコード (snapshot はフォルダそのもの)。"""
-    out: list[dict[str, Any]] = []
-    if not models_root.is_dir():
-        return out
-    for d in models_root.iterdir():
-        if not d.is_dir():
-            continue
-        gguf: list[dict[str, Any]] = []
-        has_weights = False
-        try:
-            for f in sorted(d.iterdir()):
-                if not f.is_file():
-                    continue
-                size = f.stat().st_size
-                suf = f.suffix.lower()
-                if suf in (".safetensors", ".bin", ".pt", ".gguf") and size > 1 << 20:
-                    has_weights = True
-                if suf == ".gguf":
-                    gguf.append({"name": f.name, "size": size})
-                if len(gguf) >= max_files:
-                    break
-            mtime = d.stat().st_mtime
-        except OSError:
-            continue
-        out.append({"repo_id": d.name.replace("--", "/", 1), "snapshot": str(d),
-                    "revision": "", "has_weights": has_weights, "gguf": gguf,
-                    "source": "data", "mtime": mtime})
-    out.sort(key=lambda m: m["mtime"], reverse=True)
-    return out
-
-
-def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, Any]:
-    """HF Hub キャッシュの models--org--name からモデル一覧を構築する。"""
-    base = base or hf_hub_cache_dir()
-    result: dict[str, Any] = {"cache_dir": str(base), "exists": base.is_dir(), "models": []}
-    if not base.is_dir():
-        return result
-    entries: list[tuple[float, dict[str, Any]]] = []
-    for d in base.iterdir():
-        if not d.is_dir() or not d.name.startswith("models--"):
-            continue
-        repo_id = d.name[len("models--"):].replace("--", "/", 1)
-        snaps_dir = d / "snapshots"
-        if not snaps_dir.is_dir():
-            continue
-        refs: dict[str, str] = {}
-        refs_dir = d / "refs"
-        if refs_dir.is_dir():
-            for rf in refs_dir.rglob("*"):        # refs/pr/1 のような入れ子ブランチにも対応
-                try:
-                    if rf.is_file():
-                        refs[str(rf.relative_to(refs_dir))] = rf.read_text().strip()
-                except OSError:
-                    continue
-        snaps = [s for s in snaps_dir.iterdir() if s.is_dir()]
-        if not snaps:
-            continue
-        def snap_mtime(s: Path) -> float:
-            try:
-                return s.stat().st_mtime
-            except OSError:
-                return 0
-        snaps.sort(key=snap_mtime, reverse=True)
-        wanted = refs.get("main") or refs.get("master")
-        chosen = next((s for s in snaps if wanted and s.name.startswith(wanted)), snaps[0])
-        revision = next((k for k, v in refs.items() if chosen.name.startswith(v)), None) or (wanted or "")[:10] or "main"
-        gguf: list[dict[str, Any]] = []
-        basalt: list[dict[str, Any]] = []
-        has_weights = False
-        try:
-            for f in sorted(chosen.iterdir()):
-                if not f.is_file():
-                    continue
-                size = f.stat().st_size
-                suf = f.suffix.lower()
-                if suf in (".safetensors", ".bin", ".pt", ".gguf", ".basalt") and size > 1 << 20:
-                    has_weights = True
-                if suf == ".gguf":
-                    gguf.append({"name": f.name, "size": size})
-                if suf == ".basalt":        # Basalt の pack (単一ファイル = モデル正体)
-                    basalt.append({"name": f.name, "size": size})
-                if len(gguf) + len(basalt) >= max_files:
-                    break
-        except OSError:
-            pass
-        entries.append((snap_mtime(chosen), {
-            "repo_id": repo_id,
-            "snapshot": str(chosen),
-            "revision": revision,
-            "has_weights": has_weights,
-            "gguf": gguf,
-            "basalt": basalt,
-        }))
-    entries.sort(key=lambda t: t[0], reverse=True)
-    result["models"] = [m for _, m in entries]
-    return result
+# hf_hub_cache_dir / scan_data_models / scan_hf_cache は models.py へ移設
+# (全バックエンド横断のモデル管理の単一の源)。上の import で再エクスポートしており、
+# `from llm_launcher.app import scan_hf_cache` の既存互換は変わらない。
 
 
 def lan_ip() -> str:
@@ -1329,6 +1253,221 @@ def create_app(root: Path) -> FastAPI:
         profiles_store.mutate(_set)
         return {"ok": True, "path": str(path), "config": cfg}
 
+    # ------------------------------------- Strata / Maya の config args (ウィザード ③)
+    # エンジン本体のノブ (コンテキスト長 / KV 形式 / TP) は strata-<model>.json /
+    # maya-<model>.json の "args" に入る。ウィザード ③ は FreeToken 基準と同じ質問を
+    # バックエンド共通で出し、その回答をここへ書き戻す (純正 setup.py も args の
+    # --max-context / --kv を直接書き換えるのと同じ作法)。
+    _CONFIG_ARGS_BACKENDS = {"strata", "strata-fork", "maya"}
+    _CONFIG_ARG_FLAGS = {"--max-context", "--kv", "--tp"}
+
+    def _config_args_path(prof: dict[str, Any]) -> Path:
+        if (prof.get("backend") or "") not in _CONFIG_ARGS_BACKENDS:
+            raise HTTPException(400, "このバックエンドは config args 編集に対応していません")
+        p = launch_json_path(root, prof)      # values.config の解決 (root 相対も絶対も)
+        if p is None:
+            raise HTTPException(400, "プロファイルに設定 JSON (--config) がありません")
+        p = p.resolve()
+        mod = (root / "module").resolve()
+        if (mod not in p.parents or p.suffix != ".json"
+                or not (p.name.startswith("strata-") or p.name.startswith("maya-"))):
+            raise HTTPException(400, "module/ 配下の strata-*.json / maya-*.json だけ編集できます")
+        return p
+
+    def _config_args_doc(p: Path) -> dict[str, Any]:
+        try:
+            doc = json.loads(p.read_text("utf-8"))
+        except (OSError, ValueError) as e:
+            raise HTTPException(400, f"設定 JSON を解析できません ({p.name}): {e}")
+        if not isinstance(doc.get("args"), list):
+            raise HTTPException(400, f"設定 JSON に args がありません: {p.name}")
+        return doc
+
+    @staticmethod
+    def _config_args_map(doc: dict[str, Any]) -> dict[str, str]:
+        args = doc["args"]
+        return {str(a): str(args[i + 1]) for i, a in enumerate(args[:-1])
+                if str(a) in _CONFIG_ARG_FLAGS}
+
+    def _config_gpu_info(prof: dict[str, Any], doc: dict[str, Any]) -> tuple[str, list[int], bool]:
+        """Strata の GPU 選択状況 (③ の「GPU の使い方」質問用)。
+        現在値 ("auto" / "0" / "0,1")、usable カード、家系の multi_gpu 可否。
+        純正 offer_together と同じく config の gpu / gpus_asked / layer_split が正。"""
+        g = doc.get("gpu")
+        cur = ",".join(str(x) for x in g) if isinstance(g, list) else (str(g) if g is not None else "auto")
+        bid = prof.get("backend") or "strata"
+        opts = strata_setup.load_options(root / backend_for(root, bid)["module_path"])
+        usable = [int(x["index"]) for x in ((opts.get("pc") or {}).get("gpus") or []) if x.get("usable")]
+        multi = True
+        name = Path(str((prof.get("values") or {}).get("config") or "")).name
+        for f in (opts.get("families") or {}).values():
+            for m in (f.get("models") or {}):
+                if name == f"strata-{(str(f.get('tag') or '') + m).lower()}.json":
+                    multi = f.get("multi_gpu", True) is not False
+        return cur, usable, multi
+
+    def _maya_config_family(doc: dict[str, Any]) -> str:
+        """maya-<model>.json の家系 (maya_quants.family_of と同じ見立て):
+        installer.family → exe 名 → args の順で判定する。"""
+        inst = doc.get("installer") or {}
+        if inst.get("family") in ("glm", "deepseek", "minimax", "qwen"):
+            return str(inst["family"])
+        exe = Path(str(doc.get("exe", ""))).name
+        args = doc.get("args") or []
+        if exe.startswith("maya-mm3"):
+            return "minimax"
+        if "--ple-gguf" in args[:-1]:
+            return "qwen"
+        if "--pack" in args[:-1] or exe.startswith(("maya-ds4", "strata-ds4")):
+            return "deepseek"
+        return "glm"
+
+    def _maya_config_info(doc: dict[str, Any]) -> dict[str, Any]:
+        """Maya の家系別編集可否 (③ の質問出し分け用)。エンジン実装が単一の源:
+        GLM / Qwen (maya エンジン) は --kv を持ち --tp は無い (複数 GPU は config の
+        gpu = layer split)。DeepSeek / MiniMax EXL3 (maya-ds4 / maya-mm3) は --tp を持ち
+        --kv は無い (KV はエンジン固有)。MiniMax の GGUF は layer split (gpu)。"""
+        fam = _maya_config_family(doc)
+        inst = doc.get("installer") or {}
+        tp_ok = fam == "deepseek" or (fam == "minimax" and (inst.get("mm3_quant") or "exl3") == "exl3")
+        g = doc.get("gpu")
+        cur = ",".join(str(x) for x in g) if isinstance(g, list) else (str(g) if g is not None else "auto")
+        opts = maya_setup.load_options(root / "module" / "maya")
+        usable = [int(x["index"]) for x in ((opts.get("pc") or {}).get("gpus") or []) if x.get("usable")]
+        return {"family": fam, "kv_ok": fam in ("glm", "qwen"), "tp_ok": tp_ok,
+                "gpu": cur, "gpus": usable, "gpu_multi": True}
+
+    @app.get("/api/profiles/{profile_id}/config-args")
+    async def get_config_args(profile_id: str) -> dict[str, Any]:
+        """③ のプリフィル用: config の編集可能ノブの現在値を返す。
+        Strata 系は GPU の使い方 (gpu / gpus / gpu_multi) も併せて返す。"""
+        prof = manager.find_profile(profile_id)
+        if not prof:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        p = _config_args_path(prof)
+        doc = _config_args_doc(p)
+        out: dict[str, Any] = {"ok": True, "path": str(p), "args": _config_args_map(doc)}
+        if (prof.get("backend") or "") in ("strata", "strata-fork"):
+            cur, usable, multi = _config_gpu_info(prof, doc)
+            out.update(gpu=cur, gpus=usable, gpu_multi=multi)
+        elif (prof.get("backend") or "") == "maya":
+            # 家系別に編集できるノブが違う (GLM/Qwen: --kv + gpu / DS4/MM3-EXL3: --tp)
+            out.update(_maya_config_info(doc))
+        return out
+
+    @app.post("/api/profiles/{profile_id}/config-args")
+    async def update_config_args(profile_id: str, body: dict[str, Any]) -> dict[str, Any]:
+        """③ の保存: ホワイトリストのノブだけ書き戻す。
+        args 系 (--max-context / --kv / --tp) は args と args_written へ、
+        Strata の gpu は config 直下 (gpu / layer_split / gpus_asked) へ。
+        Maya は家系別: GLM / Qwen / MiniMax GGUF は gpu (layer split)、
+        DeepSeek / MiniMax EXL3 は --tp (KV 形式はエンジン固有で編集させない)。"""
+        prof = manager.find_profile(profile_id)
+        if not prof:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        p = _config_args_path(prof)
+        updates = body.get("updates")
+        if not isinstance(updates, dict) or not updates:
+            raise HTTPException(400, "updates (flag -> 値) が必要です")
+        updates = dict(updates)
+        is_strata = (prof.get("backend") or "") in ("strata", "strata-fork")
+        is_maya = (prof.get("backend") or "") == "maya"
+        doc = _config_args_doc(p)
+        # Maya は家系別に編集できるノブが違う (エンジン実装が単一の源):
+        # GLM / Qwen = --kv + gpu (layer split)、DeepSeek / MiniMax EXL3 = --tp
+        maya_info = _maya_config_info(doc) if is_maya else None
+        gpu_val = updates.pop("gpu", None)
+        if gpu_val is not None and not is_strata and (not is_maya or maya_info["tp_ok"]):
+            raise HTTPException(400, "このモデルは GPU 分割を --tp (Tensor Parallel) で設定します"
+                                if is_maya else "このバックエンドは gpu 編集に対応していません")
+        clean: dict[str, str] = {}
+        for flag, val in updates.items():
+            sval = str(val).strip()
+            if flag not in _CONFIG_ARG_FLAGS:
+                raise HTTPException(400, f"編集できないフラグです: {flag}")
+            if flag == "--max-context":
+                if not sval.isdigit() or not 4096 <= int(sval) <= 4_194_304:
+                    raise HTTPException(400, f"コンテキスト長が範囲外です: {sval}")
+            elif flag == "--kv":
+                if sval not in ("int8", "q4_0", "k8v4", "fp16"):
+                    raise HTTPException(400, f"KV 形式が不正です: {sval}")
+                if is_maya and not maya_info["kv_ok"]:
+                    raise HTTPException(400, "このモデルは KV 形式の変更に対応していません (エンジン固有の形式です)")
+            elif flag == "--tp":
+                if not sval.isdigit() or not 1 <= int(sval) <= 16:
+                    raise HTTPException(400, f"TP 数が範囲外です: {sval}")
+                if is_maya and not maya_info["tp_ok"]:
+                    raise HTTPException(400, "このモデルは GPU 分割を GPU の使い方 (layer split) で設定します")
+            clean[flag] = sval
+        changed = False
+        if gpu_val is not None and str(gpu_val).strip() != "auto":
+            gv = str(gpu_val).strip()
+            parts = [x.strip() for x in gv.split(",") if x.strip()]
+            if not parts or not all(x.isdigit() for x in parts):
+                raise HTTPException(400, f"GPU 指定が不正です: {gv}")
+            sel = [int(x) for x in parts]
+            if is_maya:
+                usable, multi = maya_info["gpus"], maya_info["gpu_multi"]
+            else:
+                _, usable, multi = _config_gpu_info(prof, doc)
+            if len(set(sel)) != len(sel) or any(i not in usable for i in sel):
+                raise HTTPException(400, f"GPU 指定が検出外の GPU を指しています: {gv} (使える GPU: {usable})")
+            if len(sel) >= 2 and not multi:
+                raise HTTPException(400, "この家系は現在単一 GPU 専用です (純正: runs on one GPU so far)")
+            if len(sel) == 1:
+                doc["gpu"] = sel[0]
+                doc.pop("layer_split", None)
+            else:
+                doc["gpu"] = sel
+                if is_strata:
+                    doc["layer_split"] = doc.get("layer_split") or "auto"
+            if is_strata:
+                doc["gpus_asked"] = True      # 人が選んだ = 起動時に純正が再び聞かない
+            changed = True
+        for flag, sval in clean.items():
+            doc["args"] = replace_arg(doc["args"], flag, sval)
+            if isinstance(doc.get("args_written"), list):
+                doc["args_written"] = replace_arg(doc["args_written"], flag, sval)
+            changed = True
+        if changed:
+            tmp = p.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            tmp.replace(p)
+        out: dict[str, Any] = {"ok": True, "path": str(p), "args": _config_args_map(doc)}
+        if is_strata:
+            cur, usable, multi = _config_gpu_info(prof, doc)
+            out.update(gpu=cur, gpus=usable, gpu_multi=multi)
+        elif is_maya:
+            out.update(_maya_config_info(doc))
+        return out
+
+    @app.get("/api/profiles/setup-options")
+    async def profile_setup_options() -> dict[str, Any]:
+        """プロファイル作成 + キャリブレーション ウィザード (/setup?flow=profile) の
+        読み取り専用選択肢。インストール画面と同じ選択表だが profiles.edit だけで
+        使える (install 権限不要)。ジョブ履歴 / ログは含まない — バックエンドの
+        インストール検出・Strata / Maya のモデル表 + 設定済み config・セットアップ
+        ジョブの実行中かどうかだけを返す。静的パスは {profile_id} 系より前に登録する
+        こと (FastAPI は登録順マッチ)。"""
+        specs = _installable_public()
+        dets = await asyncio.gather(*[detect(s["id"]) for s in specs])
+        installed = {s["id"]: bool(d.get("installed")) for s, d in zip(specs, dets)}
+
+        async def _table(bid: str, setup_mod: Any) -> dict[str, Any]:
+            # /api/installs/{strata,maya}-model と同じ中身 (表の単一の源は submodule)。
+            # 未 clone / 読み出し失敗は load_options 側が available:false で返す
+            mod = root / INSTALL_SPECS[bid]["module_path"]
+            out = dict(await asyncio.to_thread(setup_mod.load_options, mod))
+            out["configs"] = await asyncio.to_thread(setup_mod.installed_configs, mod)
+            out["venv_ready"] = (mod / ".venv" / "bin" / "python").is_file()
+            return out
+
+        return {"installable": specs, "installed": installed,
+                "strata": await _table("strata", strata_setup),
+                "maya": await _table("maya", maya_setup),
+                "cache_dir": str(hf_hub_cache_dir()),
+                "busy": installs.active_id is not None}
+
     @app.post("/api/preview")
     async def preview_command(body: ProfileBody) -> dict[str, Any]:
         data = validate_profile(body)
@@ -1423,13 +1562,126 @@ def create_app(root: Path) -> FastAPI:
         except KeyError:
             raise HTTPException(404, "セッションが見つかりません")
 
+    # デコード速度グラフの差分計算状態 (vLLM / SGLang / llama.cpp / FreeToken 用)。
+    # Strata 系 JSON /metrics はサーバー自身が履歴を持つので状態不要。
+    par_trackers: dict[str, pm.RateTracker] = {}
+
+    def _par_model_info(tracker: pm.RateTracker, get: Any, kind: str) -> dict[str, Any]:
+        """モデル名 / 最大コンテキストを /v1/models (vLLM/SGLang) か /props
+        (llama.cpp) から初回だけ取る (毎秒のポーリングで叩かない)。"""
+        if tracker.model_info is not None:
+            return tracker.model_info
+        info: dict[str, Any] = {"model": "", "max_context": None}
+        try:
+            doc = json.loads(get("/v1/models" if kind == "models" else "/props")
+                             .decode("utf-8", "replace"))
+            if not isinstance(doc, dict):
+                doc = {}
+            if kind == "models":
+                data = doc.get("data")
+                card = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
+                info["model"] = card.get("id") or ""
+                ctx = card.get("max_model_len")
+                info["max_context"] = ctx if isinstance(ctx, int) and ctx > 0 else None
+            else:
+                path = doc.get("model_path") or ""
+                info["model"] = doc.get("model_alias") or (
+                    path.rsplit("/", 1)[-1] if path and path != "none" else "")
+                settings = doc.get("default_generation_settings")
+                n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
+                info["max_context"] = n_ctx if isinstance(n_ctx, int) and n_ctx > 0 else None
+        except Exception:                                      # noqa: BLE001 — モデル名は補助情報
+            pass
+        tracker.model_info = info
+        return info
+
+    async def _parallel_other(sid: str, s: dict[str, Any], backend: str,
+                              port: int, headers: dict[str, str]) -> dict[str, Any]:
+        """Strata 系以外 (Prometheus /metrics ・ /v1/stats ・ /slots) の中継。"""
+        for k in list(par_trackers):
+            if k not in manager.sessions:
+                del par_trackers[k]
+        tracker = par_trackers.get(sid)
+        if tracker is None:
+            tracker = par_trackers[sid] = pm.RateTracker()
+
+        def _get(path: str) -> bytes:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}{path}", headers=headers)
+            with urllib.request.urlopen(req, timeout=2.0) as r:
+                return r.read()
+
+        hint = {"sglang": " (SGLang は --enable-metrics が必要です)",
+                "llamacpp": " (llama-server は --metrics / --slots が必要です)"}.get(backend, "")
+        now = time.monotonic()
+        if backend in ("freetoken", "freetoken-fork"):
+            try:
+                stats = json.loads((await asyncio.to_thread(_get, "/v1/stats"))
+                                   .decode("utf-8", "replace"))
+            except urllib.error.HTTPError as e:
+                raise HTTPException(e.code, f"サーバーの /v1/stats が HTTP {e.code} を返しました")
+            except (urllib.error.URLError, OSError) as e:
+                raise HTTPException(502, f"サーバーの /v1/stats を読み取れません: {e}")
+            except ValueError as e:
+                raise HTTPException(502, f"サーバーの /v1/stats を JSON として読み取れません: {e}")
+            if not isinstance(stats, dict):
+                raise HTTPException(502, "サーバーの /v1/stats が JSON オブジェクトではありません")
+            frag = pm.normalize_freetoken(stats)
+        elif backend in ("vllm", "sglang"):
+            try:
+                text = (await asyncio.to_thread(_get, "/metrics")).decode("utf-8", "replace")
+            except urllib.error.HTTPError as e:
+                raise HTTPException(e.code, f"サーバーの /metrics が HTTP {e.code} を返しました{hint}")
+            except (urllib.error.URLError, OSError) as e:
+                raise HTTPException(502, f"サーバーの /metrics に接続できません: {e}")
+            sums, labels = pm.parse_prometheus(text)
+            if not sums:
+                raise HTTPException(502, f"サーバーの /metrics に Prometheus メトリクスがありません{hint}")
+            norm = pm.normalize_vllm if backend == "vllm" else pm.normalize_sglang
+            frag = norm(sums, labels, tracker, now)
+            info = await asyncio.to_thread(_par_model_info, tracker, _get, "models")
+            if not frag["server"]["model"]:
+                frag["server"]["model"] = info.get("model") or ""
+            frag["server"]["max_context"] = info.get("max_context")
+        else:                                                   # llamacpp
+            slot_rows: list[Any] = []
+            try:
+                rows = json.loads((await asyncio.to_thread(_get, "/slots"))
+                                  .decode("utf-8", "replace"))
+                slot_rows = rows if isinstance(rows, list) else []
+            except Exception:                                   # noqa: BLE001 — --slots なしは 501。合算だけで描く
+                pass
+            sums: dict[str, float] = {}
+            try:
+                sums, _ = pm.parse_prometheus(
+                    (await asyncio.to_thread(_get, "/metrics")).decode("utf-8", "replace"))
+            except Exception:                                   # noqa: BLE001 — --metrics なしは 501。スロット差分で代用
+                pass
+            if not slot_rows and not sums:
+                raise HTTPException(502, f"サーバーの /slots も /metrics も読み取れません{hint}")
+            frag = pm.normalize_llamacpp(slot_rows, sums, tracker, now)
+            info = await asyncio.to_thread(_par_model_info, tracker, _get, "props")
+            frag["server"]["model"] = info.get("model") or ""
+            frag["server"]["max_context"] = info.get("max_context")
+        tracker.push_history(frag["live"]["tok_s"])
+        return {
+            "sid": sid,
+            "backend": backend,
+            "backend_name": s.get("backend_name"),
+            "fetched_at": time.time(),
+            "server": frag["server"],
+            "live": frag["live"],
+            "history": {"tok_s": list(tracker.history), "slot_tok_s": []},
+            "slots": frag["slots"],
+        }
+
     @app.get("/api/sessions/{sid}/parallel")
     async def session_parallel(sid: str) -> dict[str, Any]:
         """ダッシュボードのデコード速度グラフ用: 稼働中サーバーの /metrics を中継する。
 
-        Strata / Maya 系の JSON /metrics だけを対象にする。ブラウザから直接叩くと
-        CORS や API キーで失敗するため、起動中のポートへ launcher 同一オリジンで
-        プロキシし、グラフに必要な値だけを正規化して返す。
+        Strata / Maya / Basalt 系は JSON /metrics、vLLM / SGLang / llama.cpp は
+        Prometheus /metrics (+ llama.cpp は /slots)、FreeToken 系は /v1/stats。
+        ブラウザから直接叩くと CORS や API キーで失敗するため、起動中のポートへ
+        launcher 同一オリジンでプロキシし、グラフに必要な値だけを正規化して返す。
         """
         s = manager.sessions.get(sid)
         if not s:
@@ -1439,10 +1691,14 @@ def create_app(root: Path) -> FastAPI:
         port = s.get("port")
         if not port:
             raise HTTPException(400, "このセッションはポートを解決できていません")
-        if s.get("backend") not in ("strata", "strata-fork", "maya", "basalt"):
-            raise HTTPException(400, "このバックエンドは JSON /metrics の並列内訳に対応していません")
+        backend = s.get("backend")
+        if backend not in ("strata", "strata-fork", "maya", "basalt",
+                           "vllm", "sglang", "llamacpp", "freetoken", "freetoken-fork"):
+            raise HTTPException(400, "このバックエンドはデコード速度グラフに対応していません")
         key = api_key_from_argv(s.get("argv") or [])
         headers = {"Authorization": f"Bearer {key}"} if key else {}
+        if backend not in ("strata", "strata-fork", "maya", "basalt"):
+            return await _parallel_other(sid, s, backend, port, headers)
 
         def _fetch() -> dict[str, Any]:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/metrics", headers=headers)
@@ -1650,6 +1906,48 @@ def create_app(root: Path) -> FastAPI:
             hf_cache_state["ts"] = time.monotonic()
         return hf_cache_state["data"]
 
+    # ------------------------------------------------------- モデル管理 (全バックエンド横断)
+    # HF キャッシュ / model_data / Strata-data / Maya-data を 1 つの棚卸しに束ね、
+    # 対応モデル表 (ダウンロード済み判定付き) と削除ガードを載せる。権限は install
+    # (インストール / モデルDL と同じ — rbac.required_cap 参照)。
+
+    models_cache_state: dict[str, Any] = {"ts": 0.0, "data": None}
+
+    def _models_busy_dirs() -> list[str]:
+        """ダウンロード中ジョブの保存先 (削除ガード用)。"""
+        out: list[str] = []
+        job = installs.get(installs.active_id) if installs.active_id else None
+        if job and job.get("kind") == "download" and job.get("status") in ("queued", "running"):
+            for k in ("local_dir", "partial_dir"):
+                if job.get(k):
+                    out.append(str(job[k]))
+            if not out and job.get("repo_id"):
+                out.append(installs.hub_model_dir(str(job["repo_id"])))
+        return out
+
+    @app.get("/api/models")
+    async def models_inventory(refresh: int = 0) -> dict[str, Any]:
+        if (refresh or models_cache_state["data"] is None
+                or time.monotonic() - models_cache_state["ts"] > 15):
+            def _scan() -> dict[str, Any]:
+                return build_inventory(root, profiles_store.load(), list(manager.sessions.values()))
+            models_cache_state["data"] = await asyncio.to_thread(_scan)
+            models_cache_state["ts"] = time.monotonic()
+        return models_cache_state["data"]
+
+    @app.delete("/api/models")
+    async def models_delete(body: ModelDeleteBody) -> dict[str, Any]:
+        try:
+            out = await asyncio.to_thread(
+                delete_entry, root, body.id, force=body.force,
+                profiles=profiles_store.load(), sessions=list(manager.sessions.values()),
+                busy_dirs=_models_busy_dirs())
+        except ModelError as e:
+            raise HTTPException(e.status, e.message)
+        models_cache_state["data"] = None     # 次回取得は再スキャン
+        hf_cache_state["data"] = None         # 編集画面の HF ピッカーも同じモデルを見る
+        return out
+
     # ---------------------------------------------------------- playground
     # 起動中セッション (OpenAI 互換 API) への透過プロキシ。ブラウザから直接だと
     # vLLM 等は CORS ヘッダを返さずブラウザから直叩きできないため、
@@ -1712,6 +2010,10 @@ def create_app(root: Path) -> FastAPI:
             v = getattr(body, key)
             if v is not None:
                 payload[key] = v
+        if body.enable_thinking is not None:
+            # 思考 ON のモデルは本文より先に reasoning が流れる。テンプレート引数を
+            # 転送しないとプレイグラウンドから思考を切れず、開始が遅く見える
+            payload["chat_template_kwargs"] = {"enable_thinking": body.enable_thinking}
         req = urllib.request.Request(
             f"{base}/v1/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -2057,6 +2359,7 @@ def create_app(root: Path) -> FastAPI:
         # 完了時にキャッシュだけ失効させると、次回表示で新しいモデル / インストールが映る
         if job["kind"] == "download" and job["status"] == "done":
             hf_cache_state["data"] = None
+            models_cache_state["data"] = None
         elif job["kind"] == "install" and job["status"] == "done" and job.get("backend"):
             detect_cache.pop(job["backend"], None)
 
@@ -2074,11 +2377,14 @@ def create_app(root: Path) -> FastAPI:
                  # requirements 系 (pyproject の無いリポジトリ) / cmake ビルド有無は
                  # セットアップタブのプレビュー文言組み立てに使う (Basalt 対応)。
                  # engine_fetch = Strata の既製エンジン受信 step (strata_engine.py)。
+                 # tools_step = Maya の純正 tools_step (pip + llama.cpp ソース) step
+                 # (maya_tools.py)。エンジンビルドは ② のモデル構成の中。
                  # tool = このバックエンドで実際に走る install ツール表示: venv_pip spec
-                 # (Strata) は uv が在っても pip を使うので、UI の手順名をジョブ実体と揃える
+                 # (Strata / Maya) は uv が在っても pip を使うので、UI の手順名をジョブ実体と揃える
                  "requirements": spec.get("requirements", ""),
                  "cmake": bool(spec.get("cmake")),
                  "engine_fetch": bool(spec.get("engine_fetch")),
+                 "tools_step": bool(spec.get("tools_step")),
                  "tool": "pip" if spec.get("venv_pip") else install_tool(),
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
                                 if BACKENDS[bid].get("model_data") else ""),
@@ -2120,6 +2426,33 @@ def create_app(root: Path) -> FastAPI:
                                     root / INSTALL_SPECS["strata"]["module_path"])
             return installs.start_strata_model(body.model_dump(),
                                                actor=current_user(request))
+        except ActiveJobError as e:
+            raise HTTPException(409, str(e))
+        except InstallError as e:
+            raise HTTPException(400, str(e))
+
+    @app.get("/api/installs/maya-model")
+    async def maya_model_options() -> dict[str, Any]:
+        """Maya ② の選択肢: 純正 maya.py の表 (家系別 model/context/PC の RAM・ディスク・
+        エンジン実在) と、すでに設定済みの maya-<model>.json。表の単一の源は submodule
+        (maya_setup)。静的パスは {jid} より前に登録すること (FastAPI は登録順マッチ)。"""
+        mod = root / INSTALL_SPECS["maya"]["module_path"]
+        # 表の読み出しは subprocess (初回 ~1s) — イベントループを止めない
+        out = dict(await asyncio.to_thread(maya_setup.load_options, mod))
+        out["configs"] = await asyncio.to_thread(maya_setup.installed_configs, mod)
+        out["venv_ready"] = (mod / ".venv" / "bin" / "python").is_file()
+        return out
+
+    @app.post("/api/installs/maya-model", status_code=201)
+    async def maya_model_start(body: MayaModelBody, request: Request) -> dict[str, Any]:
+        """Maya のモデル構成 (純正 maya.py を --yes --no-start --download-model で非対話実行)。
+        インストールと同じ install 権限・同じ履歴 / 中断 / ログのジョブ。"""
+        try:
+            # build_argv の表読み出し (初回のみ subprocess ~1s) をループ外で温めておく
+            await asyncio.to_thread(maya_setup.load_options,
+                                    root / INSTALL_SPECS["maya"]["module_path"])
+            return installs.start_maya_model(body.model_dump(),
+                                             actor=current_user(request))
         except ActiveJobError as e:
             raise HTTPException(409, str(e))
         except InstallError as e:

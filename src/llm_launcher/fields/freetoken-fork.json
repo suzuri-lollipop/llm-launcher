@@ -97,7 +97,7 @@
    "host"
   ],
   "default": "gpu",
-  "help": "Where the input token embedding table lives. 'gpu' (default) keeps it in VRAM; 'host' keeps it in pinned host RAM and each lookup reads its rows over PCIe, so its VRAM goes to the expert cache and KV."
+  "help": "Where the input token embedding tables live. 'gpu' (default) keeps them in VRAM; 'host' keeps them in pinned host RAM and each lookup reads its rows over PCIe, so their VRAM goes to the expert cache a"
  },
  "--enable-cache-report": {
   "aliases": [],
@@ -109,6 +109,12 @@
   "aliases": [],
   "default": "False",
   "help": "Checkpoint decode state at special tokens (currently the tool-call opener). When a GDN-hybrid or SWA model samples its tool-call opener token, the scheduler preserves a reuse point just after it (GDN:",
+  "type": "bool"
+ },
+ "--enable-timings-report": {
+  "aliases": [],
+  "default": "False",
+  "help": "Attach a llama.cpp-shaped per-request timings object to every chat completion, completion and Responses response (and to the final stream chunk), so frontends like llama-swap and Open Web UI can show ",
   "type": "bool"
  },
  "--expert-load": {
@@ -156,16 +162,19 @@
   "choices": [
    "auto",
    "fp8",
-   "fp8_e4m3"
+   "int8",
+   "fp8_e4m3",
+   "fp8_per_token_head",
+   "int8_per_token_head"
   ],
   "default": "auto",
-  "help": "Storage dtype of the KV cache. 'auto' (default) keeps the model dtype; 'fp8_e4m3' ('fp8' for short) stores K/V as fp8 e4m3, halving the bytes per cached token (roughly doubling prefix capacity for the",
+  "help": "How K and V are stored. 'auto' keeps the compute dtype. The per_token_head formats store 8 bits per element plus one scale per token and head (two per MLA latent row); the triton, qsa_sparse, m3_spars",
   "type": "str"
  },
  "--kv-cache-quant-scale": {
   "aliases": [],
   "default": 1.0,
-  "help": "Static scale both K and V divide by before the fp8 store (and multiply back on read). Default 1.0; raise it if attention states exceed the e4m3 range (-448..448), which would otherwise clamp. Ignored ",
+  "help": "Static scale both K and V divide by before the fp8_e4m3 store (and multiply back on read). Default 1.0; raise it if attention states exceed the e4m3 range (-448..448), which would otherwise clamp. Ign",
   "type": "float"
  },
  "--kv-reserve-tokens": {
@@ -463,6 +472,20 @@
   "default": "argparse.SUPPRESS",
   "help": "[Deprecated] Use --quant-backend moe.nvfp4=<marlin|b12x|triton> ('flashinfer' is b12x)."
  },
+ "--online-quant": {
+  "aliases": [],
+  "choices": [
+   "df11"
+  ],
+  "default": "None",
+  "help": "Convert the Linear layers and input embedding tables that the checkpoint stores in bf16 at load. 'df11' compresses them losslessly to ~11 bits per weight and decodes them bit-for-bit on use: about 30%"
+ },
+ "--online-quant-modules": {
+  "aliases": [],
+  "default": "()",
+  "help": "Limit --online-quant to these modules: comma-separated checkpoint module names or glob patterns, e.g. 'model.layers.*.self_attn,model.embed_tokens' ('model.language_model.layers.*' where the checkpoin",
+  "type": "str"
+ },
  "--page-size": {
   "aliases": [],
   "default": 1,
@@ -509,7 +532,8 @@
    "minimax_m3",
    "muse_glimmer",
    "gemma4",
-   "flint"
+   "flint",
+   "ricursive"
   ],
   "default": "auto",
   "help": "Reasoning parser that splits chain-of-thought into reasoning_content for OpenAI responses. 'auto' selects per model family (gpt-oss Harmony, <think> for qwen3/glm/minimax, <mm:think> for minimax-m3, A",
@@ -536,15 +560,37 @@
   "help": "Run the server in shell mode.",
   "type": "bool"
  },
- "--speculative": {
-  "aliases": [],
-  "choices": [
-   "none",
-   "mtp",
-   "lookup"
+ "--speculative-algorithm": {
+  "aliases": [
+   "--spec-algo"
   ],
-  "default": "none",
-  "help": "Speculative decoding backend. 'mtp' builds the checkpoint's MTP head (qwen4_exp only for now) and drafts one extra token per step at small batch sizes; 'lookup' drafts up to four tokens that followed "
+  "default": "None",
+  "help": "Speculative decoding with this draft method (mtp: the checkpoint's own MTP layers; dflash: a DFlash 2 draft checkpoint from --speculative-draft-model-path). Off by default.",
+  "type": "str"
+ },
+ "--speculative-draft-model-path": {
+  "aliases": [
+   "--spec-draft-model"
+  ],
+  "default": "None",
+  "help": "Draft weights; by default they come from the target checkpoint. Required for dflash, which reads a separate draft checkpoint.",
+  "type": "str"
+ },
+ "--speculative-num-steps": {
+  "aliases": [
+   "--spec-num-steps"
+  ],
+  "default": 0,
+  "help": "Draft tokens per decode step (k); 0 takes the method's default.",
+  "type": "int"
+ },
+ "--speculative-token-map": {
+  "aliases": [
+   "--spec-token-map"
+  ],
+  "default": "None",
+  "help": "File of little-endian int32 token ids the draft may propose (mtp only). The draft computes logits over those LM head rows alone; the target still verifies over the whole vocabulary. Off by default.",
+  "type": "str"
  },
  "--swa-decoder-replay": {
   "aliases": [],
@@ -577,6 +623,7 @@
    "qwen",
    "qwen25",
    "qwen3_coder",
+   "ricursive",
    "mistral",
    "deepseekv32",
    "deepseekv41",
