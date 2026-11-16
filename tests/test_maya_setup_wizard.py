@@ -393,7 +393,7 @@ def test_build_argv_without_submodule_tables_fails(tmp_path: Path):
     """表が読めない (未 clone) は argv を作らない — 対話 maya.sh へ戻すしかない状態。"""
     mod = tmp_path / "no-maya"
     mod.mkdir()
-    with pytest.raises(ValueError, match="表を読めません"):
+    with pytest.raises(ValueError, match="未取得"):
         maya_setup.build_argv(mod, {"family": "glm", "model": "Maya-S24", "context": 32768})
 
 

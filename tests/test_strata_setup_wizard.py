@@ -416,7 +416,7 @@ def test_build_argv_without_submodule_tables_fails(tmp_path: Path):
     """表が読めない (未 clone) は argv を作らない — 対話 setup.sh へ戻すしかない状態。"""
     mod = tmp_path / "no-strata"
     mod.mkdir()
-    with pytest.raises(ValueError, match="表を読めません"):
+    with pytest.raises(ValueError, match="未取得"):
         strata_setup.build_argv(mod, {"family": "qwen", "model": "Q2_0", "context": 8192})
 
 
