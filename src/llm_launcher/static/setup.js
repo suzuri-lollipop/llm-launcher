@@ -1964,14 +1964,18 @@ $("#nt-skip").addEventListener("click", async () => {
    エンジンビルド / 速度計測も選択カードで走る (他カードを空けておける)。 */
 async function startModelJob() {
   if (!W.preJob || W.modelSkipped) { renderCal(); go("s-cal"); return; }
-  // 開始済み (「もどる」で戻ってきた等): 二重 POST せず進捗 / 調整へ
-  if (W.job && W.job.id) {
-    if (W.job.status === "running" || W.job.status === "queued") {
+  // 開始済み (「もどる」で戻ってきた等): 二重 POST せず進捗 / 調整へ。
+  // 対象はモデルジョブ (② の DL / モデル構成) だけ — ① インストールジョブ (done) を
+  // 「モデルジョブ完了」と誤認してダウンロードをスキップしない (2026-11-16 実害:
+  // 256G を選んでも POST されず調整画面へ飛んでいた)
+  const mj = (W.job && W.job.id && (W.kind === "download" || W.job.phase === "model")) ? W.job : null;
+  if (mj) {
+    if (mj.status === "running" || mj.status === "queued") {
       if (W.kind === "download") { renderDownload(); go("s-download"); }
       else { renderProgress(); go("s-progress"); }
       startPoll(); return;
     }
-    if (W.job.status === "done") { renderCal(); go("s-cal"); return; }
+    if (mj.status === "done") { renderCal(); go("s-cal"); return; }
   }
   const err = $("#nt-err");
   err.classList.add("hidden");

@@ -76,8 +76,8 @@ def test_start_model_job_sends_settings_answers():
     assert "body.gpus = g;" in fn
     assert 'W.tableReq.family !== "qwen"' in fn
     assert "body.parallel = W.setupParallel;" in fn
-    # 二重 POST 防止 (もどる で戻ってきた場合)
-    assert 'W.job.status === "running"' in fn
+    # 二重 POST 防止 (もどる で戻ってきた場合) — モデルジョブだけが対象
+    assert 'mj.status === "running"' in fn
 
 
 # ---------------------------------------------------------------- ジョブ完了 → 紐付け → ⑤
@@ -140,3 +140,14 @@ def test_resumed_job_keeps_legacy_post_flow():
     assert "cfg.regen === \"config-args\"" in cfgo
     ntgo = _block('$("#nt-go").addEventListener("click"', '$("#nt-skip").addEventListener')
     assert 'if (!W.preJob && cfg.regen && cfg.regen !== "config-args") {' in ntgo
+
+
+def test_start_model_job_ignores_the_install_job():
+    """④ の後のジョブ開始は「モデルジョブ開始済み」だけを二重 POST 防止の対象にする。
+    ① インストールジョブ (done) が W.job に残っていると、それを「モデルジョブ完了」と
+    誤認してダウンロードを POST せず調整画面へ飛んでいた (2026-11-16 実害:
+    256G を選んでもダウンロードがスキップされた。jsdom 再現で確認)。"""
+    fn = _block("async function startModelJob()", "ジョブ完了後の紐付け")
+    assert 'const mj = (W.job && W.job.id && (W.kind === "download" || W.job.phase === "model")) ? W.job : null;' in fn
+    assert 'if (mj.status === "done") { renderCal(); go("s-cal"); return; }' in fn
+    assert 'if (mj.status === "running" || mj.status === "queued") {' in fn
