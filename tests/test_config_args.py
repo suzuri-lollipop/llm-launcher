@@ -48,6 +48,13 @@ def _profile(client, backend: str, config: str) -> str:
     return r.json()["id"]
 
 
+def _prof_cfg(client, pid: str) -> Path:
+    """プロファイルが実際に参照する config (共有 installer config は専用コピーへ
+    張り替わるため、編集結果の検証はそちらを読む)。"""
+    profs = client.get("/api/profiles").json()
+    return Path(next(p for p in profs if p["id"] == pid)["values"]["config"])
+
+
 def test_get_config_args_reads_current_values(client):
     c, root = client
     _config(root)
@@ -61,6 +68,7 @@ def test_post_config_args_updates_args_and_args_written(client):
     c, root = client
     p = _config(root)
     pid = _profile(c, "strata", "module/strata/strata-x.json")
+    p = _prof_cfg(c, pid)
     r = c.post(f"/api/profiles/{pid}/config-args",
                json={"updates": {"--max-context": "131072", "--kv": "fp16"}})
     assert r.status_code == 200, r.text
@@ -81,7 +89,7 @@ def test_post_config_args_appends_missing_flag(client):
     # 2 枚以上を要求する値はカード数検証に掛かるためここでは 1 を使う
     r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"--tp": "1"}})
     assert r.status_code == 200, r.text
-    a = json.loads(p.read_text("utf-8"))["args"]
+    a = json.loads(_prof_cfg(c, pid).read_text("utf-8"))["args"]
     assert a[-2:] == ["--tp", "1"]
 
 
@@ -155,6 +163,7 @@ def test_post_config_args_gpu_multi_then_single(client, monkeypatch):
     p = _config(root)
     _seed_gpus(monkeypatch, root)
     pid = _profile(c, "strata", "module/strata/strata-x.json")
+    p = _prof_cfg(c, pid)
     r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0,1"}})
     assert r.status_code == 200, r.text
     doc = json.loads(p.read_text("utf-8"))

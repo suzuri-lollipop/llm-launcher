@@ -695,6 +695,13 @@ def _profile(client, config: str) -> str:
     return r.json()["id"]
 
 
+def _prof_cfg(client, pid: str) -> Path:
+    """プロファイルが実際に参照する config (共有 installer config は専用コピーへ
+    張り替わるため、編集結果の検証はそちらを読む)。"""
+    profs = client.get("/api/profiles").json()
+    return Path(next(p for p in profs if p["id"] == pid)["values"]["config"])
+
+
 def _seed_maya_gpus(monkeypatch, root: Path) -> None:
     mod = root / "module" / "maya"
     (mod / "maya.py").write_text("# fake\n", encoding="utf-8")
@@ -713,6 +720,7 @@ def test_glm_config_asks_kv_and_gpu_not_tp(client, monkeypatch):
                   {"exe": "/x/maya", "args": ["--glm-pack", "/p", "--max-context", "32768"],
                    "gpu": [0, 1]})
     pid = _profile(c, "module/maya/maya-maya-s24.json")
+    p = _prof_cfg(c, pid)
     r = c.get(f"/api/profiles/{pid}/config-args").json()
     assert r["family"] == "glm" and r["kv_ok"] is True and r["tp_ok"] is False
     assert r["gpu"] == "0,1" and r["gpus"] == [0, 1]
@@ -741,6 +749,7 @@ def test_ds4_config_gpu_selection_derives_tp(client, monkeypatch):
                   {"exe": "/x/maya-ds4", "args": ["--pack", "/p", "--max-context", "65536", "--tp", "2"],
                    "gpu": [0, 1]})
     pid = _profile(c, "module/maya/maya-ds4.json")
+    p = _prof_cfg(c, pid)
     r = c.get(f"/api/profiles/{pid}/config-args").json()
     assert r["family"] == "deepseek" and r["kv_ok"] is False and r["tp_ok"] is True
     assert r["gpu"] == "0,1" and r["gpus"] == [0, 1]
@@ -834,6 +843,7 @@ def test_settings_first_flow_binds_config_after_job(tmp_path: Path, monkeypatch:
                    json={"name": p["name"], "backend": "maya",
                          "values": {"parallel": "2", "config": cfg}})
     assert r.status_code == 200, r.text
+    cfg = r.json()["values"]["config"]   # 専用コピーへ張り替わる (installer は共有しない)
     r = client.post(f"/api/profiles/{p['id']}/config-args",
                     json={"updates": {"--kv": "int8"}})
     assert r.status_code == 200, r.text
