@@ -848,8 +848,10 @@ async function renderModelTable(backend) {
   mdStFillSizes(); mdStFillCtx();
   /* ダウンロード済み一覧: 表から作る (モデル名 + サイズ + GB)。JSON 名は内部では
      使うが UI には出さない — 「そのモデルが在る」だけがユーザーの情報。
-     profile モードは config JSON 作成済みのモデルだけ (セットアップジョブを
-     走らせないフローなので、重みが在っても config が無いモデルは選べない) */
+     有無は「重みがディスクに揃っているか」(表の have) で決める — config JSON の
+     有無 / quant_key で決めない (共有 config の quant_key が最後の設定を指すと
+     他の量子化の重みが在っても一覧から消える。2026-11-16 実害)。
+     config が無い量子化は選択後に純正セットアップが config だけ作る (DL なし) */
   const dl = [];
   for (const fid of famIds) {
     const f = fams[fid];
@@ -859,27 +861,23 @@ async function renderModelTable(backend) {
                                       gb: (d.have || {}).gb });
     }
   }
-  const ready = profileFlow()
-    ? dl.filter(x => (st.configs || []).some(y => y.name === mdCfgKey(fams[x.fam] || {}, x.model)
-        && (y.weights || {}).ok === true && (!y.quant_key || y.quant_key === x.model)))
-    : dl;
-  st.downloaded = ready;
-  $("#md-strata-exist").innerHTML = ready.map((x, i) => `<option value="${esc(x.key)}"${i === 0 ? " selected" : ""}>`
+  st.downloaded = dl;
+  $("#md-strata-exist").innerHTML = dl.map((x, i) => `<option value="${esc(x.key)}"${i === 0 ? " selected" : ""}>`
     + `${esc(x.label + " — " + (x.gb || "?") + " GB")}</option>`).join("")
     || (profileFlow()
-      ? '<option value="">(設定作成済みのモデルがありません — 先に通常のセットアップでモデル設定を実行してください)</option>'
+      ? '<option value="">(ダウンロード済みのモデルがありません — 先に通常のセットアップでダウンロードしてください)</option>'
       : '<option value="">(ダウンロード済みのモデルがありません)</option>');
   const localR = $$("#md-modes input").find(i => i.value === "local");
-  localR.disabled = !ready.length;
-  $$("#md-modes .opt").forEach(o => { if (o.contains(localR)) o.style.opacity = ready.length ? "" : ".45"; });
+  localR.disabled = !dl.length;
+  $$("#md-modes .opt").forEach(o => { if (o.contains(localR)) o.style.opacity = dl.length ? "" : ".45"; });
   if (localR.disabled && mdMode() === "local" && !profileFlow()) {
     $$("#md-modes input").find(i => i.value === "dl").checked = true;
   }
   $("#md-err").classList.add("hidden");
   $("#md-sub").textContent = profileFlow()
     ? (isMaya
-      ? "この PC にダウンロード済みで設定 (maya-<model>.json) 作成済みの Maya モデルから選んでください。新しいダウンロード / エンジンビルドは行いません。"
-      : "この PC にダウンロード済みで設定 (strata-<model>.json) 作成済みの Strata モデルから選んでください。新しいダウンロードは行いません。")
+      ? "この PC にダウンロード済みの Maya モデル (重み検証済み) から選んでください。config が無い場合は純正セットアップが config だけ作成します (再ダウンロードはありません)。"
+      : "この PC にダウンロード済みの Strata モデル (重み検証済み) から選んでください。config が無い場合は純正セットアップが config だけ作成します (再ダウンロードはありません)。")
     : (isMaya
     ? "Maya は家系 (GLM / DeepSeek / MiniMax / Qwen)・サイズ (量子化)・コンテキスト長を選ぶだけです。"
       + "Maya 本体のセットアップ手順がこのまま走り、エンジンビルド (初回)・ダウンロードから起動設定 "
@@ -950,13 +948,10 @@ async function mdAdoptLocalTable() {
     renderConfig(); go("s-config");
     return;
   }
-  /* profile モードはセットアップジョブ (config 作成) を走らせない — 一覧は
-     config 作成済みだけで作るので通常ここには来ない。万一の取りこぼしは正直に止める */
-  if (profileFlow()) {
-    $("#md-err").textContent = "このモデルの config JSON が見つかりません。先に通常のセットアップでモデル設定を実行してください。";
-    $("#md-err").classList.remove("hidden");
-    return;
-  }
+  /* config が無い (削除 / 別経路 / 共有 config の quant_key が別の量子化) ときは
+     純正セットアップジョブで検証・config 作成だけ走らせる (重みが在るので
+     ダウンロードは起きない)。profile モードも同じ — 一覧は重み基準なので
+     「config が無い = 選べない」にはしない (2026-11-16 実害の修正) */
   const d = (f.models || {})[x.model] || {};
   W.tableReq = { family: x.fam, model: x.model,
                  context: d.rec_context || (W.backend === "maya" ? 32768 : 131072), vision: "" };
