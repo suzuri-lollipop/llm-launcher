@@ -106,6 +106,73 @@ def dir_size(path: Path, max_files: int = _SIZE_MAX_FILES, *, local_only: bool =
     return total
 
 
+def _dir_weights(d: Path, max_files: int = 400) -> tuple[bool, list[dict[str, Any]]]:
+    """ディレクトリ直下の重みファイル (汎用重みの有無 + GGUF 一覧)。
+    棚卸しの「モデル単位」判定と has_weights の実計算に使う。"""
+    has_weights = False
+    gguf: list[dict[str, Any]] = []
+    try:
+        for f in sorted(d.iterdir()):
+            if not f.is_file():
+                continue
+            size = f.stat().st_size
+            suf = f.suffix.lower()
+            if suf in _WEIGHT_SUFFIXES and size > _WEIGHT_MIN:
+                has_weights = True
+            if suf == ".gguf":
+                gguf.append({"name": f.name, "size": size})
+            if len(gguf) >= max_files:
+                break
+    except OSError:
+        pass
+    return has_weights, gguf
+
+
+# Maya のモデル置き場で「モデルではない」構成要素ディレクトリ (drafter / vision エンコーダ)。
+# これらは pack の付属物で、単独のモデルとして棚卸しに出さない (純正 maya.py の置き場規約)。
+_MAYA_COMPONENT_DIRS = {"dspark", "vision", "mmproj"}
+
+
+def scan_pack_dirs(droot: Path, *, skip_names: frozenset[str] = frozenset(),
+                   max_depth: int = 4) -> list[dict[str, Any]]:
+    """データフォルダを「モデル単位」のディレクトリまで辿って一覧化する。
+
+    モデル単位 = 直下に重みファイル (gguf / safetensors 等) を持つディレクトリ。
+    一度モデル単位を見つけたらその中は辿らない (Maya の pack メタデータ
+    <quant>/maya-ds4/ や Strata の pack/ を二重エントリにしない)。
+    Maya は models/<org>/<quant>/ に重みが置かれるため、org 直下 (重み無し) は
+    潜って quant 単位で出す — org 丸ごとの巨大エントリにしない。
+    skip_names (drafter / vision 等の構成要素) はモデルとして出さない。"""
+    out: list[dict[str, Any]] = []
+    if not droot.is_dir():
+        return out
+
+    def walk(d: Path, depth: int) -> None:
+        try:
+            children = sorted(d.iterdir())
+        except OSError:
+            return
+        has_weights, gguf = _dir_weights(d)
+        if has_weights and d != droot:
+            try:
+                mtime = d.stat().st_mtime
+            except OSError:
+                mtime = 0
+            out.append({"path": str(d), "name": str(d.relative_to(droot)),
+                        "has_weights": True, "gguf": gguf,
+                        "size_bytes": dir_size(d), "mtime": mtime})
+            return                      # モデル単位の中 (pack メタデータ等) は辿らない
+        if depth >= max_depth:
+            return
+        for c in children:
+            if c.is_dir() and c.name.lower() not in skip_names:
+                walk(c, depth + 1)
+
+    walk(droot, 0)
+    out.sort(key=lambda m: m["mtime"], reverse=True)
+    return out
+
+
 def scan_data_models(models_root: Path, max_files: int = 400) -> list[dict[str, Any]]:
     """setup.sh / UI が <data>/models/<org>--<name> へ置いたモデルを一覧化する。
     scan_hf_cache と同じ形のレコード (snapshot はフォルダそのもの)。"""
@@ -509,7 +576,11 @@ def build_inventory(root: Path, profiles: list[dict[str, Any]],
     for prefix, mod in cfg_groups:
         cfg_refs += _config_refs(mod, prefix)
 
-    # 4) データフォルダ直下の重み (config が無いものも見えるように)
+    # 4) データフォルダ直下の重み (config が無いものも見えるように)。
+    #    モデル単位まで潜る: Maya は models/<org>/<quant>/ に重みが在るため
+    #    org 丸ごとではなく quant / pack 単位で出す (2026-11-16: org 直下だけを
+    #    見て 284GB の巨大エントリ 1 件になり、ダウンロードしたモデルが
+    #    正しく表示できていなかった)。drafter / vision の構成要素はモデルに出さない。
     dir_groups: list[tuple[str, Path, list[str], str]] = []
     sdd = strata_data_dir(root)
     if sdd is not None:
@@ -518,24 +589,21 @@ def build_inventory(root: Path, profiles: list[dict[str, Any]],
     mdd = maya_data_dir(root)
     dir_groups.append(("maya-data", mdd / "models", ["maya"], "models"))
     for source, droot, bids, _sub in dir_groups:
+        # symlink 経由の module でも参照パス (絶対実パス) と突合できるよう実体化する
+        droot = droot.resolve()
         if not droot.is_dir():
             continue
-        for d in sorted(droot.iterdir()):
-            if not d.is_dir():
-                continue
-            p = str(d)
+        skip = frozenset(_MAYA_COMPONENT_DIRS) if source == "maya-data" else frozenset()
+        for pk in scan_pack_dirs(droot, skip_names=skip):
+            p = pk["path"]
             ub = used_by([p])
             affected = [Path(c["path"]).name for c in cfg_refs
                         if any(_path_matches(wp, p) for wp in c["weight_paths"])]
-            try:
-                mtime = d.stat().st_mtime
-            except OSError:
-                mtime = 0
             models.append({
                 "id": f"{source}:{p}", "kind": "dir", "source": source, "owner": "",
-                "name": d.name, "repo_id": "", "path": p, "paths": [p],
-                "revision": "", "size_bytes": dir_size(d), "mtime": mtime,
-                "has_weights": True, "gguf": [], "basalt": [],
+                "name": pk["name"], "repo_id": "", "path": p, "paths": [p],
+                "revision": "", "size_bytes": pk["size_bytes"], "mtime": pk["mtime"],
+                "has_weights": pk["has_weights"], "gguf": pk["gguf"], "basalt": [],
                 "formats": ["Strata pack" if source == "strata-data" else "Maya pack"],
                 "backends": list(bids),
                 "used_by": ub, "running": running(ub, [p]),
@@ -545,11 +613,16 @@ def build_inventory(root: Path, profiles: list[dict[str, Any]],
 
     models.sort(key=lambda m: (-(m.get("mtime") or 0), m["name"]))
 
-    # バックエンド別の対応モデル表 (ダウンロード済み判定付き)
+    # バックエンド別の対応モデル表 (ダウンロード済み判定付き)。
+    # repo エントリに加え Strata-data の dir エントリも repo_id 換算で突合する
+    # (名前 <org>--<name> は HF の <org>/<name> と同じモデル。重みがデータフォルダに
+    #  在っても HF キャッシュに無いだけで「未取得」扱っていた 2026-11-16 の不具合)。
     by_repo: dict[str, dict[str, Any]] = {}
     for m in models:
         if m["kind"] == "repo":
             by_repo.setdefault(m["repo_id"].lower(), m)
+        elif m["kind"] == "dir" and m["source"] == "strata-data" and m["has_weights"]:
+            by_repo.setdefault(m["name"].replace("--", "/", 1).lower(), m)
     backends: list[dict[str, Any]] = []
     for bid, b in BACKENDS.items():
         bb = backend_for(root, bid)

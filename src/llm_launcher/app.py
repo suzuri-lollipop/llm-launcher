@@ -946,12 +946,82 @@ def create_app(root: Path) -> FastAPI:
     async def list_profiles() -> Any:
         return profiles_store.load()
 
+    # --------------------------------------------- Strata / Maya のプロファイル専用 config
+    # インストーラが作った共有 config (module/strata/strata-*.json / module/maya/maya-*.json)
+    # をプロファイルがそのまま参照すると、片方の編集 / キャリブレーションがもう片方へ
+    # 漏れる (Basalt / freetoken-fork が専用 JSON で解いているのと同じ問題)。
+    # 参照を「モデル名-uuid8」の専用コピー (data/launch、Basalt と同じ置き場) へ張り替える。
+
+    def _installer_config_dirs() -> list[Path]:
+        dirs = [root / "module/strata", root / "module/maya"]
+        for cand in (root / "module/fork/strata", root / "module/fork/Strata"):
+            if cand.is_dir():
+                dirs.append(cand)
+                break
+        return dirs
+
+    def _personalize_config(prof: dict[str, Any], *, is_new: bool = False,
+                            old_config: str = "") -> bool:
+        """Strata / Maya の共有 installer config 参照を専用コピーへ張り替える。
+        コピーを作ったら True。エンジンログ (config の log) も専用名にして共有しない。
+        is_new (新規 / 複製 / インポート) では他プロファイルの専用コピーを引き継いだ
+        場合もこの ID 専用へ作り直す (Basalt の複製と同じ規律)。"""
+        bid = str(prof.get("backend") or "")
+        if bid not in ("maya", "strata", "strata-fork"):
+            return False
+        v = prof.setdefault("values", {})
+        raw = str(v.get("config") or "").strip()
+        if not raw:
+            return False
+        p = Path(raw).expanduser()
+        cp = (p if p.is_absolute() else root / p).resolve()
+        launch_dir = (root / "data" / "launch").resolve()
+        installer = any(d.resolve() in cp.parents for d in _installer_config_dirs())
+        inherited = (is_new and launch_dir in cp.parents and cp.name.startswith(f"{bid}-"))
+        if not installer and not inherited:
+            return False                    # 既に専用コピー / ユーザー指定パスは触らない
+        if not cp.is_file():
+            return False
+        try:
+            doc = json.loads(cp.read_text("utf-8"))
+        except (OSError, ValueError):
+            return False
+        if not isinstance(doc, dict):
+            return False
+        # 更新時は既存の専用コピーを再利用 (ウィザード再実行で uuid が増殖しない)
+        reuse = Path(old_config) if old_config else None
+        if reuse is not None and not reuse.is_absolute():
+            reuse = root / reuse
+        if (reuse is not None and reuse.resolve().parent == launch_dir
+                and reuse.name.startswith(f"{bid}-") and reuse.is_file()):
+            dest = reuse
+        else:
+            label = str(doc.get("model_name") or cp.stem)
+            slug = re.sub(r"[^A-Za-z0-9._-]+", "-",
+                          label.replace("\\", "/").rstrip("/").split("/")[-1]).strip("-.")[:48]
+            dest = launch_dir / f"{bid}-{slug or bid}-{uuid.uuid4().hex[:8]}.json"
+        if isinstance(doc.get("log"), str) and doc["log"]:
+            doc["log"] = str(cp.parent / f"{dest.stem}.log")
+        # どの installer config から作ったか (ウィザードのエンジン値 lookup が
+        # 専用コピー名でも純正表の config を引けるようにする backlink)
+        if installer:
+            doc["source_config"] = cp.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", "utf-8")
+        tmp.replace(dest)
+        v["config"] = str(dest)
+        return True
+
     @app.post("/api/profiles", status_code=201)
     async def create_profile(body: ProfileBody) -> dict[str, Any]:
         data = validate_profile(body)
         data["id"] = new_id("p")
         data["created_at"] = now()
         data["updated_at"] = now()
+        # Strata / Maya: 共有 installer config / 他プロファイルの専用コピーは
+        # このプロファイル専用の「モデル名-uuid8」コピーへ張り替える
+        _personalize_config(data, is_new=True)
         # Basalt はモデルが入っていれば保存と同時に設定 JSON も作る (フォームの値をそのまま
         # 反映した v2 config)。モデル未設定 (mock 用途) は作らず、後から作成ボタンで補える。
         # 複製 / インポートで他プロファイルの生成 JSON を引き継いだ場合も、この ID 専用の
@@ -977,6 +1047,8 @@ def create_app(root: Path) -> FastAPI:
             for i, p in enumerate(lst):
                 if p["id"] == profile_id:
                     merged = {**p, **data, "updated_at": now()}
+                    # Strata / Maya: 共有 installer config を掴んだら専用コピーへ
+                    _personalize_config(merged, old_config=str((p.get("values") or {}).get("config") or ""))
                     # Basalt: 生成済みの設定 JSON を使っているプロファイルは、保存のたびに
                     # フォーム値 (コンテキスト長 / KV / 並列 / GPU …) を JSON へ反映する。
                     # 手書き JSON (別パス) や config を明示 OFF にしたプロファイルは触らない。
@@ -1012,6 +1084,16 @@ def create_app(root: Path) -> FastAPI:
                 if p.get("backend") == "basalt":
                     with contextlib.suppress(OSError):
                         _basalt_config_path(profile_id).unlink(missing_ok=True)
+                elif p.get("backend") in ("maya", "strata", "strata-fork"):
+                    # プロファイル専用 config (data/launch/<backend>-<slug>-<uuid8>.json) は
+                    # 孤立ファイルとして残さない (ユーザーの手書き JSON には触らない)
+                    cp = Path(str((p.get("values") or {}).get("config") or ""))
+                    if not cp.is_absolute():
+                        cp = root / cp
+                    if cp.resolve().parent == (root / "data" / "launch").resolve() \
+                            and cp.name.startswith(f"{p.get('backend')}-"):
+                        with contextlib.suppress(OSError):
+                            cp.unlink(missing_ok=True)
             return len(lst) < before
         if not profiles_store.mutate(_del):
             raise HTTPException(404, "プロファイルが見つかりません")
@@ -1269,9 +1351,13 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, "プロファイルに設定 JSON (--config) がありません")
         p = p.resolve()
         mod = (root / "module").resolve()
-        if (mod not in p.parents or p.suffix != ".json"
-                or not (p.name.startswith("strata-") or p.name.startswith("maya-"))):
-            raise HTTPException(400, "module/ 配下の strata-*.json / maya-*.json だけ編集できます")
+        launch = (root / "data" / "launch").resolve()
+        bid = str(prof.get("backend") or "")
+        in_mod = mod in p.parents and (p.name.startswith("strata-") or p.name.startswith("maya-"))
+        # プロファイル専用コピー (data/launch/<backend>-<slug>-<uuid8>.json) も編集可
+        personal = launch in p.parents and p.name.startswith(f"{bid}-")
+        if p.suffix != ".json" or not (in_mod or personal):
+            raise HTTPException(400, "module/ 配下の strata-*.json / maya-*.json か専用 config コピーだけ編集できます")
         return p
 
     def _config_args_doc(p: Path) -> dict[str, Any]:
@@ -1299,7 +1385,10 @@ def create_app(root: Path) -> FastAPI:
         opts = strata_setup.load_options(root / backend_for(root, bid)["module_path"])
         usable = [int(x["index"]) for x in ((opts.get("pc") or {}).get("gpus") or []) if x.get("usable")]
         multi = True
-        name = Path(str((prof.get("values") or {}).get("config") or "")).name
+        # 専用コピー (data/launch/strata-<slug>-<uuid8>.json) は source_config で
+        # 元の installer config 名を引く (家系の multi_gpu 判定が名前一致のため)
+        name = str(doc.get("source_config")
+                   or Path(str((prof.get("values") or {}).get("config") or "")).name)
         for f in (opts.get("families") or {}).values():
             for m in (f.get("models") or {}):
                 if name == f"strata-{(str(f.get('tag') or '') + m).lower()}.json":
@@ -1369,6 +1458,7 @@ def create_app(root: Path) -> FastAPI:
         p = _config_args_path(prof)
         doc = _config_args_doc(p)
         out: dict[str, Any] = {"ok": True, "path": str(p), "args": _config_args_map(doc)}
+        out["source_config"] = str(doc.get("source_config") or "")
         if (prof.get("backend") or "") in ("strata", "strata-fork"):
             cur, usable, multi = _config_gpu_info(prof, doc)
             out.update(gpu=cur, gpus=usable, gpu_multi=multi)
@@ -2611,5 +2701,27 @@ def create_app(root: Path) -> FastAPI:
             return resp
 
     app.mount("/static", NoCacheStatic(directory=STATIC_DIR), name="static")
+
+    # -------------------------------------------------------------- migration
+    # 既存プロファイルの共有 installer config 参照を専用コピーへ移行する。
+    # 同じ maya-ds4.json / strata-*.json を複数プロファイルが共有すると、
+    # 編集 / キャリブレーションの書き戻しが他プロファイルへ漏れる
+    # (2026-11-16: maya の 2 プロファイルが maya-ds4.json を共有していた)。
+    def _migrate_personal_configs() -> int:
+        n = 0
+
+        def _mut(lst: list) -> list:
+            nonlocal n
+            for p in lst:
+                if _personalize_config(p):
+                    n += 1
+            return lst
+
+        profiles_store.mutate(_mut)
+        return n
+
+    _mig = _migrate_personal_configs()
+    if _mig:
+        print(f"config: Strata / Maya の {_mig} プロファイルを専用 config コピー (data/launch) へ移行しました")
 
     return app

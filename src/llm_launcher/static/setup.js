@@ -1567,7 +1567,8 @@ async function renderConfig() {
     try {
       const r = (await api(`/api/profiles/${p.id}/config-args`)) || {};
       W.cfgArgs = { ...(r.args || {}), gpu: r.gpu, gpus: r.gpus, gpu_multi: r.gpu_multi,
-                    family: r.family, kv_ok: r.kv_ok, tp_ok: r.tp_ok };
+                    family: r.family, kv_ok: r.kv_ok, tp_ok: r.tp_ok,
+                    source_config: r.source_config || "" };
     } catch { /* 読めなければ未設定扱い (推奨プリチェック) */ }
   }
   /* Maya: 家系別の質問出し分け (エンジン実装が単一の源)。
@@ -1623,7 +1624,9 @@ async function renderConfig() {
       const d = (f.models || {})[W.tableReq.model] || {};
       W.cfgEngine = { parallel: null, recContext: Number(d.rec_context) || null };
     } else {
-      const cfgName = String(v.config || "").split("/").pop();
+      // 専用コピー (data/launch/<backend>-<slug>-<uuid8>.json) は source_config で
+      // 元の installer config 名を引く (純正表の parallel / rec_context 突合用)
+      const cfgName = String(W.cfgArgs.source_config || String(v.config || "").split("/").pop());
       const c = (st.configs || []).find(x => x.name === cfgName);
       let recCtx = null;
       for (const f of Object.values(st.families || {})) {
