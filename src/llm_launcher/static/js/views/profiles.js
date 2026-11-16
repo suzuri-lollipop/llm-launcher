@@ -11,6 +11,7 @@ VIEWS.profiles = `
       <button class="ghost need-edit" onclick="exportAll()"><svg class=ic aria-hidden=true><use href=#i-download /></svg> 全部エクスポート</button>
       <button class="ghost need-edit" onclick="$('#import-file').click()"><svg class=ic aria-hidden=true><use href=#i-upload /></svg> インポート</button>
       <input type="file" id="import-file" accept="application/json,.json" style="display:none" onchange="importFile(this)">
+      <button class="primary need-edit" title="ガイド付きでプロファイルを作成し、キャリブレーションまで実行します (インストール / ダウンロードなし)" onclick="openProfileWizard()"><svg class=ic aria-hidden=true><use href=#i-wrench /></svg> ウィザード作成</button>
       <button class="primary need-edit" onclick="openEditor()">＋ 新規</button>
     </div>
     <div class="row" style="margin-bottom:10px;gap:8px">
@@ -37,6 +38,10 @@ VIEWS.profiles = `
   </section>
 `;
 /* ---------------- profiles 管理画面 ---------------- */
+/* ガイド付き作成: プロファイル作成 + キャリブレーションだけのウィザード (/setup?flow=profile)。
+   インストール / モデル DL が済みの環境向け — 新しいダウンロードは行わない。
+   権限は profiles.edit (調整は calibrate)。セットアップタブの install 権限は不要 */
+function openProfileWizard() { location.href = "/setup?flow=profile"; }
 function profUsage(pid) {
   const ss = (S.state.sessions || []).filter(s => s.profile_id === pid);
   const last = ss.reduce((m, s) => Math.max(m, s.started_at || 0), 0);
@@ -83,7 +88,7 @@ function renderProfiles() {
   const ps = pmFilterSort(all);
   if (!ps.length) {
     g.innerHTML = `<div class="empty">${all.length ? "条件に合うプロファイルがありません。" :
-      "プロファイルを作成すると、ここに・起動タブに並びます。<br><br><button class='primary' onclick='openEditor()'>＋ プロファイルを作成</button>"}</div>`;
+      "プロファイルを作成すると、ここに・起動タブに並びます。<br><br><button class='primary' onclick='openProfileWizard()'>ウィザードで作成 (調整付き)</button> <button class='primary' onclick='openEditor()'>＋ プロファイルを作成</button>"}</div>`;
     return;
   }
   g.innerHTML = ps.map(p => {

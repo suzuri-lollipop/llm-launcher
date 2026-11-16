@@ -1,0 +1,243 @@
+"""プロファイル作成 + キャリブレーションのみウィザード (/setup?flow=profile) の回帰テスト。
+
+2026-11-16 の機能追加: 通常のセットアップウィザード (① インストール → ② モデル選択
+→ ③ 稼働設定 → ④ 接続設定 → DL / セットアップ → ⑤ 調整) から、**インストール /
+ダウンロードを一切行わないモード** を分離した:
+
+  - 入口はプロファイル管理タブの「ウィザード作成」ボタン (主) とセットアップタブ /
+    ウィザード歓迎画面のリンク (副)
+  - バックエンド (インストール済みのみ) → ダウンロード済みモデルから選ぶ →
+    ③ 稼働設定 → ④ 接続設定 → ⑤ 調整 (任意) → 完了
+  - 権限は profiles.edit (+ 調整は calibrate)。install 権限は不要 — そのため
+    /api/installs (install 権限) は叩かず、読み取り専用の
+    GET /api/profiles/setup-options (profiles.edit) から選択肢を読む
+  - Strata / Maya は config JSON 作成済みのモデルだけを選ぶ (セットアップジョブを
+    走らせない)。他バックエンドは既存の「済みモデル即時採用」パス (ジョブなし) を通る
+
+見張る対象:
+  1. profile モードの起動 / 権限 / データ源 (install 権限・/api/installs に依存しない)
+  2. インストール / DL ジョブを開始・再開しない (済みモデルの即時採用だけ)
+  3. モデル選択は「ダウンロード済み」固定 (ダウンロード択 / あとでする を出さない)
+  4. Strata / Maya の一覧は config 作成済みだけ。config 欠落はジョブで補わない
+  5. ③④⑤ の既存コア (プロファイル作成 / 保存 / 調整) と戻り導線はそのまま再利用
+  6. API: setup-options の形と RBAC (profiles.edit で読め、install 不要)
+"""
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+from test_auth_users import Client, auth_on, fast_kdf, make_app, setup_admin  # noqa: F401
+from test_roles import add_user, login
+
+from llm_launcher import rbac
+from llm_launcher.backends import BACKENDS
+from llm_launcher.installer import INSTALL_SPECS
+
+ROOT = Path(__file__).resolve().parents[1]
+STATIC = ROOT / "src" / "llm_launcher" / "static"
+JS = (STATIC / "setup.js").read_text("utf-8")
+HTML = (STATIC / "setup.html").read_text("utf-8")
+PROFILES_JS = (STATIC / "js" / "views" / "profiles.js").read_text("utf-8")
+SETUP_VIEW_JS = (STATIC / "js" / "views" / "setup.js").read_text("utf-8")
+
+
+def _block(start: str, end: str) -> str:
+    i = JS.index(start)
+    j = JS.index(end, i)
+    return JS[i:j]
+
+
+# ---------------------------------------------------------------- 起動 / 権限 / データ源
+
+def test_flow_param_selects_profile_mode():
+    assert 'flow: new URLSearchParams(location.search).get("flow") === "profile" ? "profile" : "full"' in JS
+    assert 'const profileFlow = () => W.flow === "profile";' in JS
+
+
+def test_profile_boot_requires_profiles_edit_not_install():
+    boot = _block("async function boot()", "/* ---------------------------------------------------------------- 1: バックエンド選択 */")
+    assert '(W.me.perms || {})["profiles.edit"]' in boot
+    assert 'api("/api/profiles/setup-options")' in boot
+    # 通常モードの install 権限チェックと /api/installs はそのまま残る
+    assert "(W.me.perms || {}).install" in boot
+    assert 'api("/api/installs")' in boot
+    # profile モードはインストール / DL ジョブを引き継がない (調整ジョブだけ再開)
+    assert "const act = profileFlow() ? null : W.installs.jobs.find(r => r.id === W.activeInstalls);" in boot
+    assert "W.preJob = false; W.modelSkipped = false;" in boot   # 旧フロー再開は不変
+
+
+def test_profile_chrome_renumbers_steps():
+    fn = _block("function applyProfileChrome()", "/* ---------------------------------------------------------------- 画面遷移 */")
+    assert '"ステップ 1 / 4 — バックエンドとモデル"' in fn
+    assert '"ステップ 2 / 4 — 稼働設定"' in fn
+    assert '"ステップ 3 / 4 — 接続設定"' in fn
+    assert '"ステップ 4 / 4 — 調整 (任意)"' in fn
+    assert 'const calKicker = () => profileFlow() ? "ステップ 4 / 4 — 調整 (任意)" : "ステップ 5 / 5 — 調整 (任意)";' in JS
+
+
+# ---------------------------------------------------------------- バックエンド選択
+
+def test_backend_screen_gates_on_installed():
+    fn = _block("function renderBackends()", "function renderBackends_next()")
+    assert "W.installedMap" in fn
+    assert "インストール済み" in fn and "未インストール" in fn
+    assert '${ok ? "" : " disabled"}' in fn
+    nxt = _block("function renderBackends_next()", "/* ---------------------------------------------------------------- 1b: ブランチ */")
+    assert "profileFlow() && !W.installedMap[W.backend]" in nxt
+    # profile モードの「次へ」はインストール確認 / ブランチ選択へ行かずモデル選択へ
+    handler = _block('$("#be-next").addEventListener("click"', "/* ---------------------------------------------------------------- 1b: ブランチ */")
+    assert 'if (profileFlow()) { renderModel(); go("s-model"); return; }' in handler
+
+
+# ---------------------------------------------------------------- モデル選択 (済みモデルのみ)
+
+def test_model_screen_is_local_only():
+    fn = _block("function mdForceLocal()", "async function renderModel()")
+    assert 'localR.checked = true;' in fn
+    assert '$("#md-modes").classList.add("hidden");' in fn
+    assert '$("#md-later").classList.add("hidden");' in fn
+    assert "async function renderModel() {\n  mdForceLocal();" in JS
+    assert "async function renderModelTable(backend) {\n  mdForceLocal();" in JS
+    # 済みモデル 0 件でもダウンロード択へ切り替えない (profile モード)
+    assert JS.count('mdMode() === "local" && !profileFlow()') == 2
+    # 「あとでする」は mdSync 経由の再表示でも profile モードでは隠れたまま
+    assert 'profileFlow() || backend === "strata" || backend === "maya"' in JS
+
+
+def test_strata_maya_list_only_ready_configs():
+    fn = _block("async function renderModelTable(backend)", "function mdStFullIn(")
+    assert "const ready = profileFlow()" in fn
+    assert "(y.weights || {}).ok === true" in fn
+    assert "(!y.quant_key || y.quant_key === x.model)" in fn
+    assert "st.downloaded = ready;" in fn
+    assert "設定作成済みのモデルがありません" in fn
+
+
+def test_adopt_local_never_starts_setup_job_in_profile_mode():
+    fn = _block("async function mdAdoptLocalTable()", '$("#md-start").addEventListener')
+    # config 欠落時の profile モードガードは mdEnterSettings (ジョブ開始導線) より前で return
+    guard = fn.index("if (profileFlow()) {")
+    enter = fn.index("mdEnterSettings();")
+    assert guard < enter
+    assert "このモデルの config JSON が見つかりません" in fn
+    # 即時採用パス (ジョブなしの完了済みジョブ化) はそのまま
+    assert 'W.job = { id: "", kind: "install", phase: "model", status: "done"' in fn
+    assert 'W.preJob = false; W.modelSkipped = false;' in fn
+
+
+def test_profile_mode_reads_tables_from_options_not_installs_api():
+    st = _block("async function loadStrata()", "/* 現在バックエンドの表")
+    assert "if (profileFlow()) return (W.options && W.options.strata)" in st
+    my = _block("async function loadMaya()", "/* 現在バックエンドの表")
+    assert "if (profileFlow()) return (W.options && W.options.maya)" in my
+
+
+# ---------------------------------------------------------------- ③④⑤ の再利用と完了
+
+def test_config_and_cal_core_reused():
+    # ③ の保存コア (PUT → config-args / launch-json / config-json) は不変
+    cfgo = _block('$("#cf-go").addEventListener("click"', "/* ---------------------------------------------------------------- 3: 接続設定 */")
+    assert 'await api(`/api/profiles/${p.id}`, { method: "PUT", body });' in cfgo
+    assert 'cfg.regen === "config-args"' in cfgo
+    # プロファイルの note だけモードで出し分け
+    assert 'note: profileFlow() ? "プロファイルウィザードで作成" : "初回セットアップで作成"' in JS
+    # ⑤ は calibrate 権限 / 実行中ジョブを正直に見る (403 を「非対応」と誤読しない)
+    cal = _block("async function renderCal()", "function syncCalSel()")
+    assert "const calOff = !!c && !supported.includes(W.backend);" in cal
+    assert "if (canCal && calOff) {" in cal
+    assert "!W.busyInstall" in cal
+    assert "キャリブレーション権限のあるアカウントで実行できます" in cal
+    assert "セットアップ (インストール / ダウンロード) ジョブが実行中です" in cal
+    # 調整開始の kicker はモード対応
+    cago = _block('$("#ca-go").addEventListener("click"', "/* ---------------------------------------------------------------- 完了 */")
+    assert "setProgChrome(calKicker()" in cago
+
+
+def test_back_navigation_and_welcome():
+    assert 'const BACK_PROFILE = { "s-backend": "s-welcome-profile", "s-model": "s-backend",' in JS
+    assert '"s-config": "s-model", "s-net": "s-config", "s-cal": "s-net" };' in JS
+    back = _block("function goBack()", "/* ---------------------------------------------------------------- 起動 */")
+    assert "if (profileFlow()) {" in back
+    assert 'id="s-welcome-profile"' in HTML
+    assert "プロファイルを作って調整します" in HTML
+    assert "新しいダウンロードは起きません" in HTML
+    # 完了画面はプロファイル管理への導線を持つ
+    assert 'id="dn-title"' in HTML and 'id="dn-profiles"' in HTML
+    assert 'href="/#/profiles"' in HTML
+
+
+# ---------------------------------------------------------------- 入口 (プロファイル管理 / セットアップ)
+
+def test_dashboard_entries():
+    # 主入口: プロファイル管理タブ (profiles.edit = need-edit で権限表示)
+    assert 'function openProfileWizard() { location.href = "/setup?flow=profile"; }' in PROFILES_JS
+    assert 'onclick="openProfileWizard()"' in PROFILES_JS
+    assert "ウィザード作成" in PROFILES_JS
+    assert PROFILES_JS.count("need-edit\" title=\"ガイド付き") == 1
+    # 副入口: セットアップタブのカード
+    assert "/setup?flow=profile" in SETUP_VIEW_JS
+    assert "プロファイル作成 + キャリブレーションのみ" in SETUP_VIEW_JS
+    # ウィザード歓迎画面 (通常モード) からの相互導線
+    assert 'href="/setup?flow=profile"' in HTML
+    assert 'href="/setup"' in HTML
+
+
+# ---------------------------------------------------------------- API / RBAC
+
+def test_required_cap_is_profiles_edit():
+    assert rbac.required_cap("GET", "/api/profiles/setup-options") == "profiles.edit"
+    # 既存の install 権限境界は変わらない
+    assert rbac.required_cap("GET", "/api/installs") == "install"
+    assert rbac.required_cap("GET", "/api/installs/strata-model") == "install"
+
+
+def test_setup_options_shape(tmp_path):
+    app = make_app(tmp_path)
+    c = Client(app)
+
+    async def go() -> None:
+        st, j = await c.get("/api/profiles/setup-options")
+        assert st == 200, j
+        assert set(j) == {"installable", "installed", "strata", "maya", "cache_dir", "busy"}
+        ids = [s["id"] for s in j["installable"]]
+        assert ids == [bid for bid in INSTALL_SPECS if bid in BACKENDS]
+        assert set(j["installed"]) == set(ids)
+        assert all(isinstance(v, bool) for v in j["installed"].values())
+        assert j["busy"] is False
+        # ジョブ履歴 / ログは含まない (読み取り専用の選択肢だけ)
+        assert "jobs" not in j and "active" not in j
+        for key in ("strata", "maya"):
+            t = j[key]
+            assert "available" in t and "families" in t and "configs" in t and "venv_ready" in t
+
+    asyncio.run(go())
+
+
+def test_setup_options_needs_profiles_edit_not_install(tmp_path, auth_on, fast_kdf):
+    """install 権限が無いメンテナーでも profiles.edit があれば選択肢を読める
+    (プロファイル作成 + 調整のみフローの権限要件)。"""
+    app = make_app(tmp_path)
+    admin = Client(app)
+
+    async def go() -> None:
+        await setup_admin(admin)
+        await add_user(admin, "hana", "maintainer")
+        hana = await login(app, "hana")
+        # 既定: profiles.edit / install とも OFF
+        st, _ = await hana.get("/api/profiles/setup-options")
+        assert st == 403
+        # profiles.edit だけ ON (install は OFF のまま)
+        st, _ = await admin.put("/api/roles/maintainer", {"perms": {"profiles.edit": True}})
+        assert st == 200
+        st, j = await hana.get("/api/profiles/setup-options")
+        assert st == 200 and "installable" in j
+        st, _ = await hana.get("/api/installs")          # install 境界は変わらない
+        assert st == 403
+        st, _ = await hana.get("/api/calibrations")      # calibrate 未開示 → ⑤ はスキップ導線
+        assert st == 403
+        # 管理者は常に読める
+        st, _ = await admin.get("/api/profiles/setup-options")
+        assert st == 200
+
+    asyncio.run(go())
