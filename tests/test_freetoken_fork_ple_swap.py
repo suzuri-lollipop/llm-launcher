@@ -33,6 +33,32 @@ def test_fork_table_follows_source_choices():
     assert spec["default"] == "disk"
 
 
+def test_fork_kv_cache_dtype_follows_source_choices():
+    # fork は静的スケール fp8 (TP 可) と upstream #894 の per-token-head 形式を併存させる。
+    # 正表が source に追従しないと起動 JSON がサーバーの拒否する値で書かれる
+    table = backends.load_table("freetoken-fork")
+    spec = table["--kv-cache-dtype"]
+    assert spec["choices"] == ["auto", "fp8", "int8", "fp8_e4m3", "fp8_per_token_head", "int8_per_token_head"]
+    assert spec["default"] == "auto"
+    assert "--kv-cache-quant-scale" in table   # 静的 fp8 のスケール (fork 独自)
+
+
+def test_fork_kv_field_options_match_table():
+    f = _field("freetoken-fork", "kv_cache_dtype")
+    assert f["type"] == "select"
+    assert f["options"] == ["", "auto", "fp8", "int8", "fp8_e4m3", "fp8_per_token_head", "int8_per_token_head"]
+    assert f["section"] == "cache"
+    assert f["default_on"] is False
+
+
+def test_gen_fields_resolves_kv_registry_choices():
+    # 生成器が *(name for name in KV_FORMATS if name != NONE.name) を解決できること
+    # (解決できないと choices が auto だけに痩せ、量子化形式が UI から消える)
+    from llm_launcher.gen_fields import gen_freetoken
+    tbl = gen_freetoken(ROOT, "fork/freetoken")
+    assert tbl["--kv-cache-dtype"]["choices"] == ["auto", "fp8", "int8", "fp8_e4m3", "fp8_per_token_head", "int8_per_token_head"]
+
+
 def test_fork_field_options_match_table():
     f = _field("freetoken-fork", "ple_backend")
     assert f["type"] == "select"

@@ -241,13 +241,14 @@ function tickHomeClock(){ fmtClock(); if(!clockInterval) clockInterval=setInterv
    basalt の Speed カード: /metrics の history を 60 秒分の折れ線にし、
    --parallel のスロットを 1 本ずつ色 / 太さで重ね、右端に現在値を置く。
    ここではブラウザ側で 1 秒ごとに取得したサンプルを 60 点溜める。
-   Strata 系は live.slots の tok/s をスロット毎に描く。内訳の無い
-   Maya などは全スロット合算だけを描く。 */
+   Strata / Basalt / llama.cpp (--slots) はスロット毎の tok/s を描く。
+   内訳の無い Maya / vLLM / SGLang / FreeToken は全スロット合算だけを描く。 */
 const PAR_HIST = 60;
 const PAR_STEPS = [10, 20, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500,
                    600, 750, 800, 1000, 1200, 1500, 2000, 2500, 3000, 4000, 5000,
                    6000, 8000, 10000, 12000, 15000, 20000, 25000, 30000];
-const PAR_SERVERS = new Set(["strata", "strata-fork", "maya"]);
+const PAR_SERVERS = new Set(["strata", "strata-fork", "maya", "basalt",
+                             "vllm", "sglang", "llamacpp", "freetoken", "freetoken-fork"]);
 
 function parInit(){
   if (!S.homePar) {
@@ -429,7 +430,7 @@ function parSlotTable(latest, series, p){
   if (!slots.length){
     const live = latest && latest.live || {};
     const active = parNum(live.active);
-    return `<div class="par-note">このサーバーはスロット毎の内訳を /metrics に出していません。${active != null ? "アクティブ " + parInt(active) + " 本・" : ""}全スロット合算のデコード速度だけを描いています。</div>`;
+    return `<div class="par-note">このサーバーはスロット毎の内訳を出していません。${active != null ? "アクティブ " + parInt(active) + " 本・" : ""}全スロット合算のデコード速度だけを描いています。</div>`;
   }
   const st = {
     idle: ["待機", ""], reading: ["読み込み", "warn"], prefill: ["読み込み", "warn"],
@@ -476,7 +477,7 @@ function renderHomeParallel(){
   if (p.sig !== sig) {
     sel.innerHTML = servers.length
       ? servers.map(s => `<option value="${esc(s.id)}">${esc(s.profile_name)} · ${esc(s.backend_name)} :${esc(s.port || "?")}</option>`).join("")
-      : `<option value="">— 並列 /metrics 対応サーバーなし —</option>`;
+      : `<option value="">— 対応サーバーなし —</option>`;
     p.sig = sig;
   }
   const stateEl = $("#home-par-state"), cntEl = $("#home-par-count"), rateEl = $("#home-par-rate");
@@ -487,8 +488,9 @@ function renderHomeParallel(){
     cntEl.textContent = "";
     rateEl.innerHTML = "-";
     el.innerHTML = `<div class="par-empty">
-      Strata / Maya の並列内訳 (/metrics) を公開するサーバーが稼働していません。<br>
-      スロット毎のグラフを描くには、起動タブから対応サーバーを起動してください。
+      デコード速度 (/metrics / /v1/stats) を公開するサーバーが稼働していません。<br>
+      グラフを描くには、起動タブからサーバーを起動してください。<br>
+      <span class="muted">スロット毎の内訳は Strata / Basalt / llama.cpp (--slots)。SGLang は --enable-metrics、llama.cpp の合算は --metrics が必要です。</span>
     </div>`;
     return;
   }

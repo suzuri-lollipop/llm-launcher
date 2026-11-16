@@ -1,12 +1,11 @@
-"""FreeToken (fork) バックエンドのプロファイル項目 — MTP 投機的デコード回帰テスト。
+"""FreeToken (fork) バックエンドのプロファイル項目 — 投機的デコード回帰テスト。
 
-fork リポジトリ (module/fork/freetoken) が `--speculative mtp` (MTP head による
-先読みデコード) を追加し、さらに `lookup` (プロンプト照合による最大 4 token の先読み)
-が加わったので、launcher 側は
+fork は upstream 統合で `--speculative {none,mtp,lookup}` を廃止し、
+`--speculative-algorithm` (mtp / dflash、既定 OFF) に置き換えた。launcher 側は
   1. 正表 fields/freetoken-fork.json に fork ソースの定義が反映されている
   2. プロファイル編集画面の項目 (select / exec セクション / 既定 OFF) に出る
   3. ON のときだけ argv に付く (OFF はサーバー既定に譲る)
-必要がある。基底 FreeToken (upstream) には存在しないフラグであることも確認する。
+必要がある。基底 FreeToken (upstream) の正表には存在しないフラグであることも確認する。
 """
 from pathlib import Path
 
@@ -29,22 +28,23 @@ def _field(bid: str, key: str) -> dict:
 
 def test_fork_table_has_speculative_from_source():
     table = backends.load_table("freetoken-fork")
-    spec = table["--speculative"]
-    assert spec["choices"] == ["none", "mtp", "lookup"]
-    assert spec["default"] == "none"
+    spec = table["--speculative-algorithm"]
+    assert spec["aliases"] == ["--spec-algo"]
+    # 旧 --speculative (none/mtp/lookup) は fork ソースから消えた
+    assert "--speculative" not in table
 
 
 def test_speculative_field_exposed_only_on_fork():
-    f = _field("freetoken-fork", "speculative")
-    assert f["flag"] == "--speculative"
+    f = _field("freetoken-fork", "speculative_algorithm")
+    assert f["flag"] == "--speculative-algorithm"
     assert f["type"] == "select"
-    assert f["options"] == ["", "none", "mtp", "lookup"]   # 空 = 送信しない (サーバー既定 none)
+    assert f["options"] == ["", "mtp", "dflash"]   # 空 = 送信しない (サーバー既定 OFF)
     assert f["section"] == "exec"
     assert f["default_on"] is False                 # auto 導出項目は既定 OFF
-    assert "speculative" in backends.DEFAULT_OFF_KEYS["freetoken-fork"]
-    # upstream FreeToken にはまだ無い項目
-    assert "--speculative" not in backends.load_table("freetoken")
-    assert all(x["key"] != "speculative" for x in backends.BACKENDS["freetoken"]["fields"])
+    assert "speculative_algorithm" in backends.DEFAULT_OFF_KEYS["freetoken-fork"]
+    # upstream FreeToken の正表にはまだ無い項目
+    assert "--speculative-algorithm" not in backends.load_table("freetoken")
+    assert all(x["key"] != "speculative_algorithm" for x in backends.BACKENDS["freetoken"]["fields"])
 
 
 def _argv(*, on: bool = True, value: str = "mtp") -> list[str]:
@@ -52,8 +52,8 @@ def _argv(*, on: bool = True, value: str = "mtp") -> list[str]:
     profile = {
         "command": "",
         "values": {"model_path": "/models/x", "host": "0.0.0.0", "port": "1919",
-                   "speculative": value},
-        "on": {"model_path": True, "host": True, "port": True, "speculative": on},
+                   "speculative_algorithm": value},
+        "on": {"model_path": True, "host": True, "port": True, "speculative_algorithm": on},
         "extra_args": "",
     }
     return backends.render_argv(b, profile, python="py", binary="", root=ROOT)
@@ -61,12 +61,12 @@ def _argv(*, on: bool = True, value: str = "mtp") -> list[str]:
 
 def test_speculative_sent_only_when_toggled_on():
     argv = _argv(on=True)
-    i = argv.index("--speculative")
-    assert argv[i:i + 2] == ["--speculative", "mtp"]
-    assert "--speculative" not in _argv(on=False)
+    i = argv.index("--speculative-algorithm")
+    assert argv[i:i + 2] == ["--speculative-algorithm", "mtp"]
+    assert "--speculative-algorithm" not in _argv(on=False)
 
 
-@pytest.mark.parametrize("value", ["none", "mtp", "lookup"])
+@pytest.mark.parametrize("value", ["mtp", "dflash"])
 def test_speculative_accepts_table_choices(value: str):
     argv = _argv(on=True, value=value)
-    assert argv[argv.index("--speculative") + 1] == value
+    assert argv[argv.index("--speculative-algorithm") + 1] == value

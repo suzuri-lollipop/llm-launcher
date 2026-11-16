@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .backends import BACKENDS, fork_dir, fork_model_root
-from . import strata_setup
+from . import maya_setup, strata_setup
 from .store import JsonStore, new_id, now
 
 # ログはデータベース (installs.json) に保持する。インストール実行では行が増えるので
@@ -55,14 +55,18 @@ LOG_TAIL = 400
 # 大きいと UI の進捗が鈍くなり、小さいとログが膨らむ。
 PROGRESS_MIN_INTERVAL = 1.0
 
-# UI からインストールできるバックエンド。maya は maya.sh 側が対話プロンプトを含むため
-# UI 化していない (導線を壊さない範囲で今後追加する)。
+# UI からインストールできるバックエンド。
 # requirements / cmake / engine_bin を持つ spec は FreeToken 系と打って変わって
 # 「pip のパッケージ化が無い + ネイティブビルド込み」の形 (Basalt) に対応する。
 # strata は純正 setup.sh / setup.py が対話インストーラなので、機械部分だけを薄い driver
 # (strata_engine.py) で UI に乗せた: .venv + requirements.txt + 公式リリースからの
 # 既製エンジン受信 (engine_fetch)。モデル選択・ダウンロード・strata-<model>.json 生成は
-# 引き続き setup.sh 1 回の手動領域 (エンジンも venv も在ればそこは素通りする)。
+# セットアップ画面 ② が純正 setup.py を --yes --no-start で走らせる (start_strata_model)。
+# maya も同じ立場: 純正 maya.py は --yes / --download-model で完全非対話になるので、
+# ① は家系に依存しない機械部分 (.venv + 純正 tools_step = PY_PACKAGES + llama.cpp ソース)
+# だけを薄い driver (maya_tools.py) で UI に乗せ、エンジンビルド (家系別) + モデル選択・
+# ダウンロード・maya-<model>.json 生成は ② が純正 maya.py を非対話で走らせる
+# (start_maya_model)。手動の ./maya.sh / ./setup.sh も従来どおり使える。
 INSTALL_SPECS: dict[str, dict[str, Any]] = {
     "freetoken-fork": {
         "clone": "https://github.com/suzuri-lollipop/FreeToken",
@@ -136,6 +140,29 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
         "venv_pip": True,                # 標準 venv+pip (upstream setup.py が -m pip を使う)
         "engine_fetch": True,            # strata_engine.py で既製エンジンを受信する step
         "engine_bin": "engine/strata",   # precheck / verify はこれも要求する
+    },
+    # Project Maya (https://github.com/mw00/project-maya): サブモジュール。純正 maya.sh と
+    # 同じ標準 venv+pip で .venv を作り (maya.py / setup.py の pip_install が -m pip を前提)、
+    # tools step が薄い driver (maya_tools.py) から純正 tools_step() を呼んで PY_PACKAGES +
+    # llama.cpp ソース (pinned commit) を入れる。requirements.txt / pyproject は無い
+    # (setup.py はパッケージングでなくインストーラ補助) ので -e . / -r は使わない。
+    # エンジン (build/maya / maya-ds4 / maya-mm3) は家系ごとに異なるため ① ではビルドせず、
+    # ② のモデル構成 (maya.py --yes --no-start --download-model) が純正どおりビルドする。
+    # precheck / verify は serve.server import + 導入の stamp (.venv/.strata-pip.json) +
+    # llama.cpp ソースの実在を要求する (import だけだと依存未導入でも通ってしまう)。
+    "maya": {
+        "clone": "https://github.com/mw00/project-maya",
+        "ref": "",
+        "refs": [],
+        "fork_name": "",
+        "module_path": "module/maya",
+        "check": "serve.server",         # submodule を cwd にした実 import (検出と同じ)
+        "extras": "",
+        "requirements": "",
+        "venv_pip": True,                # 標準 venv+pip (maya.sh / 純正 pip_install と同じ)
+        "tools_step": True,              # maya_tools.py で純正 tools_step (pip + llama.cpp)
+        "check_files": [".venv/.strata-pip.json",
+                        "third_party/llama.cpp/ggml/CMakeLists.txt"],
     },
 }
 
@@ -582,13 +609,17 @@ class InstallManager:
         uv_path = "" if venv_pip else find_uv()
         tool = "uv" if uv_path else "pip"
         venvpy = str(module_dir / ".venv" / "bin" / "python")
-        # requirements 系 spec (Basalt) は verify でもネイティブエンジンの実在を要求する。
-        # precheck が通らない = 依存 or エンジンのどれかが欠けている、ということで
+        # requirements 系 spec (Basalt / Strata) は verify でもネイティブエンジンの実在を
+        # 要求する。precheck が通らない = 依存 or エンジンのどれかが欠けている、ということで
         # install / cmake が必ず走る (pip の再実行はほぼキャッシュで素通しになる)。
+        # check_files (Maya) は導入の stamp / llama.cpp ソースのような「ファイル実在」条件。
+        # serve.server の import は依存が無くても通る (遅延 import) ので、これが実質の完了判定。
         engine_bin = str(spec.get("engine_bin") or "")
-        engine_check = (f"; import os as _os, sys as _sys;"
-                        f" _sys.exit(0 if _os.access({engine_bin!r}, _os.X_OK) else 1)"
-                        if engine_bin else "")
+        conds = ([f"_os.access({engine_bin!r}, _os.X_OK)"] if engine_bin else [])
+        conds += [f"_os.path.isfile({rel!r})" for rel in (spec.get("check_files") or [])]
+        engine_check = ("; import os as _os, sys as _sys;"
+                        f" _sys.exit(0 if ({' and '.join(conds)}) else 1)"
+                        if conds else "")
         verify_argv = [venvpy, "-c",
                        f"import {check}, sys; print('{check}', getattr({check}, '__version__', '?'),"
                        f" 'py', sys.version.split()[0])" + engine_check]
@@ -604,18 +635,26 @@ class InstallManager:
             steps.append({"name": "branch"})
         steps.append({"name": "venv"})
         steps.append({"name": "precheck", "argv": verify_argv, "cwd": str(module_dir)})
-        req = str(spec.get("requirements") or "")
-        if req:
-            # 非 packaging リポジトリ (pyproject の無い Basalt など): requirements.txt 直指定
-            spec_args = ["-r", req]
+        if spec.get("tools_step"):
+            # Maya: pip のパッケージ化が無い (setup.py はインストーラ補助) ので -e . / -r では
+            # なく、純正 tools_step (PY_PACKAGES + llama.cpp ソース) を薄い driver から呼ぶ。
+            # エンジンビルドは家系別なので ② のモデル構成 (start_maya_model) の仕事
+            steps.append({"name": "tools",
+                          "argv": [venvpy, str(Path(__file__).parent / "maya_tools.py")],
+                          "cwd": str(module_dir)})
         else:
-            spec_args = ["-e", f".[{extras_str}]" if extras_str else "."]
-        if uv_path:
-            # 絶対パスのまま argv[0] に置く — 子プロセスの PATH が短くても解る
-            install_argv = [uv_path, "pip", "install", "--python", venvpy, *spec_args]
-        else:
-            install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off", *spec_args]
-        steps.append({"name": "install", "argv": install_argv, "cwd": str(module_dir)})
+            req = str(spec.get("requirements") or "")
+            if req:
+                # 非 packaging リポジトリ (pyproject の無い Basalt など): requirements.txt 直指定
+                spec_args = ["-r", req]
+            else:
+                spec_args = ["-e", f".[{extras_str}]" if extras_str else "."]
+            if uv_path:
+                # 絶対パスのまま argv[0] に置く — 子プロセスの PATH が短くても解る
+                install_argv = [uv_path, "pip", "install", "--python", venvpy, *spec_args]
+            else:
+                install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off", *spec_args]
+            steps.append({"name": "install", "argv": install_argv, "cwd": str(module_dir)})
         if spec.get("engine_fetch"):
             # Strata: 純正 setup.py の get_prebuilt() を薄い driver から呼んで既製エンジンを
             # 受信する (engine/strata + CUDA ホイール)。GPU が既製に無い環境は driver が
@@ -695,21 +734,66 @@ class InstallManager:
             self._run_model(job, module_dir, [str(venvpy), *argv]))
         return self._public(job)
 
+    def start_maya_model(self, opts: dict[str, Any],
+                         actor: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Maya のセットアップ ②: 純正 maya.py を `--yes --no-start --plain
+        --download-model` の非対話で走らせて、エンジンビルド (家系別・在ればスキップ) →
+        モデルのダウンロード → pack → maya-<model>.json 生成までを UI から完結させる。
+
+        選定の表もダウンロード (再開対応・SHA-256) もエンジンビルドも純正実装そのもので、
+        ここは family/model/context/vision/gpus を submodule の表ホワイトリストで検証し、
+        argv を組み立てるだけ (maya_setup)。maya.py の全質問は --yes で既定確定し、
+        モデルダウンロードも --download-model で確認なし (対話プロンプトには到達しない)。
+        .venv と PY_PACKAGES / llama.cpp ソースは ① で導入済みなので tools_step は素通りする。
+        DeepSeek / MiniMax / Qwen は純正の --yes 既定どおり drafter の速度計測も走る
+        (エンジン起動を伴う。ログにそのまま出る)。
+        """
+        spec = INSTALL_SPECS["maya"]
+        self._check_free()
+        module_dir = (self.root / spec["module_path"]).resolve()
+        venvpy = module_dir / ".venv" / "bin" / "python"
+        if not (module_dir / "maya.py").is_file() or not venvpy.is_file():
+            raise InstallError("Maya の実行環境 (.venv) がまだありません。"
+                               "先に ① インストールを実行してください")
+        try:
+            argv, config_name = maya_setup.build_argv(module_dir, opts or {})
+        except ValueError as e:
+            raise InstallError(str(e)) from None
+        fam = str((opts or {}).get("family") or "")
+        model = str((opts or {}).get("model") or "")
+        job = self._new_job("install", actor, backend="maya",
+                            backend_name=BACKENDS["maya"]["name"],
+                            module_path=spec["module_path"], tool="", uv_path="",
+                            extras="", clean=False, needs_clone=False, ref="", cuda="",
+                            phase="model", model=f"{fam}/{model}",
+                            config_name=config_name)
+        job["steps"] = ["model"]
+        job["started_ts"] = time.time()   # 完了時の config 新生成判定の基準時刻
+        self._tasks[job["id"]] = asyncio.create_task(
+            self._run_model(job, module_dir, [str(venvpy), *argv]))
+        return self._public(job)
+
     async def _run_model(self, job: dict[str, Any], module_dir: Path,
                          argv: list[str]) -> None:
-        """単一 step の Strata モデル構成ジョブ (ダウンロードは数時間〜なのでログのみ)。"""
+        """単一 step のモデル構成ジョブ (Strata / Maya。ダウンロードは数時間〜なのでログのみ)。"""
+        is_maya = job.get("backend") == "maya"
+        name = "Maya" if is_maya else "Strata"
+        helper = maya_setup if is_maya else strata_setup
         job["status"] = "running"
         self._save()
         self._append_log(job, proxy_log_line())
-        self._append_log(job, "Strata 純正 setup.py を --yes (非対話) で実行します — "
+        self._append_log(job, f"{name} 純正セットアップを --yes (非対話) で実行します — "
                               "モデルのダウンロードは再開対応です (中断しても続きから)")
+        if is_maya:
+            self._append_log(job, "エンジンビルド (家系別・初回 10-30 分) と pack 作成もこの中で走ります "
+                                  "(導入済みならスキップ)")
         try:
             rc, out = await self._run_step(job, {"name": "model", "argv": argv,
                                                  "cwd": str(module_dir),
                                                  "stdin_null": True})
             if job["id"] in self._cancel:
                 job["status"] = "cancelled"
-                self._append_log(job, "中断しました — Strata のダウンロードは再開対応なので、"
+                self._append_log(job, f"中断しました — {name} のダウンロードは再開対応なので、"
                                       "もう一度実行すると続きから進みます")
             elif rc != 0:
                 tail = [ln.rstrip() for ln in (out or "").splitlines() if ln.strip()][-30:]
@@ -719,17 +803,22 @@ class InstallManager:
                         self._append_log(job, ln)
                 first = next((ln for ln in tail if "error" in ln.lower()),
                              tail[0] if tail else "")
-                raise InstallError(f"Strata のモデル設定が失敗しました (exit {rc})"
+                raise InstallError(f"{name} のモデル設定が失敗しました (exit {rc})"
                                    + (f" — {first[:200]}" if first else ""))
             else:
                 cfg = module_dir / str(job.get("config_name") or "")
                 if not cfg.is_file():
                     # 純正の命名が変わった環境対応: 実行中に作られた最新の config を拾う
                     started = job.get("started_ts") or 0
-                    fresh = [c for c in strata_setup.installed_configs(module_dir)
+                    fresh = [c for c in helper.installed_configs(module_dir)
                              if c["mtime"] >= started - 5.0]
                     cfg = Path(fresh[0]["file"]) if fresh else None
                 if cfg is None:
+                    if is_maya:
+                        # --download-model 付きの maya.py は config を書いてから 0 で返る。
+                        # 無い = 途中で止まった (ログ末尾に理由) — 完了扱いにしない
+                        raise InstallError("Maya のモデル設定が完了しましたが maya-<model>.json が"
+                                           "見つかりません (ログ末尾と module/maya を確認してください)")
                     job["status"] = "done"
                     job["result"] = {"installed": True, "config": ""}
                     self._append_log(job, "完了しましたが strata-<model>.json が"
@@ -738,9 +827,13 @@ class InstallManager:
                     # config の parallel (純正が VRAM 予算で決めた同時数) を UI に返す —
                     # 無い = 既定 1。ウィザード ③ の並列数の既定はここから取る
                     # (全局推奨の 4 を焼くと 24GB で 4 スロット起動失敗する: 2026-11-09)
+                    # Strata は top-level の parallel、Maya は args の --parallel
                     par = None
                     try:
-                        pv = json.loads(Path(cfg).read_text("utf-8", errors="replace")).get("parallel")
+                        doc = json.loads(Path(cfg).read_text("utf-8", errors="replace"))
+                        pv = doc.get("parallel")
+                        if pv is None and is_maya:
+                            pv = maya_setup.config_parallel(doc)
                         par = int(pv) if str(pv).isdigit() else None
                     except (OSError, ValueError):
                         pass

@@ -184,7 +184,7 @@ def _spec(backend_id: str, flag: str) -> dict[str, Any]:
             spec = {**spec, "choices": CHOICE_SUPPLEMENT[ch_key][flag]}
     d = spec.get("default")
     if isinstance(d, str) and (d.strip().lower() in _JUNK_DEFAULTS or d.strip() in ("()", "[]", "{}")):
-        # ただし choices に実在する値 (--speculative の "none" 等) は junk ではなく正当な既定値
+        # ただし choices に実在する値は junk ではなく正当な既定値
         if not (isinstance(spec.get("choices"), list) and d in spec["choices"]):
             spec.pop("default")
     if isinstance(d, bool):
@@ -233,26 +233,38 @@ def fld(backend_id: str, flag: str, label: str, *, section: str = "model",
     return entry
 
 
+# セットアップ画面 (プロファイル編集の起動パラメータ) のセクション表示順。
+# FreeToken のセットアップを基準に全バックエンドで統一する (SECTION_ORDER)。
+# 以前は「フィールドリストでの初出順」だったため、項目を追加するたびに
+# バックエンドごとに順序がずれていた (例: llama.cpp の exec が server の後に出る)。
+# sampling は llama.cpp だけのセクションで、tools の後 / logs の前に置く。
+SECTION_ORDER: tuple[str, ...] = (
+    "model", "parallel", "sched", "cache", "exec", "server", "tools", "sampling", "logs",
+)
+
 SECTIONS_JA = {
     "model": "モデル・提供設定",
     "parallel": "並列・分散",
     "sched": "スケジューリング・メモリ",
+    "cache": "KVキャッシュ・オフロード",
     "exec": "実行エンジン・最適化",
     "server": "サーバー・API",
     "tools": "ツール呼び出し・推論・LoRA",
     "sampling": "デフォルトサンプリング",
-    "cache": "KVキャッシュ・オフロード",
     "logs": "ログ・可観測性",
 }
 
 
 def sections_order(backend: dict[str, Any]) -> list[str]:
-    seen: list[str] = []
+    """実際に存在するセクションだけを SECTION_ORDER (FreeToken 基準) の順で返す。
+    未知のセクションは初出順で末尾に回す (新しいセクションが失われないように)。"""
+    present: list[str] = []
     for f in backend.get("fields", []):
         s = f.get("section", "model")
-        if s not in seen:
-            seen.append(s)
-    return seen
+        if s not in present:
+            present.append(s)
+    known = [s for s in SECTION_ORDER if s in present]
+    return known + [s for s in present if s not in SECTION_ORDER]
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +377,7 @@ def build_sglang() -> dict[str, Any]:
         F("--host", "ホスト", section="server", default="0.0.0.0"),
         F("--port", "ポート", section="server"),
         F("--api-key", "APIキー", section="server", placeholder="設定すると Bearer 認証"),
-        F("--admin-api-key", "管理者APIキー (任意)"),
+        F("--admin-api-key", "管理者APIキー (任意)", section="server"),
         F("--tokenizer-worker-num", "トークナイザworker数", section="server"),
         F("--detokenizer-worker-num", "デトークナイザworker数", section="server", placeholder="1"),
         F("--skip-server-warmup", "ウォームアップスキップ", section="server"),
@@ -395,6 +407,13 @@ def build_llamacpp() -> dict[str, Any]:
         F("--jinja", "Jinjaテンプレートエンジン"),
         F("--reasoning", "reasoning出力"),
         F("--lora", "LoRAアダプタ (任意)", placeholder=".gguf LoRAパス"),
+        # common/arg.cpp に実在する multi-GPU ノブ (正表の型が弱い項目はここで明示)
+        F("--device", "使用デバイス", section="parallel", ftype="str", placeholder="例: CUDA0,CUDA1 (空=自動)"),
+        F("--split-mode", "GPU分割モード", section="parallel", ftype="select",
+          choices=["none", "layer", "row", "tensor"],
+          help="none=1枚 / layer=層分割 (既定) / row=行分割 / tensor=テンソル分割 (実験的)"),
+        F("--tensor-split", "GPU別オフロード比率", section="parallel", placeholder="例: 3,1"),
+        F("--main-gpu", "メインGPU (INDEX)", section="parallel", ftype="int"),
         F("--ctx-size", "コンテキスト長", section="sched", help="0=モデルの学習長"),
         F("--n-gpu-layers", "GPUに載せる層数 (ngl)", section="sched", placeholder="-1=全て / 0=CPU"),
         F("--batch-size", "バッチサイズ (b)", section="sched"),
@@ -406,6 +425,7 @@ def build_llamacpp() -> dict[str, Any]:
         F("--cache-type-k", "KVキャッシュ型 (K)", section="cache", help="q8_0 等でVRAM削減"),
         F("--cache-type-v", "KVキャッシュ型 (V)", section="cache"),
         F("--defrag-thold", "KV defrag閾値", section="cache", ftype="float", placeholder="有効時 0.1 程度"),
+        F("--spec-type", "推測的デコード方式", section="exec"),
         F("--host", "ホスト", section="server", default="0.0.0.0"),
         F("--port", "ポート", section="server"),
         F("--api-key", "APIキー", section="server", placeholder="設定すると Bearer 認証"),
@@ -417,7 +437,6 @@ def build_llamacpp() -> dict[str, Any]:
         F("--embedding", "埋め込みモード (embedding API)", section="server"),
         F("--timeout-keep-alive", "keep-alive秒", section="server"),
         F("--warmup", "起動時ウォームアップ", section="server"),
-        F("--spec-type", "推測的デコード方式", section="exec"),
         F("--temp", "temperature", section="sampling"),
         F("--top-k", "top-k", section="sampling"),
         F("--top-p", "top-p", section="sampling"),
@@ -439,7 +458,8 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
         F("--model-source", "モデル取得元"),
         F("--dtype", "dtype"),
         F("--max-seq-len-override", "最大コンテキスト長上書き", placeholder="空=モデル設定"),
-        F("--max-output-tokens", "最大出力トークン", placeholder="空=自動"),
+        F("--max-output-tokens", "最大出力トークン", default="32768",
+          placeholder="空=エンジン既定", help="max_tokens 省略時の1応答の生成上限。コード生成向け既定 32K"),
         F("--sampling-defaults", "サンプリング既定"),
         F("--tp-size", "Tensor並列数 (TP)", section="parallel"),
         F("--gpu", "GPUデバイス指定", section="parallel", placeholder="0 または 0,1 (空=自動)"),
@@ -489,7 +509,7 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
             F("--image-max-tokens", "画像最大トークン", placeholder="自動"),
             F("--image-min-tokens", "画像最小トークン", placeholder="自動"),
             F("--kv-cache-dtype", "KVキャッシュ量子化", section="cache",
-              help="fp8 系で KV メモリを削減"),
+              help="fp8 (静的スケール) は TP でも KV メモリ半減。per_token_head 系は TP1 + bf16 必須"),
             F("--kv-cache-quant-scale", "KV量子化スケール", section="cache", ftype="float", placeholder="1.0"),
             F("--mm-embed-cache-device", "画像埋め込みキャッシュDEV", section="cache"),
             F("--mm-encoder-weights", "エンコーダ重み配置", section="cache"),
@@ -507,9 +527,10 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
               help="入力埋め込みテーブルをbf16のまま保持 (既定はfp8-e4m3化してVRAMをMoEスロットへ回す)"),
             F("--no-decode-fetch-overlap", "デコードfetch overlap無効", section="exec", ftype="bool",
               help="MoEデコードのhit/missフェッチオーバーラップを無効化 (既定ON、無効化で直列化し低速)"),
-            F("--speculative", "推測的デコード (MTP)", section="exec",
-              help="mtp = チェックポイントの MTP ヘッドで1トークン先読みし単一リクエスト時のデコードを高速化"
-                   " (同時リクエストが増えると自動無効化)。対応は qwen4_exp のみ、none/空=無効"),
+            F("--speculative-algorithm", "推測的デコード", section="exec",
+              choices=["mtp", "dflash"],
+              help="mtp = チェックポイントの MTP ヘッドで先読みしデコードを高速化 (qwen4_exp)。"
+                   "dflash は別途ドラフト checkpoint (--speculative-draft-model-path) が必要。空=無効"),
             # カーネル最適化選択 (fork独自)
             {"key": "kernel_optimization", "flag": "", "type": "select",
              "label": "カーネル最適化", "section": "exec",
@@ -520,7 +541,7 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
         ]
         DEFAULT_OFF_KEYS[bid] |= {"image_max_tokens", "image_min_tokens", "kv_cache_dtype",
                                   "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights",
-                                  "prefill_decode_interval", "speculative"}
+                                  "prefill_decode_interval", "speculative_algorithm"}
     return _backend_meta(b, fields)
 
 
@@ -684,6 +705,15 @@ def build_basalt() -> dict[str, Any]:
                "cpu = 低速だが VRAM 不使用 / GPU番号 = サイドカーをそのカードに常駐。未設定のまま保存すると画像は使えない"),
         F("--tokenizer", "トークナイザ DIR",
           help="空 = リポジトリの pack/full/tokenizer (mock エンジン用。通常は触らない)"),
+        # コンテキスト長 / KV 形式はモデル項目 (basalt_config.json の models[] に入る)。
+        # section 省略だと既定の model に暗黙で入るため明示する
+        F("--max-context", "コンテキスト長 (トークン)", section="model", placeholder="空=モデル既定 (8192)",
+          ftype="int",
+          help="プロンプト+生成で共有する長さ。--parallel N と併用すると N 分割され、"
+               "slot-full-context で各スロットに全長を与える。設定 JSON の models に書かれる"),
+        F("--kv", "KV キャッシュ形式", section="model", placeholder="空=モデル既定 (fp16)",
+          choices=["fp16", "int8", "q4_0", "k8v4"],
+          help="fp16=品質優先 / int8=VRAM 半減 / q4_0・k8v4=さらに圧縮。設定 JSON の models に書かれる"),
         F("--gpu", "GPU 指定", section="parallel", placeholder="0 / 0,1 / auto",
           help="nvidia-smi の番号。先頭がメインで残りはエンジンが役割を分担。auto = 全 Blackwell カード"),
         F("--parallel", "並列スロット数 (1-8)", section="parallel", ftype="int", placeholder="空=1",
@@ -691,13 +721,6 @@ def build_basalt() -> dict[str, Any]:
                "(slot-full-context で各スロットに全長。KV cache は expert cache から出る)"),
         F("--slot-full-context", "各スロットに full context", section="parallel", default_on=False,
           help="--parallel と併用。全スロットに --max-context 全体を与える (KV cache は N 倍)"),
-        F("--max-context", "コンテキスト長 (トークン)", placeholder="空=モデル既定 (8192)",
-          ftype="int",
-          help="プロンプト+生成で共有する長さ。--parallel N と併用すると N 分割され、"
-               "slot-full-context で各スロットに全長を与える。設定 JSON の models に書かれる"),
-        F("--kv", "KV キャッシュ形式", placeholder="空=モデル既定 (fp16)",
-          choices=["fp16", "int8", "q4_0", "k8v4"],
-          help="fp16=品質優先 / int8=VRAM 半減 / q4_0・k8v4=さらに圧縮。設定 JSON の models に書かれる"),
         F("--lazy", "遅延ロード (初回リクエストで起動)", section="sched", default_on=False,
           help="API は未ロードで待ち受け、最初のリクエストでロード (sidecar ビジョンは降ろす)"),
         F("--idle-unload", "アイドル自動アンロード秒", section="sched", ftype="float",
@@ -761,8 +784,10 @@ DEFAULT_OFF_KEYS: dict[str, set[str]] = {
                  "threads", "flash_attn", "load_mode", "defrag_thold", "cache_type_k",
                  "cache_type_v", "temp", "top_k", "top_p", "min_p", "repeat_penalty",
                  "presence_penalty", "frequency_penalty", "seed", "timeout_keep_alive",
-                 "reasoning", "spec_type", "chat_template", "lora", "alias"},
-    "freetoken": {"dtype", "model_source", "max_seq_len_override", "max_output_tokens",
+                 "reasoning", "spec_type", "chat_template", "lora", "alias",
+                 "device", "split_mode", "tensor_split", "main_gpu"},
+    # max_output_tokens はコード生成向け既定 (32K) を能動的に送るため既定 ON (OFF 集合から除外)
+    "freetoken": {"dtype", "model_source", "max_seq_len_override",
                   "sampling_defaults", "tp_size", "cuda_graph_max_bs", "num_tokenizer",
                   "max_running_requests", "memory_ratio", "max_prefill_length", "page_size",
                   "num_pages", "num_tokens", "kv_reserve_tokens", "cache_type",
@@ -1176,8 +1201,9 @@ def replace_arg(argv: list[str], flag: str, value: str) -> list[str]:
 # ---------------------------------------------------------------------------
 
 # serve/config.py の分類に合わせる: "server" はサーバー共有の設定だけ、"engine"/モデル項目は
-# モデル側の設定 (--parallel / --gpu / --vision などもモデル項目)。api-key は config に
-# 書けない (コマンドラインのみ) ので生成しない。
+# モデル側の設定 (--parallel / --gpu / --vision など。gpu は MODEL_OPTIONS 所属で、
+# models[] か engine に書く。server に書くと拒否される — 純正パーサで実測確認済み)。
+# api-key は config に書けない (コマンドラインのみ) ので生成しない。
 _BASALT_SERVER_KEYS = frozenset({
     "host", "port", "lazy", "max_payload_mib", "allowed_host", "cors_origin",
     "image_url_host", "image_dir", "image_remote_only", "open", "script",
@@ -1299,6 +1325,12 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
             v = str(values.get(key) or "").strip()
             if v:
                 argv = replace_arg(argv, flag, v)
+        # 最大出力トークンは port/api_key と同じ「フォームが上書きするユーザー項目」。
+        # 起動 JSON 主体でもセットアップ/プロファイルの値を反映する (送信 OFF か空なら
+        # JSON/エンジン既定に譲る)。JSON に無ければ replace_arg が末尾に追加する。
+        mot = str(values.get("max_output_tokens") or "").strip()
+        if mot and (on is None or bool(on.get("max_output_tokens", True))):
+            argv = replace_arg(argv, "--max-output-tokens", mot)
         merged = {str(k): str(v) for k, v in (launch.get("env") or {}).items()}
         merged.update({str(k): str(v) for k, v in (profile.get("env") or {}).items()})
         if merged:

@@ -104,7 +104,7 @@ function applyAuthUi() {
   // メニュー項目
   [["#mi-home", "dashboard"], ["#mi-history", "history"], ["#mi-playground", "playground"],
    ["#mi-bench", "bench"], ["#mi-calibrate", "calibrate"], ["#mi-profiles", "profiles.edit"],
-   ["#mi-backends", "backends.edit"], ["#mi-setup", "install"]]
+   ["#mi-backends", "backends.edit"], ["#mi-setup", "install"], ["#mi-models", "install"]]
     .forEach(([id, cap]) => $(id).classList.toggle("hidden", !can(cap)));
   $("#mi-users").classList.toggle("hidden", !AUTH.isAdmin);
   if (!location.hash || location.hash === "#") applyRoute();   // 既定ビュー (dashboard 権限なら home) を反映
