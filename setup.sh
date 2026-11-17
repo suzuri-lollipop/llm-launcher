@@ -24,7 +24,8 @@
 #      + 自動起動登録 + 起動。ユーザーマネージャーに到達できない環境では案内付きでスキップ。
 #   6. sudo scripts/oom-protect-install.sh — OOM 保護 (kill 対策) のモード 1
 #      (sudoers ヘルパー)。ユーザーサービスと併用可能。導入済みならスキップし、
-#      新規導入時はヘルパー有効化のためサービスを再起動する。sudo が使えない環境ではスキップ。
+#      新規導入時はヘルパー有効化のためサービスを再起動する。パスワードが必要なら
+#      この段階だけで聞く (stdin が tty でなくても /dev/tty 経由で聞く)。sudo が使えない環境ではスキップ。
 #      ※ モード 2 (--systemd) はユーザーサービスと二重起動になる同名のシステムユニット
 #        (ポート 8088) を作るため、ここでは扱わない (必要なら手動で実行)。
 #
@@ -34,8 +35,9 @@
 #     各 submodule の setup.sh / maya.sh で行う (README「セットアップ」参照)。
 #   - HTTP(S)_PROXY / ALL_PROXY / NO_PROXY は環境変数からそのまま引き継ぐ
 #     (git / uv / curl すべて。値は伏せ字付きで表示する)。
-#   - OOM 保護の導入には sudo が必要 (パスワードを聞かれることがある)。
-#     非対話環境でパスワードレス sudo が使えない場合はスキップして案内する。
+#   - OOM 保護の導入には sudo が必要。パスワードが要る場合はこの段階だけで聞く
+#     (stdin が tty でなくても /dev/tty が開ければそこで聞く)。sudo が無い /
+#     聞く端末が全く無い場合だけスキップして案内する。
 #   - 再実行は安全 (べき等)。既存の fork clone や data/ は上書きしない。
 #     サービス登録の再実行はユニット更新 + restart (data/ の状態は引き継がれる)。
 #
@@ -232,8 +234,31 @@ if [[ "$OOM" -eq 1 ]]; then
     echo "! sudo が無いため OOM 保護はスキップ"
     echo "  手動導入: sudo scripts/oom-protect-install.sh"
   elif [[ ! -t 0 ]] && ! sudo -n true >/dev/null 2>&1; then
-    echo "! sudo にパスワードが必要なため OOM 保護はスキップ (非対話環境)"
-    echo "  対話シェルで再実行するか手動導入: sudo scripts/oom-protect-install.sh"
+    # stdin が tty でない (パイプ / エージェント実行など) かつ sudo にパスワードが要る。
+    # 制御端末があるなら /dev/tty でこの段階だけパスワードを聞き、sudo で導入する
+    # (スキップするとヘルパー未導入のままになり、モデルが OOM kill される)。
+    # /dev/tty は「開けるか」で判定する (-r/-w はデバイスノードの権限しか見ない)。
+    if (: >/dev/tty) 2>/dev/null; then
+      echo "▶ OOM 保護導入 (sudo にパスワードが必要 — sudo を使うのはこの段階だけ)"
+      OOM_PW=""
+      if IFS= read -r -s -p "  sudo パスワード: " OOM_PW </dev/tty; then
+        echo
+        # printf は bash builtin なのでパスワードは ps に現れない。sudo -S で stdin から渡す
+        if printf '%s\n' "$OOM_PW" | sudo -S -p '' bash "$PROJECT_ROOT/scripts/oom-protect-install.sh"; then
+          OOM_OK=1; OOM_NEW=1
+        fi
+      else
+        echo
+      fi
+      OOM_PW=""
+      if [[ "$OOM_NEW" -ne 1 ]]; then
+        echo "! OOM 保護の導入に失敗したためスキップ (セットアップ自体は完了しています)"
+        echo "  手動で再試行: sudo scripts/oom-protect-install.sh"
+      fi
+    else
+      echo "! sudo にパスワードが必要で、聞ける端末も無いため OOM 保護はスキップ (非対話環境)"
+      echo "  対話シェルで再実行するか手動導入: sudo scripts/oom-protect-install.sh"
+    fi
   else
     echo "▶ OOM 保護導入 (sudo scripts/oom-protect-install.sh)"
     if [[ "$EUID" -eq 0 ]]; then
