@@ -4,11 +4,11 @@
 "use strict";
 VIEWS.setup = `
   <section id="view-setup" class="view hidden">
-    <h2 class="view-title">セットアップ <span class="muted">インストール / モデルダウンロード / 調整 は新しいステップ式ウィザードで行います</span></h2>
+    <h2 class="view-title">セットアップ</h2>
     <div class="card" style="text-align:center;padding:36px 16px">
       <div style="line-height:1;color:var(--sub)"><svg class=ic style="width:44px;height:44px" aria-hidden=true><use href=#i-box /></svg></div>
-      <p class="muted" style="margin:12px 0 4px">1 画面 1 質問のセットアップ画面を用意しました。<br>
-        案内にしたがって <b>インストール → モデルのダウンロード → 調整 (任意)</b> を順番に実行できます。</p>
+      <p class="muted" style="margin:12px 0 4px">1 画面 1 質問のウィザードで<br>
+        <b>インストール → モデルのダウンロード → 調整</b> を順番に実行できます。</p>
       <button class="primary" style="max-width:300px;margin:14px auto 0" onclick="location.href='/setup'">セットアップを開始する</button>
       <p style="margin:12px 0 0"><button class="ghost" style="min-height:34px;font-size:12.5px" onclick="location.href='/setup?flow=profile'"><svg class=ic aria-hidden=true><use href=#i-clipboard /></svg> プロファイル作成 + キャリブレーションのみ</button></p>
       <p class="muted" style="margin-top:6px;font-size:12px">インストール / モデルダウンロードが済みの環境向け — ダウンロード済みモデルから選んで設定と調整だけを行います</p>
@@ -21,11 +21,11 @@ VIEWS.setup = `
    install は clone / venv / uv pip、download は HF キャッシュへの転送で progress に進捗が載る。
    ③ の計走は /api/calibrations のまま (calTimer が全体で見張っているのでここでは描画だけ)。 */
 const INS_ST = {queued: ["info", "待機"], running: ["warn", "実行中"], done: ["ok", "完了"],
-                failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "中断 (launcher 再起動)"]};
+                failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "launcher 再起動で中断"]};
 const INS_STEPS = {clone: "clone", branch: "ブランチ切替", venv: "venv 作成", precheck: "確認",
                    install: "uv pip install", cmake: "cmake 設定", "cmake-build": "cmake ビルド",
-                   engine: "エンジン受信", tools: "tools (pip + llama.cpp)",
-                   model: "モデル準備 (Strata / Maya)", verify: "import 確認"};
+                   engine: "エンジン受信", tools: "tools step",
+                   model: "モデル準備", verify: "import 確認"};
 /* install ステップの実体は uv があれば uv pip、無い環境だけ venv の pip。
    手順名はサーバーが返す tool (実行する argv と同じ判定) で出す。 */
 const insToolLabel = tool => tool === "pip" ? "pip install" : "uv pip install";

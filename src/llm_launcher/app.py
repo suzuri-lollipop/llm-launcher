@@ -34,7 +34,7 @@ from .store import JsonStore, new_id, now
 from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
-                        clone_exists, current_ref, install_tool)
+                        cached_tags, clone_exists, current_ref, fork_tags, install_tool)
 from .models import (ModelError, build_inventory, delete_entry, hf_hub_cache_dir,
                      scan_data_models, scan_hf_cache)
 from . import maya_setup
@@ -1574,6 +1574,7 @@ def create_app(root: Path) -> FastAPI:
         インストール検出・Strata / Maya のモデル表 + 設定済み config・セットアップ
         ジョブの実行中かどうかだけを返す。静的パスは {profile_id} 系より前に登録する
         こと (FastAPI は登録順マッチ)。"""
+        await _warm_install_tags()
         specs = _installable_public()
         dets = await asyncio.gather(*[detect(s["id"]) for s in specs])
         installed = {s["id"]: bool(d.get("installed")) for s, d in zip(specs, dets)}
@@ -2492,13 +2493,33 @@ def create_app(root: Path) -> FastAPI:
 
     installs.on_job_done = _inst_done
 
+    async def _warm_install_tags(force: bool = False) -> None:
+        # fork 専用タグ (tag_prefix) はリモートから取得して選択一覧に足す。TTL キャッシュが
+        # 温まっていれば即時。ネットワークはイベントループの外で待つ (取得失敗は一覧が
+        # ブランチだけになるだけで致命ではない — fork_tags が前回の一覧を保持する)
+        for spec in INSTALL_SPECS.values():
+            if spec.get("tag_prefix"):
+                await asyncio.to_thread(fork_tags, spec, force=force)
+
+    def _refs_public(spec: dict[str, Any]) -> list[dict[str, Any]]:
+        # ブランチ (spec の固定一覧) + 取得済みの fork 専用タグ。タグの表示 (label) は
+        # prefix なし (suzuri-v1.0.1 → v1.0.1) — prefix は公式タグとの識別のためだけ。
+        # ref は git に渡す完全名のまま。kind=tag を UI の表示分けに使う。
+        out = [{"ref": str(r["ref"]), "label": str(r.get("label") or r["ref"])}
+               for r in (spec.get("refs") or [])]
+        prefix = str(spec.get("tag_prefix") or "")
+        out += [{"ref": t, "label": t[len(prefix):], "kind": "tag"}
+                for t in cached_tags(spec)]
+        return out
+
     def _installable_public() -> list[dict[str, Any]]:
         # clone 前は /api/state に出ない fork でもセットアップタブで選べるよう、表示情報をここで返す
-        # refs = ブランチ選択の一覧、current_ref = 既存 clone が今いるブランチ (UI の既定選択に使う)
+        # refs = ブランチ / タグ選択の一覧、current_ref = 既存 clone が今いるブランチ / タグ
+        # (UI の既定選択に使う)
         return [{"id": bid, "name": BACKENDS[bid]["name"], "repo": spec["clone"],
                  "ref": spec.get("ref", ""),
-                 "refs": [{"ref": str(r["ref"]), "label": str(r.get("label") or r["ref"])}
-                          for r in (spec.get("refs") or [])],
+                 "refs": _refs_public(spec),
+                 "tag_prefix": spec.get("tag_prefix", ""),
                  "current_ref": current_ref(root, spec), "cloned": clone_exists(root, spec),
                  "module_path": spec["module_path"], "extras": spec["extras"],
                  # requirements 系 (pyproject の無いリポジトリ) / cmake ビルド有無は
@@ -2521,12 +2542,15 @@ def create_app(root: Path) -> FastAPI:
                 for bid, spec in INSTALL_SPECS.items() if bid in BACKENDS]
 
     @app.get("/api/installs")
-    async def list_installs() -> dict[str, Any]:
+    async def list_installs(refresh: bool = False) -> dict[str, Any]:
         """履歴 + 実行中ジョブ + UI インストール可能なバックエンド。
 
         tool = 実際に走るインストールコマンド (uv があれば uv pip、無ければ venv の pip)。
         UI の手順名はこの値で書き、表示と実行のズレを防ぐ。
+        refresh=1 で fork 専用タグの一覧を TTL キャッシュを無視して取り直す
+        (セットアップ画面の「一覧を更新」ボタン用)。
         """
+        await _warm_install_tags(force=refresh)
         return {"jobs": installs.list_jobs(), "active": installs.active_id,
                 "installable": _installable_public(), "cache_dir": str(hf_hub_cache_dir()),
                 "tool": install_tool()}

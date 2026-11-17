@@ -71,6 +71,31 @@ h1 { font-size: 22px; font-weight: 400; margin: 0 0 8px; line-height: 1.3; }
   display: grid; place-items: center; }
 .plan .note { color: var(--ink2); font-size: 12px; }
 
+/* ---------------- インフォメーションマーク (SVG) + ポップオーバー ----------------
+   長い説明はタイトル / ラベルの隣の ⓘ に畳む。絵文字ではなく線画 SVG で、
+   普段は補足色に溶け込ませ、ホバー / 展開時だけ一次色を出す。 */
+.info {
+  display: inline-grid; place-items: center; vertical-align: -2px;
+  width: 16px; height: 16px; margin-left: 6px; padding: 0; flex: none;
+  border: 0; background: none; border-radius: 50%;
+  color: var(--ink2); opacity: .6; cursor: pointer;
+  pointer-events: auto;   /* フローティングラベル (pointer-events:none) の中でも押せる */
+  transition: opacity .12s, color .12s;
+}
+.info:hover, .info:focus-visible, .info[aria-expanded="true"] { opacity: 1; color: var(--blue); outline: none; }
+.info svg { width: 100%; height: 100%; display: block; }
+h1 .info { width: 18px; height: 18px; vertical-align: -1px; }
+.opt .t1 .info { width: 14px; height: 14px; vertical-align: -2px; margin-left: 5px; }
+.field label .info { width: 12px; height: 12px; vertical-align: -1px; margin-left: 3px; }
+.row-item .v .info { width: 14px; height: 14px; vertical-align: -2px; }
+.info-pop {
+  position: fixed; z-index: 60; max-width: 320px;
+  background: #fff; border: 1px solid var(--line); border-radius: 8px;
+  box-shadow: 0 1px 2px rgba(60,64,67,.3), 0 4px 16px rgba(60,64,67,.15);
+  padding: 10px 14px; font-size: 12.5px; line-height: 1.7; color: var(--ink);
+  white-space: pre-wrap; word-break: break-word; text-align: left;
+}
+
 /* ---------------- 選択肢 (アカウント選択風ラジオ行) ---------------- */
 .opt-list { display: flex; flex-direction: column; gap: 4px; margin: 0 0 8px; padding: 0; }
 .opt {
@@ -87,6 +112,18 @@ h1 { font-size: 22px; font-weight: 400; margin: 0 0 8px; line-height: 1.3; }
 .opt .t2 { font-size: 12px; color: var(--ink2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .opt .tag { margin-left: auto; flex: none; font-size: 11px; color: var(--green);
   border: 1px solid #ceead6; background: #e6f4ea; border-radius: 999px; padding: 2px 8px; }
+/* タグ行のプルダウン (ラジオ + select の横並び。増えても画面が伸びない) */
+.opt select {
+  flex: 1; min-width: 0; font: inherit; font-size: 14px; color: var(--ink);
+  padding: 8px 32px 8px 10px; border: 1px solid var(--ink2); border-radius: 4px;
+  background: transparent url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='8'><path d='M1 1l5 5 5-5' stroke='%235f6368' stroke-width='1.6' fill='none' stroke-linecap='round'/></svg>") no-repeat right 10px center;
+  appearance: none; cursor: pointer; outline: none;
+}
+.opt select:focus { border-color: var(--blue); }
+/* 非選択 (ブランチ選択中) は灰色 + 操作不可。ラジオだけは切替用に生かしておく */
+.opt.off .txt, .opt.off select { opacity: .5; }
+.opt select:disabled { cursor: not-allowed; color: var(--ink2); border-color: var(--line);
+  background-color: var(--bg-hover); }
 .opt .tag.no { color: var(--ink2); border-color: var(--line); background: var(--bg-hover); }
 
 /* ---------------- 稼働設定のグループ (見出しはフローティングラベル) ---------------- */

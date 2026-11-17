@@ -123,10 +123,10 @@ def test_pre_job_config_questions_built_from_table():
 def test_welcome_plan_announces_settings_first():
     assert "設定をまとめて終えてから" in HTML
     assert "モデルと設定を選ぶ" in HTML
-    # ④ のボタンがジョブ開始を予告する
+    # ④ のボタンがジョブ開始を予告する (② のボタンはシンプルな「次へ」— 長い案内は ⓘ へ)
     assert "保存してセットアップを開始" in JS
     assert "保存してダウンロードを開始" in JS
-    assert "次へ (稼働設定)" in JS
+    assert 'btn.textContent = "次へ";' in JS
 
 
 # ---------------------------------------------------------------- 後方互換 (旧フロー)

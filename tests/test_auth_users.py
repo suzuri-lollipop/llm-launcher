@@ -45,9 +45,11 @@ class Client:
             headers.append((b"cookie", self.cookie.encode()))
         if api_key:
             headers.append((b"authorization", f"Bearer {api_key}".encode()))
+        path, _, qs = path.partition("?")   # クエリ文字列は scope の別フィールド (ASGI 仕様)
         scope = {"type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
                  "http_version": "1.1", "method": method, "scheme": "http",
-                 "path": path, "raw_path": path.encode(), "query_string": b"", "root_path": "",
+                 "path": path, "raw_path": path.encode(), "query_string": qs.encode(),
+                 "root_path": "",
                  "headers": headers, "client": ("127.0.0.1", 50000), "server": ("test", 80)}
         sent: list[dict] = []
 

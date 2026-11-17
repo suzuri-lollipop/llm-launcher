@@ -72,8 +72,8 @@ def test_profile_chrome_renumbers_steps():
     assert '"ステップ 1 / 4 — バックエンドとモデル"' in fn
     assert '"ステップ 2 / 4 — 稼働設定"' in fn
     assert '"ステップ 3 / 4 — 接続設定"' in fn
-    assert '"ステップ 4 / 4 — 調整 (任意)"' in fn
-    assert 'const calKicker = () => profileFlow() ? "ステップ 4 / 4 — 調整 (任意)" : "ステップ 5 / 5 — 調整 (任意)";' in JS
+    assert '"ステップ 4 / 4 — 調整"' in fn
+    assert 'const calKicker = () => profileFlow() ? "ステップ 4 / 4 — 調整" : "ステップ 5 / 5 — 調整";' in JS
 
 
 # ---------------------------------------------------------------- バックエンド選択
@@ -156,7 +156,7 @@ def test_config_and_cal_core_reused():
     assert "if (canCal && calOff) {" in cal
     assert "!W.busyInstall" in cal
     assert "キャリブレーション権限のあるアカウントで実行できます" in cal
-    assert "セットアップ (インストール / ダウンロード) ジョブが実行中です" in cal
+    assert "セットアップジョブが実行中です" in cal
     # 調整開始の kicker はモード対応
     cago = _block('$("#ca-go").addEventListener("click"', "/* ---------------------------------------------------------------- 完了 */")
     assert "setProgChrome(calKicker()" in cago
@@ -268,4 +268,4 @@ def test_downloaded_option_labels_frontload_quant():
     assert 'esc(x.model + " · " + (x.gb || "?") + " GB — " + x.label)' in fn
     # 選択中の完全名はヒント (md-dest) にも出す
     sync = _block("function mdSync()", "async function renderModel()")
-    assert "${sel.label} — 重みはこの PC に在ります" in sync
+    assert '${sel.label} — ${sel.gb || "?"} GB · 再取得なし' in sync
