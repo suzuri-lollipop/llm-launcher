@@ -136,7 +136,7 @@ def test_no_static_recommendation_tags_baked_into_options():
 def test_dynamic_recommendation_machinery_present():
     for marker in ("function hwFromSystem(", "function cfKvBytes(", "function cfRecommend(",
                    "function cfApplyRec(", "W.hw", "hwSummary(", "/api/system",
-                   "（推奨）", "推奨の根拠"):
+                   " · 推奨", "推奨の根拠"):
         assert marker in SETUP_JS, marker
     # GPU 不明環境では推奨を出さない旨の表示がある
     assert "GPU を検出できませんでした" in SETUP_JS

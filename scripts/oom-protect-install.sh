@@ -2,7 +2,8 @@
 # llm-launcher OOM 対策インストーラ
 #
 #   sudo scripts/oom-protect-install.sh                  # 特権ヘルパー + sudoers
-#   sudo scripts/oom-protect-install.sh --systemd        # + systemd システムサービス
+#   sudo scripts/oom-protect-install.sh --systemd        # + systemd システムサービス (登録 + 起動まで)
+#   sudo scripts/oom-protect-install.sh --systemd --host 0.0.0.0 --port 8036  # 待ち受け明示
 #   sudo scripts/oom-protect-install.sh --swap 32G       # + スワップファイル追加
 #   sudo scripts/oom-protect-install.sh --uninstall      # 削除
 #
@@ -11,11 +12,15 @@
 #      「引数なしのそのパスだけ」NOPASSWD で許可する。
 #      → llm-launcher は以後 起動ツリー全体 (モデル本体 + 後から湧く worker +
 #        launcher 自身) の oom_score_adj を既定 -700 に下げられる。
-#   2. --systemd: llm-launcher をシステムサービスとして起動するようにする。
+#   2. --systemd: llm-launcher をシステムサービスとして登録 + 起動する (Linger /
+#      ユーザーマネージャー / ログインセッション不要で OS 起動時から稼働)。
 #      → systemd のシステムマネージャが管理するので OOMScoreAdjust=-1000 が実際に効き、
 #        systemd-oomd がスワップ逼迫で kill を始める前に (SwapUsedLimit 既定 90%)
 #        MemoryHigh でカーネルが自発的にスロットリングする。ユーザーセッション
 #        (systemd-run --user) では OOMScoreAdjust が無視されるため、必ずシステム側。
+#      → 既存のユーザーサービス (~/.config/systemd/user/llm-launcher.service) は
+#        disable + 削除して二重起動を防ぐ。再実行時は既存ユニットの待ち受け
+#        host/port を保持する (--host / --port で明示変更可。新規既定は 0.0.0.0:8036)。
 #      → プロキシ: サービスは .bashrc を読まないため、対象ユーザーの .bashrc から
 #        HTTP(S)_PROXY / ALL_PROXY / NO_PROXY を抽出して EnvironmentFile
 #        (/etc/llm-launcher/env) に焼き込む。セットアップタブの git / uv / pip /
@@ -34,6 +39,8 @@ SWAPFILE="/swapfile"
 MODE="helper"
 USERS=()
 SWAP_SIZE=""
+HOST=""
+PORT=""
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 while [[ $# -gt 0 ]]; do
@@ -41,9 +48,11 @@ while [[ $# -gt 0 ]]; do
     --systemd) MODE="helper+systemd"; shift ;;
     --swap) SWAP_SIZE="${2:?--swap は 32G 等のサイズを指定してください}"; shift 2 ;;
     --user) USERS+=("${2:?--user はユーザー名を指定してください}"); shift 2 ;;
+    --host) HOST="${2:?--host には値を指定してください}"; shift 2 ;;
+    --port) PORT="${2:?--port には値を指定してください}"; shift 2 ;;
     --root) PROJECT_ROOT="$(cd "$2" && pwd)"; shift 2 ;;
     --uninstall) MODE="uninstall"; shift ;;
-    -h|--help) sed -n '2,25p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    -h|--help) sed -n '2,29p' "${BASH_SOURCE[0]}"; exit 0 ;;
     *) echo "不明なオプション: $1" >&2; exit 2 ;;
   esac
 done
@@ -66,8 +75,10 @@ if [[ ! -r "$HELPER_SRC" ]]; then
 fi
 
 if [[ "$MODE" == "uninstall" ]]; then
+  systemctl disable --now llm-launcher 2>/dev/null || true
   rm -f "$SUDOERS" "$HELPER" "$UNIT" "$ENV_FILE"
   systemctl daemon-reload 2>/dev/null || true
+  systemctl reset-failed llm-launcher 2>/dev/null || true
   echo "削除しました: $HELPER $SUDOERS $UNIT $ENV_FILE"
   echo "(llm-launcher 側は自動で 'sudo ヘルパー未導入' に戻ります)"
   exit 0
@@ -140,6 +151,14 @@ if [[ "$MODE" == "helper+systemd" ]]; then
   [[ ${mem_kb:-0} -gt 0 ]] || mem_kb=$((16 * 1024 * 1024))
   MEM_HIGH="$(( mem_kb * 85 / 100 / 1024 ))M"
   MEM_MAX="$(( mem_kb * 92 / 100 / 1024 ))M"
+  # 待ち受け: 明示指定 > 既存ユニットの値 > アプリ既定 (0.0.0.0:8036)。
+  # 再実行でエンドポイントを勝手に移さない (tailscale 等の接続先が生きているため)
+  if [[ -f "$UNIT" ]]; then
+    [[ -n "$HOST" ]] || HOST="$(sed -n 's/^Environment=LLM_LAUNCHER_HOST=//p' "$UNIT" | head -n1)"
+    [[ -n "$PORT" ]] || PORT="$(sed -n 's/^Environment=LLM_LAUNCHER_PORT=//p' "$UNIT" | head -n1)"
+  fi
+  HOST="${HOST:-0.0.0.0}"
+  PORT="${PORT:-8036}"
   # プロキシ受け渡し: サービスは .bashrc を読まない (非ログイン / 非対話)。
   # 対象ユーザーの .bashrc からプロキシ export を抽出して EnvironmentFile に。
   # 以後はファイル自体を編集しても再起動で反映される (.bashrc 変更時は再実行でも可)。
@@ -156,6 +175,21 @@ if [[ "$MODE" == "helper+systemd" ]]; then
   } >>"$ENV_FILE"
   chmod 640 "$ENV_FILE"
   chown "root:${USERS[0]}" "$ENV_FILE" 2>/dev/null || true
+  # 既存のユーザーサービスは二重起動になるので止めて削除する (バックエンドは
+  # KillMode=process / detached 設計のため巻き添えにならない。新サービスが引き継ぐ)
+  USER_UNIT="$OWNER_HOME/.config/systemd/user/llm-launcher.service"
+  if [[ -f "$USER_UNIT" ]]; then
+    TARGET_UID="$(id -u "${USERS[0]}" 2>/dev/null || echo "")"
+    if [[ -n "$TARGET_UID" ]] && sudo -H -u "${USERS[0]}" XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
+         systemctl --user show-environment >/dev/null 2>&1; then
+      sudo -H -u "${USERS[0]}" XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
+        systemctl --user disable --now llm-launcher 2>/dev/null || true
+      sudo -H -u "${USERS[0]}" XDG_RUNTIME_DIR="/run/user/$TARGET_UID" \
+        systemctl --user daemon-reload 2>/dev/null || true
+    fi
+    rm -f "$USER_UNIT"
+    echo "✔ 既存のユーザーサービスを無効化 (二重起動防止): $USER_UNIT"
+  fi
   cat >"$UNIT" <<UNIT
 [Unit]
 Description=llm-launcher (model server launcher)
@@ -168,14 +202,19 @@ Type=simple
 User=${USERS[0]}
 WorkingDirectory=$PROJECT_ROOT
 Environment=PYTHONPATH=$PROJECT_ROOT/src
-Environment=LLM_LAUNCHER_HOST=127.0.0.1
-Environment=LLM_LAUNCHER_PORT=8088
+Environment=PYTHONUNBUFFERED=1
+Environment=LLM_LAUNCHER_ROOT=$PROJECT_ROOT
+Environment=LLM_LAUNCHER_HOST=$HOST
+Environment=LLM_LAUNCHER_PORT=$PORT
 # サービスは .bashrc を読まないため、インストール時に抽出したプロキシをここで
 # 引き渡す (- 頭 = ファイル無しも起動失敗にしない。中身は再実行 or 編集で更新)
 EnvironmentFile=-$ENV_FILE
 ExecStart=$PY -m llm_launcher
 Restart=on-failure
 RestartSec=5s
+# バックエンドは start_new_session で detached 起動する設計のため、launcher の
+# restart / stop で稼働中サーバーを巻き添えにしない (README「動作仕様メモ」の引き継ぎ)
+KillMode=process
 # ここに書いた値は systemd のシステムマネージャが適用するので実際に効く
 # (ユーザーマネージャ / systemd-run --user では OOMScoreAdjust は無視される)
 OOMScoreAdjust=-1000
@@ -191,16 +230,45 @@ ManagedOOMPreference=avoid
 WantedBy=multi-user.target
 UNIT
   systemctl daemon-reload
-  echo "✔ ユニット作成: $UNIT (OOMScoreAdjust=-1000, MemoryHigh=$MEM_HIGH, MemoryMax=$MEM_MAX)"
+  echo "✔ ユニット作成: $UNIT (User=${USERS[0]} / $HOST:$PORT / OOMScoreAdjust=-1000, MemoryHigh=$MEM_HIGH, MemoryMax=$MEM_MAX)"
   if grep -q '_proxy=' "$ENV_FILE"; then
     echo "  プロキシ: $OWNER_HOME/.bashrc から抽出 → $ENV_FILE (変更時はこのインストーラ再実行か $ENV_FILE を編集 → systemctl restart)"
   else
     echo "  プロキシ: $OWNER_HOME/.bashrc に *_PROXY の export なし — ダイレクト接続です"
     echo "  (後から効かせる: $ENV_FILE に HTTP_PROXY=... 等を追記して sudo systemctl restart llm-launcher)"
   fi
-  echo "  起動: sudo systemctl enable --now llm-launcher"
-  echo "  ※ これ以降 llm-launcher は systemctl で起動してください (run.sh との二重起動注意)"
+  # 登録 + 起動までここでやる (再実行ならユニット更新を反映して restart)
+  systemctl enable llm-launcher >/dev/null
+  if systemctl is-active --quiet llm-launcher 2>/dev/null; then
+    systemctl restart llm-launcher
+    echo "✔ 再起動しました (ユニット更新反映。稼働中バックエンドは巻き添えなし)"
+  else
+    systemctl start llm-launcher
+    echo "✔ 起動しました"
+  fi
+  echo "✔ 自動起動登録: systemctl enable llm-launcher (WantedBy=multi-user.target)"
   echo "  ※ MemoryHigh/MemoryMax は実メモリに合わせて $UNIT を編集してください"
+  echo
+  echo "サービス検証:"
+  sleep 2
+  if systemctl is-active --quiet llm-launcher; then
+    echo "  ✔ 稼働中: $(systemctl is-active llm-launcher)"
+    for i in 1 2 3 4 5; do
+      if curl -fsS -o /dev/null -m 2 "http://127.0.0.1:$PORT/" 2>/dev/null; then
+        echo "  ✔ HTTP 応答: http://127.0.0.1:$PORT/"
+        break
+      fi
+      sleep 1
+    done || true
+    if ! curl -fsS -o /dev/null -m 2 "http://127.0.0.1:$PORT/" 2>/dev/null; then
+      echo "  (まだ HTTP 応答がありません — ログを確認: journalctl -u llm-launcher -f)"
+    fi
+  else
+    echo "  ✘ 起動に失敗しました:"
+    systemctl status llm-launcher --no-pager -l || true
+    journalctl -u llm-launcher -n 30 --no-pager || true
+    exit 1
+  fi
 fi
 
 # ---- 3. スワップ追加 (任意) ------------------------------------------------

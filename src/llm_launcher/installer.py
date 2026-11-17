@@ -77,6 +77,10 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
             {"ref": "suzuri/develop", "label": "開発版"},
             {"ref": "suzuri/product", "label": "安定版"},
         ],
+        # fork 専用タグの目印: セットアップ時にリモートから取得して選択一覧に足す。
+        # prefix は公式タグ (v0.2.2 等) との識別のためだけに存在し、表示 (label) は
+        # prefix を外した名前 (suzuri-v1.0.1 → v1.0.1)。git へ渡す ref は完全名のまま。
+        "tag_prefix": "suzuri-",
         "fork_name": "freetoken",        # module/fork/ 下の実ディレクトリ (大小文字無視)
         "module_path": "module/fork/freetoken",
         "check": "freetoken",
@@ -327,30 +331,110 @@ def install_env(*, environ: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
+# ---- fork 専用タグ (tag_prefix で始まるタグ) の取得とキャッシュ ----
+# セットアップ画面の描画 / ポーリングごとに ls-remote を撃たないための TTL キャッシュ。
+# キーは clone URL (spec ごとではない — 同じリモートを指す spec は一覧を共有する)。
+TAG_TTL = 600.0        # 一覧の鮮度 (秒)。切れたら次の取得時に 1 回だけ取り直す
+TAG_TIMEOUT = 15.0     # ls-remote のネットワークタイムアウト (秒)
+_TAG_CACHE: dict[str, dict[str, Any]] = {}   # clone URL → {"ts": float, "tags": [完全名]}
+
+
+def _version_key(name: str) -> tuple:
+    """タグ名の自然順キー (v1.0.10 > v1.0.2。数字部分は数値として比較する)。"""
+    return tuple((0, int(p)) if p.isdigit() else (1, p.lower())
+                 for p in re.split(r"(\d+)", name) if p)
+
+
+def fetch_tags(url: str, prefix: str, *, timeout: float = TAG_TIMEOUT) -> list[str]:
+    """git ls-remote --tags から prefix で始まるタグの完全名を新しい順に返す。
+
+    公式タグ (v0.2.2 等) や nightly は prefix が違うので自然に除外される。
+    annotated tag の peeled 行 (^{}) は飛ばす。git が無い / ネットワーク失敗は []
+    (選択一覧はブランチだけにフォールバックするだけで致命ではない)。
+    名前は _REF_RE で形式検査してから返す (git の argv に入るため)。
+    """
+    try:
+        r = subprocess.run(["git", "ls-remote", "--tags", url],
+                           capture_output=True, text=True, timeout=timeout,
+                           env=install_env())
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if r.returncode != 0:
+        return []
+    names: set[str] = set()
+    for line in (r.stdout or "").splitlines():
+        sha, _, ref = line.partition("\t")
+        ref = ref.strip()
+        if not sha.strip() or not ref.startswith("refs/tags/") or ref.endswith("^{}"):
+            continue
+        name = ref[len("refs/tags/"):]
+        if name.startswith(prefix) and _REF_RE.match(name) and ".." not in name:
+            names.add(name)
+    return sorted(names, key=_version_key, reverse=True)
+
+
+def fork_tags(spec: dict[str, Any], *, force: bool = False) -> list[str]:
+    """spec の tag_prefix 付きタグ一覧 (TTL キャッシュ付き・ブロッキング)。
+
+    API / start_install からは asyncio.to_thread 経由で呼ぶこと (ネットワークを
+    イベントループで待たない)。取得失敗時は前回の一覧を保持する — 一時的な
+    ネットワーク断で選択一覧が消えない。失敗でも ts は更新して打ち直しの連打を防ぐ。
+    """
+    prefix = str(spec.get("tag_prefix") or "")
+    if not prefix:
+        return []
+    url = str(spec.get("clone") or "")
+    ent = _TAG_CACHE.get(url)
+    if ent and not force and time.time() - ent["ts"] < TAG_TTL:
+        return list(ent["tags"])
+    tags = fetch_tags(url, prefix)
+    if not tags and ent:
+        tags = list(ent["tags"])
+    _TAG_CACHE[url] = {"ts": time.time(), "tags": tags}
+    return tags
+
+
+def cached_tags(spec: dict[str, Any]) -> list[str]:
+    """ネットワークを叩かずにキャッシュだけ読む (allowed_refs / 一覧描画用)。"""
+    if not spec.get("tag_prefix"):
+        return []
+    ent = _TAG_CACHE.get(str(spec.get("clone") or ""))
+    return list(ent["tags"]) if ent else []
+
+
+def is_tag_ref(spec: dict[str, Any], ref: str) -> bool:
+    """この spec にとって ref が fork 専用タグか (ブランチと git 操作を分けるため)。"""
+    prefix = str(spec.get("tag_prefix") or "")
+    return bool(prefix) and bool(ref) and ref.startswith(prefix)
+
+
 def allowed_refs(spec: dict[str, Any]) -> list[str]:
-    """このバックエンドで選べるブランチ (UI の選択一覧 = サーバー側の許容一覧)。"""
+    """このバックエンドで選べるブランチ / タグ (UI の選択一覧 = サーバー側の許容一覧)。
+
+    タグは取得済みキャッシュから足す (ネットワークは叩かない — 温めは API 側)。
+    """
     refs = [str(r.get("ref") or "").strip() for r in (spec.get("refs") or [])]
     refs = [r for r in refs if r]
-    if refs:
-        return refs
-    default = str(spec.get("ref") or "").strip()
-    return [default] if default else []
+    if not refs:
+        default = str(spec.get("ref") or "").strip()
+        refs = [default] if default else []
+    return refs + [t for t in cached_tags(spec) if t not in refs]
 
 
 def resolve_ref(spec: dict[str, Any], ref: str) -> str:
-    """UI が選んだブランチを既定値込みで決め、一覧に無い名前を弾く。
+    """UI が選んだブランチ / タグを既定値込みで決め、一覧に無い名前を弾く。
 
-    ブランチ名は git の argv へ入る (先頭 `-` や `..` は引数注入 / パストラバーサルの元) ので、
+    名前は git の argv へ入る (先頭 `-` や `..` は引数注入 / パストラバーサルの元) ので、
     形式的な検査に加えて allowed_refs (spec 側のホワイトリスト) を通った名前だけを渡す。
     """
     want = (ref or "").strip() or str(spec.get("ref") or "").strip()
     if not want:
         return ""
     if want not in allowed_refs(spec):
-        raise InstallError("このバックエンドでインストールできるブランチではありません: "
+        raise InstallError("このバックエンドでインストールできるブランチ / タグではありません: "
                            f"{want} (一覧: {', '.join(allowed_refs(spec)) or 'なし'})")
     if not _REF_RE.match(want) or ".." in want or "//" in want or want.endswith("/"):
-        raise InstallError(f"ブランチ名が不正です: {want}")
+        raise InstallError(f"ブランチ / タグ名が不正です: {want}")
     return want
 
 
@@ -363,6 +447,8 @@ def clone_exists(root: Path, spec: dict[str, Any]) -> bool:
 def current_ref(root: Path, spec: dict[str, Any]) -> str:
     """既存 clone が今どこで checkout されているか (UI の既定選択と切替表示用)。
 
+    ブランチ名を返す。タグを選んで入れた clone は detached HEAD なので、
+    そのときは HEAD に一致するタグ名 (git describe --exact-match) を返す。
     git が無い / clone が無い / bare でない等均合しないときは "" (= 不明)。
     セットアップタブの描画ごとに走るため、失敗を投げず短時間で返す。
     """
@@ -374,10 +460,19 @@ def current_ref(root: Path, spec: dict[str, Any]) -> str:
     try:
         r = subprocess.run(["git", "-C", str(mod), "rev-parse", "--abbrev-ref", "HEAD"],
                            capture_output=True, text=True, timeout=5)
+        head = (r.stdout or "").strip()
+        if r.returncode == 0 and head and head != "HEAD":
+            return head
+        if r.returncode == 0 and head == "HEAD":
+            t = subprocess.run(["git", "-C", str(mod), "describe", "--tags",
+                                "--exact-match", "HEAD"],
+                               capture_output=True, text=True, timeout=5)
+            tag = (t.stdout or "").strip()
+            if t.returncode == 0 and tag:
+                return tag
     except (OSError, subprocess.SubprocessError):
         return ""
-    head = (r.stdout or "").strip()
-    return head if r.returncode == 0 and head and head != "HEAD" else ""
+    return ""
 
 
 def seed_launch_json(module_dir: Path) -> str | None:
@@ -579,8 +674,9 @@ class InstallManager:
                             actor: dict[str, Any] | None = None) -> dict[str, Any]:
         """clone -> .venv -> uv pip install -e を 1 ボタンで実行する (同時に 1 件だけ)。
 
-        ref (ブランチ) は spec["refs"] の一覧内だけ通る。未 clone 時はそのブランチを clone し、
-        clone 済み時は選択ブランチへ fetch + checkout する step を挟む。
+        ref (ブランチ / fork 専用タグ) は spec["refs"] + 取得済みタグの一覧内だけ通る。
+        未 clone 時はその ref を clone し、clone 済み時は選択 ref へ fetch + checkout する
+        step を挟む (タグは detached HEAD になる)。
         インストールコマンドは install_tool() が uv / pip を選ぶ (UI の表示と同じ判定)。
         """
         self._check_free()
@@ -590,6 +686,13 @@ class InstallManager:
         extras_str = spec["extras"] if extras is None else (extras or "").strip()
         if extras_str and not _EXTRAS_RE.match(extras_str):
             raise InstallError("extras はカンマ区切りの英数字のみです (例: accel)")
+        if spec.get("tag_prefix"):
+            # タグのホワイトリストを温めてから検証する (通常は API 描画時のキャッシュが効く)。
+            # 一覧に無いタグが指定されたときだけ 1 回取り直す — 直前に push されたタグの可能性がある
+            await asyncio.to_thread(fork_tags, spec)
+            want = (ref or "").strip()
+            if is_tag_ref(spec, want) and want not in cached_tags(spec):
+                await asyncio.to_thread(fork_tags, spec, force=True)
         branch = resolve_ref(spec, ref)
         check = spec["check"]
         if not _MODULE_RE.match(check):
@@ -884,23 +987,32 @@ class InstallManager:
         return ".venv は既存です"
 
     async def _switch_branch(self, job: dict[str, Any], module_dir: Path, ref: str) -> bool:
-        """clone 済みの clone を選択ブランチへ fetch + checkout する (切替を起こしたら True)。
+        """clone 済みの clone を選択ブランチ / タグへ fetch + checkout する (切替を起こしたら True)。
 
         ユーザーの作業ツリーとローカルコミットを壊さないことが先:
         追跡ファイルに未コミット変更があれば切替を失敗にしてお知らせし (未追跡の
         freetoken-launch.json / .venv は邪魔しない)、同じ名前のローカルブランチが
         既にあるときは --ff-only で進む分だけ進める (独自コミットはそのまま)。
+        fork 専用タグ (tag_prefix) は refs/tags を fetch して detached HEAD で checkout する
+        (タグは不変なのでローカルブランチは作らない / ff もしない)。
         """
+        spec = INSTALL_SPECS.get(str(job.get("backend") or "")) or {}
+        tag = is_tag_ref(spec, ref)
         git = ["git", "-C", str(module_dir)]
         rc, cur = await self._exec(git + ["rev-parse", "--abbrev-ref", "HEAD"], module_dir)
         if rc != 0:
             raise InstallError(
                 f"{module_dir} が git リポジトリではない (または git が使えない) ため、"
-                f"{ref} に切り替えられません。ブランチを選んで入れ直すにはこのフォルダを"
+                f"{ref} に切り替えられません。ブランチ / タグを選んで入れ直すにはこのフォルダを"
                 "削除してからインストールし直してください")
         cur = cur.strip()
+        if cur == "HEAD":
+            # detached HEAD: タグを選んで入れた clone はここにいる。一致するタグ名で現在地を見る
+            rc2, t = await self._exec(git + ["describe", "--tags", "--exact-match", "HEAD"],
+                                      module_dir)
+            cur = t.strip() if rc2 == 0 else ""
         if cur == ref:
-            self._append_log(job, f"ブランチは選択と同じです ({ref})")
+            self._append_log(job, f"{'タグ' if tag else 'ブランチ'}は選択と同じです ({ref})")
             return False
         rc, dirty = await self._exec(git + ["status", "--porcelain", "--untracked-files=no"],
                                      module_dir)
@@ -908,18 +1020,30 @@ class InstallManager:
             raise InstallError("git status が実行できません (clone を確認してください)")
         if dirty.strip():
             raise InstallError(
-                f"未コミットの変更があるため {cur} → {ref} に切り替えられません。"
+                f"未コミットの変更があるため {cur or 'HEAD'} → {ref} に切り替えられません。"
                 "commit / stash するか、git clone し直し (フォルダ削除) でインストールし直してください")
         # shallow clone (--depth 1) は浅いまま追うため、そのときだけ --depth を付ける
         shallow = (module_dir / ".git" / "shallow").exists()
-        fetch = git + ["fetch"] + (["--depth", "1"] if shallow else []) + [
-            "origin", f"+refs/heads/{ref}:refs/remotes/origin/{ref}"]
+        src = f"+refs/tags/{ref}:refs/tags/{ref}" if tag else \
+              f"+refs/heads/{ref}:refs/remotes/origin/{ref}"
+        fetch = git + ["fetch"] + (["--depth", "1"] if shallow else []) + ["origin", src]
         rc, _ = await self._run_step(job, {"name": "branch", "argv": fetch,
                                            "cwd": str(module_dir)})
         if job["id"] in self._cancel:
             raise _Cancelled()
         if rc != 0:
             raise InstallError(f"git fetch origin {ref} が失敗しました — ログ末尾を確認してください")
+        if tag:
+            # タグは detached HEAD で checkout (同名ブランチの DWIM を避けるため ref を明示)
+            argv = git + ["checkout", "--detach", f"refs/tags/{ref}"]
+            rc, _ = await self._run_step(job, {"name": "branch", "argv": argv,
+                                               "cwd": str(module_dir)})
+            if job["id"] in self._cancel:
+                raise _Cancelled()
+            if rc != 0:
+                raise InstallError(f"{ref} に checkout できませんでした — ログ末尾を確認してください")
+            self._append_log(job, f"バージョンを {cur or 'HEAD'} → {ref} に切り替えました (タグ)")
+            return True
         rc, _ = await self._exec(git + ["show-ref", "--verify", "--quiet", f"refs/heads/{ref}"],
                                  module_dir)
         has_local = rc == 0
@@ -930,7 +1054,7 @@ class InstallManager:
             raise _Cancelled()
         if rc != 0:
             raise InstallError(f"{ref} に checkout できませんでした — ログ末尾を確認してください")
-        self._append_log(job, f"ブランチを {cur} → {ref} に切り替えました")
+        self._append_log(job, f"ブランチを {cur or 'HEAD'} → {ref} に切り替えました")
         if has_local:
             # ローカルに同じ名のブランチがあった: 速い fast-forward だけ origin まで進める
             rc, _ = await self._run_step(job, {"name": "branch", "argv": git + [

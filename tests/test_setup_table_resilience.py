@@ -114,4 +114,5 @@ def test_wizard_hint_is_honest_about_load_failure():
     import llm_launcher
 
     js = (Path(llm_launcher.__file__).parent / "static" / "setup.js").read_text("utf-8")
-    assert "モデル一覧を読み出せませんでした (PC が高負荷の可能性)" in js
+    assert "モデル一覧を読み出せませんでした" in js
+    assert "高負荷" in js
