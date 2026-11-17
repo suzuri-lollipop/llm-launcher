@@ -115,12 +115,28 @@ def shards_of(fid, raw, model):
 # — 純正の対話質問の「(recommended for your GPU)」と同じ立場 (大きくても注記して従う)。
 ram = pc.get("ram_gb") or 0.0
 vram = pc.get("vram_gb") or 0.0
+# 家系別のコンテキスト選択肢 (owner 方針 2026-11-17: 対応する全てのバックエンド /
+# モデルで 1M まで。推奨は純正の式のまま、大きい選択は UI が注記して従う):
+#  - Flash-Next 系: trained 262144、超過は yarn rope scaling (純正 resolve_rope が
+#    factor = 最終 / 262144 を導出)。純正メニューは 512K 止まりだが 1M (factor 4) まで出す。
+#  - DeepSeek-V4.1-Flash: native に 1M 読む (strata_control/dsv41_context.CHOICES、
+#    純正メニューも 8K–1M)。旧い 262144 上限は trained の誤読だった。
+#  - own-path (Qwen3.6): このエンジンパスに rope scaling が無く trained 262144 が上限。
+D = getattr(S, "dsv41_context", None)
+ds41_choices = list(getattr(D, "CHOICES", (8192, 32768, 65536, 131072, 262144, 524288, 1048576)))
+ctx_all = sorted(set(getattr(S, "CONTEXTS", []) or
+                     [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]) | {1048576})
 for fid, f in fams.items():
     raw = getattr(S, "FAMILIES", {}).get(fid) or own.get(fid) or multi.get(fid) or {}
-    # own-path (Qwen3.6) と multi-file (DeepSeek) のメニュー上限は trained 262144
-    # (純正 install_own_path: "no rope scaling on this path yet" — 512K 選択は
-    # 純正が警告付きで従うだけで、そもそも KV が 24GB に収まらない)
-    f["max_context"] = 262144 if (fid in multi or fid in own) else (max(S.CONTEXTS) if getattr(S, "CONTEXTS", []) else 524288)
+    if fid in own:
+        f["contexts"] = [c for c in ctx_all if c <= 262144]
+        f["max_context"] = 262144
+    elif fid in multi:
+        f["contexts"] = ds41_choices
+        f["max_context"] = max(ds41_choices)
+    else:
+        f["contexts"] = ctx_all
+        f["max_context"] = max(ctx_all)
     # own-path は純正が単一 GPU 宣言 ("runs on one GPU so far")。multi-file は tp 可
     f["multi_gpu"] = fid not in own
     for m, d in f["models"].items():
@@ -136,30 +152,42 @@ for fid, f in fams.items():
             found = [n for n in names if n in idx]
             d["have"] = {"files": len(names), "found": len(found),
                          "gb": round(sum(idx[n] for n in found) / 2**30, 1)}
-print(json.dumps({"families": fams, "contexts": list(getattr(S, "CONTEXTS", [])), "pc": pc}))
+print(json.dumps({"families": fams, "contexts": ctx_all, "pc": pc}))
 """
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL = 60.0
+# 読み出し失敗は長くキャッシュしない (maya_setup と同じ規律): 短いバックオフで
+# 再試行し、その間は直近の成功表を返す — 高負荷時の timeout でウィザードが死ぬのを防ぐ
+_FAIL: dict[str, float] = {}
+_FAIL_RETRY = 10.0
+_GOOD_MAX_AGE = 600.0
+_READ_TIMEOUT = 180.0
 
 VISIONS = ["yes", "no", "gpu", "cpu"]
 
 
 def load_options(module_dir: Path) -> dict[str, Any]:
-    """submodule 純正の表を JSON で読む。未 clone / 読み出し失敗なら {"available": false}。"""
+    """submodule 純正の表を JSON で読む。未 clone / 読み出し失敗なら {"available": false}。
+    失敗時は直近の成功表 (10 分以内) を返し、短いバックオフで再試行する。"""
     if not (module_dir / "setup.py").is_file():
         return {"available": False, "families": {}, "contexts": [], "pc": {}}
     key = str(module_dir)
+    now = time.monotonic()
     hit = _CACHE.get(key)
-    if hit and time.monotonic() - hit[0] < _CACHE_TTL:
+    if hit and now - hit[0] < _CACHE_TTL:
         return hit[1]
+    stale = hit[1] if hit and now - hit[0] < _GOOD_MAX_AGE else None
+    unavailable = {"available": False, "families": {}, "contexts": [], "pc": {}}
+    if key in _FAIL and now - _FAIL[key] < _FAIL_RETRY:
+        return stale if stale is not None else unavailable
     py = module_dir / ".venv" / "bin" / "python"
     if not py.exists():
         py = Path(sys.executable)
     out: dict[str, Any] = {"available": False, "families": {}, "contexts": [], "pc": {}}
     try:
         proc = subprocess.run([str(py), "-c", _DUMP_SNIPPET], cwd=str(module_dir),
-                              capture_output=True, text=True, timeout=30,
+                              capture_output=True, text=True, timeout=_READ_TIMEOUT,
                               env=dict(os.environ, PYTHONNOUSERSITE="1"))
         text = proc.stdout.strip()
         data = None
@@ -180,8 +208,12 @@ def load_options(module_dir: Path) -> dict[str, Any]:
             out = data
     except Exception:  # noqa: BLE001 — 表が読めないだけでセットアップ全体を止めない
         pass
-    _CACHE[key] = (time.monotonic(), out)
-    return out
+    if out.get("available"):
+        _CACHE[key] = (time.monotonic(), out)
+        _FAIL.pop(key, None)
+        return out
+    _FAIL[key] = time.monotonic()
+    return stale if stale is not None else out
 
 
 _SHARD_RE = re.compile(r"^(.*-)(\d{5})-of-(\d{5})(\.\w+)$")
@@ -295,16 +327,19 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
         raise ValueError("context が不正です")
     if vision and vision not in VISIONS:
         raise ValueError(f"vision が不正です ({'/'.join(VISIONS)})")
+    if not (module_dir / "setup.py").is_file():
+        raise ValueError("Strata のソースが未取得です (git submodule update --init module/strata)")
     data = load_options(module_dir)
     if not data.get("available"):
-        raise ValueError("Strata セットアップの表を読めません "
-                         "(module/strata を submodule update --init で更新してください)")
+        raise ValueError("Strata セットアップの表を読み出せませんでした "
+                         "(PC が高負荷の可能性があります — 少し待ってから再試行してください)")
     fams: dict[str, Any] = data.get("families") or {}
     if fam not in fams or not fams[fam].get("models"):
         raise ValueError(f"family が一覧にありません: {fam}")
     if model not in fams[fam]["models"]:
         raise ValueError(f"model が {fam} の一覧にありません: {model}")
-    contexts = [int(c) for c in (data.get("contexts") or [])]
+    # 家系別の選択肢を優先 (own-path 256K / DS4.1 の 8K–1M など、UI が出す範囲で検証)
+    contexts = [int(c) for c in (fams[fam].get("contexts") or data.get("contexts") or [])]
     if contexts and context not in contexts:
         raise ValueError(f"context が一覧にありません: {context} ({contexts})")
     if not 4096 <= context <= 4_194_304:

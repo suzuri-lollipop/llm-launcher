@@ -11,8 +11,8 @@
   - 権限は profiles.edit (+ 調整は calibrate)。install 権限は不要 — そのため
     /api/installs (install 権限) は叩かず、読み取り専用の
     GET /api/profiles/setup-options (profiles.edit) から選択肢を読む
-  - Strata / Maya は config JSON 作成済みのモデルだけを選ぶ (セットアップジョブを
-    走らせない)。他バックエンドは既存の「済みモデル即時採用」パス (ジョブなし) を通る
+  - Strata / Maya の済みモデル一覧は重み基準 (config の quant_key では判定しない)。
+    config が無い量子化は純正セットアップが config だけ作成 (DL なし)
 
 見張る対象:
   1. profile モードの起動 / 権限 / データ源 (install 権限・/api/installs に依存しない)
@@ -105,32 +105,40 @@ def test_model_screen_is_local_only():
     assert 'profileFlow() || backend === "strata" || backend === "maya"' in JS
 
 
-def test_strata_maya_list_only_ready_configs():
+def test_profile_list_is_weights_based_not_config_based():
+    """済みモデル一覧は「重みがディスクに揃っているか」(表の have) で決める。
+    config JSON の有無 / quant_key で決めない — 共有 config (maya-ds4.json) の
+    quant_key が最後の設定を指すと、他の量子化の重みが在っても一覧から消える
+    (2026-11-16 実害: 128G の重みが在るのに 256G しか選べなかった)。"""
     fn = _block("async function renderModelTable(backend)", "function mdStFullIn(")
-    assert "const ready = profileFlow()" in fn
-    assert "(y.weights || {}).ok === true" in fn
-    assert "(!y.quant_key || y.quant_key === x.model)" in fn
-    assert "st.downloaded = ready;" in fn
-    assert "設定作成済みのモデルがありません" in fn
+    assert "if (mdStFullIn(f, m)) dl.push(" in fn
+    assert "st.downloaded = dl;" in fn
+    # config の quant_key / weights.ok による一覧フィルタは無い
+    assert "y.quant_key === x.model" not in fn
+    assert "const ready = profileFlow()" not in fn
+    assert "ダウンロード済みのモデルがありません — 先に通常のセットアップでダウンロードしてください" in fn
 
 
-def test_adopt_local_never_starts_setup_job_in_profile_mode():
+def test_adopt_local_creates_config_when_weights_present():
+    """重みが在って config が無い量子化は、純正セットアップジョブで config だけ
+    作る (ダウンロードなし)。profile モードも同じ導線 — 一覧が重み基準なので
+    「config が無い = 選べない / エラーで止める」にはしない。"""
     fn = _block("async function mdAdoptLocalTable()", '$("#md-start").addEventListener')
-    # config 欠落時の profile モードガードは mdEnterSettings (ジョブ開始導線) より前で return
-    guard = fn.index("if (profileFlow()) {")
-    enter = fn.index("mdEnterSettings();")
-    assert guard < enter
-    assert "このモデルの config JSON が見つかりません" in fn
-    # 即時採用パス (ジョブなしの完了済みジョブ化) はそのまま
+    # config 一致 → 即時採用 (ジョブなし) は維持
     assert 'W.job = { id: "", kind: "install", phase: "model", status: "done"' in fn
     assert 'W.preJob = false; W.modelSkipped = false;' in fn
+    # config 不一致 → tableReq + 設定先行フロー (ジョブは ④ の後・DL なし)
+    assert "W.tableReq = { family: x.fam, model: x.model," in fn
+    assert "mdEnterSettings();" in fn
+    # profile モード専用のエラー停止ブロックは無い
+    assert "このモデルの config JSON が見つかりません" not in fn
 
 
 def test_profile_mode_reads_tables_from_options_not_installs_api():
     st = _block("async function loadStrata()", "/* 現在バックエンドの表")
-    assert "if (profileFlow()) return (W.options && W.options.strata)" in st
+    assert "W.mdStrata = (W.options && W.options.strata)" in st
     my = _block("async function loadMaya()", "/* 現在バックエンドの表")
-    assert "if (profileFlow()) return (W.options && W.options.maya)" in my
+    assert "W.mdMaya = (W.options && W.options.maya)" in my
 
 
 # ---------------------------------------------------------------- ③④⑤ の再利用と完了
@@ -241,3 +249,23 @@ def test_setup_options_needs_profiles_edit_not_install(tmp_path, auth_on, fast_k
         assert st == 200
 
     asyncio.run(go())
+
+
+def test_profile_loaders_populate_mdt():
+    """profile モードの loadStrata / loadMaya は W.mdStrata / W.mdMaya にも表を入れる。
+    mdT() / mdAdoptLocalTable がここを参照するため、入れないと済みモデル選択が
+    無反応で先に進めない (2026-11-16 実害: 「このモデルで続ける」が効かなかった)。"""
+    st = _block("async function loadStrata()", "/* 現在バックエンドの表")
+    assert "W.mdStrata = (W.options && W.options.strata)" in st
+    my = _block("async function loadMaya()", "/* 現在バックエンドの表")
+    assert "W.mdMaya = (W.options && W.options.maya)" in my
+
+
+def test_downloaded_option_labels_frontload_quant():
+    """済みモデルの選択肢は量子化キー + 実サイズを先頭に置く — 家族名が先頭を
+    占めて末尾だけ違うモデル (Mix-128G / Mix-256G) が見分けられない問題の修正。"""
+    fn = _block("async function renderModelTable(backend)", "function mdStFullIn(")
+    assert 'esc(x.model + " · " + (x.gb || "?") + " GB — " + x.label)' in fn
+    # 選択中の完全名はヒント (md-dest) にも出す
+    sync = _block("function mdSync()", "async function renderModel()")
+    assert "${sel.label} — 重みはこの PC に在ります" in sync

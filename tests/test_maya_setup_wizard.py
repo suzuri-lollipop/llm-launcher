@@ -12,7 +12,7 @@ Maya の純正 maya.sh / maya.py は対話インストーラだが、--yes / --d
      で読み、選択肢をホワイトリスト検証するだけ)。エンジンビルド + pack + 速度計測も
      純正のこの中で走る。
   ③ 稼働設定は家系別: GLM / Qwen / MiniMax GGUF = --kv + gpu (layer split)、
-     DeepSeek / MiniMax EXL3 = --tp (--kv はエンジン固有で編集させない)。
+     DeepSeek / MiniMax EXL3 = gpu + --tp (カード枚数から導出。--kv はエンジン固有で編集させない)。
 見張る対象:
   1. spec の形 (venv_pip / tools_step / check_files)
   2. start_install の計画 — uv が在っても pip、install でなく tools step、
@@ -24,7 +24,8 @@ Maya の純正 maya.sh / maya.py は対話インストーラだが、--yes / --d
   6. /api/installs/maya-model の GET/POST と {jid} ルートとの衝突がないこと
   7. ② ジョブの result.parallel は args の --parallel (Maya の config 形)、
      config が出来ない完了は失敗として記録すること (maya.py は 0 で返るため)
-  8. ③ config-args の家系別ガード (GLM に --tp / DS4 に --kv / DS4 に gpu は 400)
+  8. ③ config-args の家系別ガード (GLM に --tp / DS4 に --kv は 400) と
+     DS4 の gpu 編集が --tp をカード枚数から導出すること (min(2, 枚数)、純正同款)
 """
 from __future__ import annotations
 
@@ -241,8 +242,8 @@ def test_wizard_copy_mentions_maya_model_step():
 FAKE_TABLES = {
     "available": True,
     "families": {
-        "glm": {"title": "GLM-5.3-Flash", "contexts": [8192, 32768, 65536, 131072],
-                "max_context": 131072, "multi_gpu": True, "rec": "Maya-S24", "engine_ready": False,
+        "glm": {"title": "GLM-5.3-Flash", "contexts": [8192, 32768, 65536, 131072, 262144, 524288, 1048576],
+                "max_context": 1048576, "multi_gpu": True, "rec": "Maya-S24", "engine_ready": False,
                 "models": {"Maya-S24": {"label": "GLM-5.3 · Maya-S24", "download_gb": 94.7,
                                         "vision": True, "config": "maya-maya-s24.json",
                                         "rec_context": 32768},
@@ -332,11 +333,14 @@ def test_build_argv_whitelist_and_rejection(monkeypatch, tmp_path: Path):
                                               "context": 131072})
     assert argv4[1:5] == ["--model", "cyber-frost", "--qwen-quant", "ud-iq2_xs"]
     assert cfg4 == "maya-qwen-ud-iq2_xs.json"
+    # GLM は trained 1M まで選択肢 (owner 方針: 対応する全てで 1M まで。純正 --context は任意値を受ける)
+    argv5, _ = maya_setup.build_argv(mod, {"family": "glm", "model": "Maya-S24", "context": 1048576})
+    assert argv5[argv5.index("--context") + 1] == "1048576"
     # ホワイトリスト外 (注入を試みる値も含む) は全て ValueError
     for bad in ({"family": "glm", "model": "../evil", "context": 32768},
                 {"family": "--x", "model": "Maya-S24", "context": 32768},
                 {"family": "nope", "model": "Maya-S24", "context": 32768},
-                {"family": "glm", "model": "Maya-S24", "context": 262144},   # GLM の上限超え
+                {"family": "glm", "model": "Maya-S24", "context": 204800},   # GLM の選択肢に無い
                 {"family": "glm", "model": "Maya-S24", "context": "32768 --yes"},
                 {"family": "glm", "model": "Maya-S24", "context": 32768, "vision": "-x"},
                 {"family": "deepseek", "model": "Maya-S24", "context": 65536}):  # 家系違いの quant
@@ -392,7 +396,7 @@ def test_build_argv_without_submodule_tables_fails(tmp_path: Path):
     """表が読めない (未 clone) は argv を作らない — 対話 maya.sh へ戻すしかない状態。"""
     mod = tmp_path / "no-maya"
     mod.mkdir()
-    with pytest.raises(ValueError, match="表を読めません"):
+    with pytest.raises(ValueError, match="未取得"):
         maya_setup.build_argv(mod, {"family": "glm", "model": "Maya-S24", "context": 32768})
 
 
@@ -694,6 +698,13 @@ def _profile(client, config: str) -> str:
     return r.json()["id"]
 
 
+def _prof_cfg(client, pid: str) -> Path:
+    """プロファイルが実際に参照する config (共有 installer config は専用コピーへ
+    張り替わるため、編集結果の検証はそちらを読む)。"""
+    profs = client.get("/api/profiles").json()
+    return Path(next(p for p in profs if p["id"] == pid)["values"]["config"])
+
+
 def _seed_maya_gpus(monkeypatch, root: Path) -> None:
     mod = root / "module" / "maya"
     (mod / "maya.py").write_text("# fake\n", encoding="utf-8")
@@ -712,6 +723,7 @@ def test_glm_config_asks_kv_and_gpu_not_tp(client, monkeypatch):
                   {"exe": "/x/maya", "args": ["--glm-pack", "/p", "--max-context", "32768"],
                    "gpu": [0, 1]})
     pid = _profile(c, "module/maya/maya-maya-s24.json")
+    p = _prof_cfg(c, pid)
     r = c.get(f"/api/profiles/{pid}/config-args").json()
     assert r["family"] == "glm" and r["kv_ok"] is True and r["tp_ok"] is False
     assert r["gpu"] == "0,1" and r["gpus"] == [0, 1]
@@ -729,21 +741,56 @@ def test_glm_config_asks_kv_and_gpu_not_tp(client, monkeypatch):
                   json={"updates": {"gpu": "5"}}).status_code == 400
 
 
-def test_ds4_config_asks_tp_not_kv_nor_gpu(client, monkeypatch):
-    """DeepSeek (maya-ds4): --tp は編集可、--kv はエンジン固有 (編集不可)、gpu も --tp 側。"""
+def test_ds4_config_gpu_selection_derives_tp(client, monkeypatch):
+    """DeepSeek (maya-ds4): --kv はエンジン固有 (編集不可)。GPU の使い方 (gpu) は
+    全家系で編集でき、--tp は選んだカード枚数から導出される (純正 maya.py と同じ
+    min(2, 枚数))。--tp だけ書いて gpu を放置すると「tp=1 なのに 2 枚 layer split」
+    で起動 / 計測される (2026-11-16 実害: gpu:[0,1] + --tp 1)。"""
     c, root = client
     _seed_maya_gpus(monkeypatch, root)
-    _maya_cfg(root, "maya-ds4.json",
-              {"exe": "/x/maya-ds4", "args": ["--pack", "/p", "--max-context", "65536", "--tp", "2"]})
+    p = _maya_cfg(root, "maya-ds4.json",
+                  {"exe": "/x/maya-ds4", "args": ["--pack", "/p", "--max-context", "65536", "--tp", "2"],
+                   "gpu": [0, 1]})
     pid = _profile(c, "module/maya/maya-ds4.json")
+    p = _prof_cfg(c, pid)
     r = c.get(f"/api/profiles/{pid}/config-args").json()
     assert r["family"] == "deepseek" and r["kv_ok"] is False and r["tp_ok"] is True
+    assert r["gpu"] == "0,1" and r["gpus"] == [0, 1]
     assert c.post(f"/api/profiles/{pid}/config-args",
                   json={"updates": {"--kv": "int8"}}).status_code == 400
+    # 単一カード → gpu は int + --tp は 1 に導出 (「GPU 分割数 1」はこれで実現する)
+    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0"}})
+    assert r.status_code == 200, r.text
+    doc = json.loads(p.read_text("utf-8"))
+    assert doc["gpu"] == 0 and "layer_split" not in doc
+    assert doc["args"][doc["args"].index("--tp") + 1] == "1"
+    # 2 枚 → --tp 2 に導出
+    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0,1"}})
+    assert r.status_code == 200, r.text
+    doc = json.loads(p.read_text("utf-8"))
+    assert doc["gpu"] == [0, 1]
+    assert doc["args"][doc["args"].index("--tp") + 1] == "2"
+    # カード数を超える --tp は拒否 (gpu 未設定 = 全 usable が見える)
     assert c.post(f"/api/profiles/{pid}/config-args",
-                  json={"updates": {"gpu": "0"}}).status_code == 400
+                  json={"updates": {"--tp": "4"}}).status_code == 400
     assert c.post(f"/api/profiles/{pid}/config-args",
-                  json={"updates": {"--tp": "4"}}).status_code == 200
+                  json={"updates": {"--tp": "2"}}).status_code == 200
+    # gpu 選択と矛盾する明示 --tp は拒否 (単一カード + tp 2)
+    assert c.post(f"/api/profiles/{pid}/config-args",
+                  json={"updates": {"gpu": "0", "--tp": "2"}}).status_code == 400
+
+
+def test_wizard_maya_gpu_question_derives_tp():
+    """③ の GPU の使い方は全家系で聞く。DS4 / MM3-EXL3 は選択から --tp を導出
+    (純正 min(2, 枚数)) — --tp だけ聞いて config の gpu を放置しない。"""
+    import llm_launcher
+
+    js = (Path(llm_launcher.__file__).parent / "static" / "setup.js").read_text("utf-8")
+    assert "tpFromGpus: W.cfgArgs.tp_ok === true" in js
+    assert 'updates["--tp"] = vals.tp;' in js
+    assert "Math.min(2, n)" in js
+    # DS4 でもカード選択の選択肢が組み立つ (flag === "gpu" の options ブロック)
+    assert 'if (cfg.tp && cfg.tp.flag === "gpu") {' in js
 
 
 def test_settings_first_flow_binds_config_after_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
@@ -799,6 +846,7 @@ def test_settings_first_flow_binds_config_after_job(tmp_path: Path, monkeypatch:
                    json={"name": p["name"], "backend": "maya",
                          "values": {"parallel": "2", "config": cfg}})
     assert r.status_code == 200, r.text
+    cfg = r.json()["values"]["config"]   # 専用コピーへ張り替わる (installer は共有しない)
     r = client.post(f"/api/profiles/{p['id']}/config-args",
                     json={"updates": {"--kv": "int8"}})
     assert r.status_code == 200, r.text

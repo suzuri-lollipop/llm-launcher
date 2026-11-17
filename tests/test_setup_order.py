@@ -137,3 +137,21 @@ def test_wizard_freetoken_matches_the_fork_flow():
     assert "kv_cache_dtype" not in up_keys
     assert "--kv-cache-dtype" not in tbl
     assert "kv_cache_dtype" in fork_keys
+
+
+# ---------------------------------------------------------------- ダウンロード択の取得済みガード
+
+def test_wizard_download_list_greys_downloaded_models():
+    """ダウンロードするモデルの一覧で取得済みは選択不可 (グレー)。
+    済みモデルは「ダウンロード済みのモデルを使う」側で選ぶ — 再ダウンロードの
+    誤起動防止 (2026-11-16 報告: 取得済みがダウンロード択で選べてしまった)。"""
+    assert "const haveRepo = r => mdLocal.some(x => x.repo_id === r);" in WIZARD_JS
+    assert '${got ? " disabled" : ""}' in WIZARD_JS
+    assert "(ダウンロード済み)" in WIZARD_JS
+    # 一覧の先頭が取得済みでも最初の未取得を選ぶ
+    assert "const firstAvail = ms.findIndex(m => !haveRepo(m.repo_id));" in WIZARD_JS
+    # 開始ボタンはグレー選択を弾く (表パネル / 汎用一覧の両方)
+    assert "!!(sizeOpt && sizeOpt.disabled)" in WIZARD_JS
+    assert "!!(selOpt && selOpt.disabled)" in WIZARD_JS
+    # 表パネル (Strata / Maya) の既存グレーも維持
+    assert '${mdStFull(m) || unpub ? " disabled" : ""}' in WIZARD_JS

@@ -416,7 +416,7 @@ def test_build_argv_without_submodule_tables_fails(tmp_path: Path):
     """表が読めない (未 clone) は argv を作らない — 対話 setup.sh へ戻すしかない状態。"""
     mod = tmp_path / "no-strata"
     mod.mkdir()
-    with pytest.raises(ValueError, match="表を読めません"):
+    with pytest.raises(ValueError, match="未取得"):
         strata_setup.build_argv(mod, {"family": "qwen", "model": "Q2_0", "context": 8192})
 
 
@@ -433,11 +433,24 @@ def test_build_argv_against_real_submodule():
     assert pc.get("ram_gb") and pc.get("vram_gb") is not None
     q = (opts.get("families") or {}).get("qwen") or {}
     assert q.get("max_context") == max(opts["contexts"])
+    # 家系別上限 (owner 方針: 対応する全てで 1M まで): Flash-Next は yarn で 1M、
+    # DeepSeek-V4.1-Flash は native 1M、own-path (Qwen3.6) は rope scaling 無しで 256K
+    assert q.get("max_context") == 1048576
+    assert 1048576 in (q.get("contexts") or [])
+    d41 = (opts.get("families") or {}).get("deepseek41") or {}
+    if d41:
+        assert d41.get("max_context") == 1048576
+        assert (d41.get("contexts") or [])[-1] == 1048576
     # own-path (Qwen3.6): trained 262144 上限 & 単一 GPU 宣言が表に乗る
     q36 = (opts.get("families") or {}).get("qwen36") or {}
     if q36:
         assert q36.get("max_context") == 262144
         assert q36.get("multi_gpu") is False
+        assert max(q36.get("contexts") or [262144]) <= 262144
+        # 家系別ホワイトリスト: own-path に 256K 超は API でも拒否
+        with pytest.raises(ValueError):
+            strata_setup.build_argv(mod, {"family": "qwen36",
+                                          "model": next(iter(q36["models"])), "context": 524288})
     assert isinstance(opts.get("pc", {}).get("gpus"), list)
     m = next(iter((q.get("models") or {}).values()), {})
     if "rec_context" in m:

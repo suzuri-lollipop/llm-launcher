@@ -118,8 +118,14 @@ for q, m in M.MODELS.items():
 glm_rec = next(iter(glm), "")
 if usable and all(g["vram_gb"] <= 24.5 for g in usable) and "Maya-S24" in glm:
     glm_rec = "Maya-S24"
-families["glm"] = {"title": "GLM-5.3-Flash", "models": glm, "contexts": list(M.CONTEXTS),
-                   "max_context": max(M.CONTEXTS), "multi_gpu": True, "rec": glm_rec,
+# GLM-5.3-Flash の trained context は 1M (GGUF ヘッダの context_length = 1048576)。エンジンは
+# KV streaming で latent cache を RAM に持つため 1M が動き、ダッシュボードも 1M まで出す。
+# 純正メニューの CONTEXTS は 128K で止まるが、owner 方針 (2026-11-17: 対応する全ての
+# バックエンド / モデルで 1M まで) で選択肢をここで拡張する。推奨は純正の式
+# (recommended_context) のまま — より大きい選択は UI が注記して従う (純正の対話と同じ立場)。
+glm_contexts = sorted(set(M.CONTEXTS) | {262144, 524288, 1048576})
+families["glm"] = {"title": "GLM-5.3-Flash", "models": glm, "contexts": glm_contexts,
+                   "max_context": max(glm_contexts), "multi_gpu": True, "rec": glm_rec,
                    "engine_ready": M.EXE.exists()}
 # ---- DeepSeek-V4.1-Flash-1017 (DS4_QUANTS: Maya quant / unsloth GGUF / EXL3 / abliterated)
 ds4 = {}
@@ -205,25 +211,38 @@ print(json.dumps({"families": families, "pc": pc}))
 
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL = 60.0
+# 読み出し失敗は長くキャッシュしない: 短いバックオフで再試行し、その間は直近の
+# 成功表を返す。キャリブレーション等で CPU が占有されると dump が timeout するが、
+# 失敗を 60s キャッシュするとウィザード② / ジョブ検証がその間死ぬ (2026-11-16 実害:
+# 256G ダウンロードが開始できないまま「一覧が読めません」になり続けた)。
+_FAIL: dict[str, float] = {}
+_FAIL_RETRY = 10.0
+_GOOD_MAX_AGE = 600.0
+_READ_TIMEOUT = 180.0
 
 VISIONS = ["on", "off"]
 
 
 def load_options(module_dir: Path) -> dict[str, Any]:
-    """submodule 純正の表を JSON で読む。未 clone / 読み出し失敗なら {"available": false}。"""
+    """submodule 純正の表を JSON で読む。未 clone / 読み出し失敗なら {"available": false}。
+    失敗時は直近の成功表 (10 分以内) を返し、短いバックオフで再試行する。"""
     if not (module_dir / "maya.py").is_file():
         return {"available": False, "families": {}, "pc": {}}
     key = str(module_dir)
+    now = time.monotonic()
     hit = _CACHE.get(key)
-    if hit and time.monotonic() - hit[0] < _CACHE_TTL:
+    if hit and now - hit[0] < _CACHE_TTL:
         return hit[1]
+    stale = hit[1] if hit and now - hit[0] < _GOOD_MAX_AGE else None
+    if key in _FAIL and now - _FAIL[key] < _FAIL_RETRY:
+        return stale if stale is not None else {"available": False, "families": {}, "pc": {}}
     py = module_dir / ".venv" / "bin" / "python"
     if not py.exists():
         py = Path(sys.executable)
     out: dict[str, Any] = {"available": False, "families": {}, "pc": {}}
     try:
         proc = subprocess.run([str(py), "-c", _DUMP_SNIPPET], cwd=str(module_dir),
-                              capture_output=True, text=True, timeout=60,
+                              capture_output=True, text=True, timeout=_READ_TIMEOUT,
                               env=dict(os.environ, PYTHONNOUSERSITE="1"))
         text = proc.stdout.strip()
         data = None
@@ -244,8 +263,12 @@ def load_options(module_dir: Path) -> dict[str, Any]:
             out = data
     except Exception:  # noqa: BLE001 — 表が読めないだけでセットアップ全体を止めない
         pass
-    _CACHE[key] = (time.monotonic(), out)
-    return out
+    if out.get("available"):
+        _CACHE[key] = (time.monotonic(), out)
+        _FAIL.pop(key, None)
+        return out
+    _FAIL[key] = time.monotonic()
+    return stale if stale is not None else out
 
 
 _SHARD_RE = re.compile(r"^(.*-)(\d{5})-of-(\d{5})(\.\w+)$")
@@ -456,10 +479,12 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
         raise ValueError("context が不正です")
     if vision and vision not in VISIONS:
         raise ValueError(f"vision が不正です ({'/'.join(VISIONS)})")
+    if not (module_dir / "maya.py").is_file():
+        raise ValueError("Maya のソースが未取得です (git submodule update --init module/maya)")
     data = load_options(module_dir)
     if not data.get("available"):
-        raise ValueError("Maya セットアップの表を読めません "
-                         "(module/maya を submodule update --init で更新してください)")
+        raise ValueError("Maya セットアップの表を読み出せませんでした "
+                         "(PC が高負荷の可能性があります — 少し待ってから再試行してください)")
     fams: dict[str, Any] = data.get("families") or {}
     if fam not in fams or not fams[fam].get("models"):
         raise ValueError(f"family が一覧にありません: {fam}")
