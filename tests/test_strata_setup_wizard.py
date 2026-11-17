@@ -286,7 +286,7 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
     # ③ の並列数既定 = 作られた config の parallel (全局推奨 4 を焼くと 24GB で起動失敗)
     assert "jp.parallel" in js
     # ② のコンテキスト既定 = 純正の推奨 (own_path_context / ram_ctx) + 大選択の注記
-    assert "rec_context" in js and "(推奨)" in js
+    assert "rec_context" in js and " · 推奨" in js
     assert "rec_context" in (static.parent / "strata_setup.py").read_text("utf-8")
     html = (static / "setup.html").read_text("utf-8")
     assert 'id="md-strata"' in html and 'id="md-strata-exist"' in html

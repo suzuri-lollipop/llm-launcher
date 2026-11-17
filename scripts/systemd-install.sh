@@ -51,8 +51,10 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-# systemctl --user に到達できない環境用のチェック
-if ! systemctl --user is-system-running >/dev/null 2>&1; then
+# systemctl --user に到達できない環境用のチェック。
+# is-system-running は無関係なユニット失敗 (degraded) でも rc=1 を返すため、
+# 到達可能なのに「未起動」と誤判定する。show-environment は到達できれば成功する。
+if ! systemctl --user show-environment >/dev/null 2>&1; then
   echo "ユーザー systemd マネージャーに接続できません (user manager が動いていない?)" >&2
   echo "  先に Linger を有効にして再ログインしてください: sudo loginctl enable-linger \$USER" >&2
   exit 1

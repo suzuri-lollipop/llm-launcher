@@ -147,7 +147,7 @@ def test_wizard_download_list_greys_downloaded_models():
     誤起動防止 (2026-11-16 報告: 取得済みがダウンロード択で選べてしまった)。"""
     assert "const haveRepo = r => mdLocal.some(x => x.repo_id === r);" in WIZARD_JS
     assert '${got ? " disabled" : ""}' in WIZARD_JS
-    assert "(ダウンロード済み)" in WIZARD_JS
+    assert " — ダウンロード済み" in WIZARD_JS
     # 一覧の先頭が取得済みでも最初の未取得を選ぶ
     assert "const firstAvail = ms.findIndex(m => !haveRepo(m.repo_id));" in WIZARD_JS
     # 開始ボタンはグレー選択を弾く (表パネル / 汎用一覧の両方)

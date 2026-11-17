@@ -229,7 +229,7 @@ function renderModels() {
   const list = mmFiltered();
   const html = !S.mm.data ? `<div class="empty">${S.mm.loading ? "スキャン中…" : "モデル一覧を取得できませんでした"}</div>`
     : (!list.length ? `<div class="empty">${ms.length ? "条件に合うモデルがありません。" :
-        "モデルがまだありません。<br><br>「モデルをダウンロード」から取得するか、セットアップウィザード (📦) でバックエンドごとのモデル設定を実行してください。"}</div>`
+        "モデルがまだありません。<br><br>「モデルをダウンロード」から取得するか、セットアップウィザードでバックエンドごとのモデル設定を実行してください。"}</div>`
       : list.map(mmCard).join(""));
   const sig = html.length + ":" + list.map(m => m.id + m.size_bytes + m.running + (m.used_by || []).length).join("|");
   const listEl = $("#mm-list");

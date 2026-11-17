@@ -16,3 +16,16 @@ def _auth_disabled(monkeypatch):
     monkeypatch.delenv("LLM_LAUNCHER_ADMIN_USER", raising=False)
     monkeypatch.delenv("LLM_LAUNCHER_ADMIN_PASSWORD", raising=False)
     yield
+
+
+@pytest.fixture(autouse=True)
+def _no_network_tags(monkeypatch):
+    """fork 専用タグの取得 (git ls-remote) でテストがネットワークを叩かないようにする。
+
+    既定は「タグ無し」を返すスタブ + テストごとに空のキャッシュ。タグを検証する
+    テスト (test_installs_tags) は fetch_tags を自前のスタブで上書きする。
+    """
+    from llm_launcher import installer
+    monkeypatch.setattr(installer, "_TAG_CACHE", {})
+    monkeypatch.setattr(installer, "fetch_tags", lambda url, prefix, **kw: [])
+    yield

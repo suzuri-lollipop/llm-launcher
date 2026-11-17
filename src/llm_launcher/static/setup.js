@@ -12,6 +12,63 @@ const $$ = s => [...document.querySelectorAll(s)];
 const esc = s => String(s ?? "").replace(/[&<>"']/g,
   c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 
+/* ---------------------------------------------------------------- インフォメーションマーク
+   長い説明はタイトル / ラベルの隣の SVG ⓘ に畳む (絵文字は使わない)。
+   クリックでポップオーバーを開き、外側クリック / Escape / 画面遷移で閉じる。
+   data-info の本文はテキストとして差し込むので HTML は解釈されない。 */
+const INFO_SVG = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9.2"/><path d="M12 11.2v5"/><circle cx="12" cy="7.8" r="1" fill="currentColor" stroke="none"/></svg>';
+const infoBtn = (text, id = "") =>
+  `<button type="button" class="info"${id ? ` id="${id}"` : ""} data-info="${esc(text)}" aria-label="くわしい説明" aria-expanded="false">${INFO_SVG}</button>`;
+const infoPop = document.createElement("div");
+infoPop.className = "info-pop hidden";
+infoPop.setAttribute("role", "tooltip");
+document.body.appendChild(infoPop);
+let infoAnchor = null;
+function closeInfo() {
+  infoPop.classList.add("hidden");
+  if (infoAnchor) { infoAnchor.setAttribute("aria-expanded", "false"); infoAnchor = null; }
+}
+function openInfo(btn) {
+  const text = btn.dataset.info || "";
+  if (!text) return;
+  if (infoAnchor === btn && !infoPop.classList.contains("hidden")) { closeInfo(); return; }
+  closeInfo();
+  infoPop.textContent = text;
+  infoPop.classList.remove("hidden");
+  infoAnchor = btn;
+  btn.setAttribute("aria-expanded", "true");
+  const r = btn.getBoundingClientRect();
+  const pw = Math.min(320, window.innerWidth - 16);
+  infoPop.style.maxWidth = pw + "px";
+  const ph = infoPop.offsetHeight;
+  const left = Math.min(Math.max(8, r.left + r.width / 2 - pw / 2), window.innerWidth - pw - 8);
+  let top = r.bottom + 8;
+  if (top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 8);
+  infoPop.style.left = left + "px";
+  infoPop.style.top = top + "px";
+}
+/* info ボタンの本文を差し替える (空ならマーク自体を隠す)。開いたままなら追従 */
+function setInfo(sel, text) {
+  const b = typeof sel === "string" ? $(sel) : sel;
+  if (!b) return;
+  b.dataset.info = text || "";
+  b.classList.toggle("hidden", !text);
+  if (!b.innerHTML.trim()) b.innerHTML = INFO_SVG;
+  if (infoAnchor === b) {
+    if (text) infoPop.textContent = text; else closeInfo();
+  }
+}
+document.addEventListener("click", e => {
+  const btn = e.target.closest(".info");
+  if (btn) { e.preventDefault(); openInfo(btn); return; }
+  if (!infoPop.contains(e.target)) closeInfo();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") closeInfo(); });
+window.addEventListener("scroll", closeInfo, true);
+window.addEventListener("resize", closeInfo);
+/* 静的 HTML の空ボタンにも SVG を入れる (ウィザードは JS 必須なので起動時に一括) */
+$$(".info").forEach(b => { if (!b.innerHTML.trim()) b.innerHTML = INFO_SVG; });
+
 /* ---------------------------------------------------------------- API */
 async function api(path, opts = {}) {
   const r = await fetch(path, {
@@ -31,17 +88,17 @@ async function api(path, opts = {}) {
 }
 
 /* ---------------------------------------------------------------- 状態 */
-const INS_STEPS = { clone: "リポジトリを取得 (clone)", branch: "ブランチ切替", venv: "実行環境を作成",
-                    precheck: "インストール内容を確認", cmake: "エンジンを設定 (cmake)",
-                    "cmake-build": "エンジンをビルド (cmake)", engine: "エンジンを受信 (公式リリース)",
-                    tools: "依存 + llama.cpp ソースを導入 (純正 tools_step)",
-                    model: "モデルを準備 (純正セットアップ)", verify: "動作確認 (import)" };
+const INS_STEPS = { clone: "リポジトリを取得", branch: "ブランチ切替", venv: "実行環境を作成",
+                    precheck: "インストール内容を確認", cmake: "エンジンを設定",
+                    "cmake-build": "エンジンをビルド", engine: "エンジンを受信",
+                    tools: "依存と llama.cpp ソースを導入",
+                    model: "モデルを準備", verify: "動作確認" };
 const CAL_STEPS = { prepare: "調整の準備", auto: "最適構成を自動で探す", lookup: "キャッシュを引く",
-                    sweep: "実際に測る (実測)", create: "プロファイルを更新", adjust: "調整を反映",
-                    calibrate: "実測調整 (CPU レーン / TP)", speed: "drafter 速度計測 (DSpark / MTP)",
+                    sweep: "実際に測る", create: "プロファイルを更新", adjust: "調整を反映",
+                    calibrate: "実測調整", speed: "drafter 速度計測",
                     restart: "サーバーを起動し直す" };
 const STEP_NAMES = { queued: "待機しています", running: "", done: "完了", failed: "失敗",
-                     cancelled: "中断しました", lost: "中断されました (サーバー再起動)" };
+                     cancelled: "中断しました", lost: "サーバー再起動で中断されました" };
 const bytes = n => { n = n || 0;
   return n >= 2**30 ? (n / 2**30).toFixed(2) + " GiB"
        : n >= 2**20 ? (n / 2**20).toFixed(1) + " MB" : Math.round(n / 1024) + " KiB"; };
@@ -77,8 +134,19 @@ const W = {
 };
 const spec = id => (W.installs.installable || []).find(e => e.id === (id ?? W.backend)) || null;
 const specName = id => (spec(id) || {}).name || id || "";
+/* ref の表示名: fork 専用タグ (kind=tag) は suzuri- prefix を隠した label (v1.0.1 等) を使う。
+   prefix は公式タグとの識別のためだけに存在する (git に渡す ref は完全名のまま)。
+   ブランチは従来どおり ref 名そのものを表示する。 */
+const refLabel = (sp, ref) => {
+  const r = ((sp || {}).refs || []).find(x => x.ref === ref);
+  return r && r.kind === "tag" ? r.label : (ref || "");
+};
+const isTagRef = (bid, ref) => {
+  const p = (spec(bid) || {}).tag_prefix;
+  return !!p && !!ref && String(ref).startsWith(p);
+};
 const profileFlow = () => W.flow === "profile";
-const calKicker = () => profileFlow() ? "ステップ 4 / 4 — 調整 (任意)" : "ステップ 5 / 5 — 調整 (任意)";
+const calKicker = () => profileFlow() ? "ステップ 4 / 4 — 調整" : "ステップ 5 / 5 — 調整";
 /* profile モードの画面 chrome: ステップ番号 / 完了画面の文言 (インストール / DL 画面は出ない) */
 function applyProfileChrome() {
   document.title = "プロファイル作成 — LLM Launcher";
@@ -86,9 +154,10 @@ function applyProfileChrome() {
   $("#md-kicker").textContent = "ステップ 1 / 4 — バックエンドとモデル";
   $("#cf-kicker").textContent = "ステップ 2 / 4 — 稼働設定";
   $("#nt-kicker").textContent = "ステップ 3 / 4 — 接続設定";
-  $("#ca-kicker").textContent = "ステップ 4 / 4 — 調整 (任意)";
+  $("#ca-kicker").textContent = "ステップ 4 / 4 — 調整";
   $("#dn-title").textContent = "プロファイルの作成と調整が完了しました";
-  $("#dn-sub").textContent = "ダッシュボードの起動タブからプロファイルを起動できます。調整結果はプロファイル / 起動 JSON に書き戻し済みです。";
+  $("#dn-sub").textContent = "ダッシュボードの起動タブからプロファイルを起動できます。";
+  setInfo("#dn-info", "調整結果はプロファイル / 起動 JSON に書き戻し済みです。");
   $("#dn-profiles").classList.remove("hidden");
   const ls = $("#login-sub");
   if (ls) ls.innerHTML = "プロファイル作成には <b>プロファイル編集権限</b> を持つアカウントが必要です。";
@@ -99,12 +168,15 @@ function applyProfileChrome() {
 const toolLabelFor = t => (t || W.installs.tool) === "pip" ? "pip install" : "uv pip install";
 const toolLabel = sp => toolLabelFor((sp || spec() || {}).tool);
 const stepLabel = (name, kind) => kind === "install"
-  ? (name === "install" ? toolLabelFor((W.job || {}).tool) : (INS_STEPS[name] || name))
+  ? (name === "install" ? toolLabelFor((W.job || {}).tool)
+     : name === "branch" && isTagRef((W.job || {}).backend, (W.job || {}).ref)
+       ? "バージョン切替" : (INS_STEPS[name] || name))
   : (CAL_STEPS[name] || name);
 
 /* ---------------------------------------------------------------- 画面遷移 */
 let curStep = "";
 function go(id, back = false) {
+  closeInfo();
   if (curStep === id) return;
   if (curStep) { const prevEl = $("#" + curStep);
                  if (prevEl) prevEl.classList.remove("active", "back"); }
@@ -166,7 +238,7 @@ async function boot() {
     // プロファイル作成 + 調整のみ: install 権限は不要 (profiles.edit。調整は ⑤ で calibrate を見る)
     if (!admin && !(W.me.perms || {})["profiles.edit"]) {
       $("#perm-sub").textContent = "プロファイル作成にはプロファイル編集権限のあるアカウントが必要です。"
-        + "調整 (キャリブレーション) は別途キャリブレーション権限が必要です。";
+        + "調整には別途キャリブレーション権限が必要です。";
       go("s-perm"); return;
     }
     applyProfileChrome();
@@ -211,7 +283,7 @@ async function boot() {
     if (W.kind === "download") { renderDownload(); go("s-download"); }
     else {
       if (act.phase === "model")
-        setProgChrome("ステップ 2 / 5 — モデル", `${specName(act.backend)} がモデルを準備しています (時間がかかります)`);
+        setProgChrome("ステップ 2 / 5 — モデル", `${specName(act.backend)} がモデルを準備しています`);
       renderProgress(); go("s-progress");
     }
     startPoll();
@@ -282,7 +354,7 @@ function renderBackends() {
   }));
   const sp = spec();
   $("#be-note").textContent = sp && sp.cloned && sp.current_ref
-    ? `現在のバージョン: ${sp.current_ref}` : "";
+    ? `現在のバージョン: ${refLabel(sp, sp.current_ref)}` : "";
   renderBackends_next();
 }
 function renderBackends_next() {
@@ -310,45 +382,95 @@ function pickRef(sp) {
 function renderBranches() {
   const sp = spec(); const refs = (sp.refs || []);
   $("#br-sub").innerHTML = `<b>${esc(sp.name)}</b> をどのバージョンで導入するか選んでください。`;
+  const branches = refs.filter(r => r.kind !== "tag");
+  const tags = refs.filter(r => r.kind === "tag");
   const list = $("#br-list");
-  list.innerHTML = refs.map(r => `
+  /* ブランチはラジオ一覧。タグはプルダウン (#br-tags) に分離 — タグが増えても画面が伸びない */
+  list.innerHTML = branches.map(r => `
     <label class="opt${r.ref === W.ref ? " sel" : ""}">
       <input type="radio" name="br" value="${esc(r.ref)}"${r.ref === W.ref ? " checked" : ""}>
       <span class="txt"><span class="t1">${esc(r.label)}</span>
         <span class="t2 mono">${esc(r.ref)}</span></span>
       ${r.ref === sp.current_ref ? `<span class="tag">設定済み</span>` : ""}
     </label>`).join("");
+  /* タグ行 = ラジオ + プルダウン。プルダウンの表示は prefix なしの label (v1.0.1 等。
+     suzuri- は公式タグとの識別のためだけに付いており画面には出さない)、value は git に渡す
+     完全名。新しい順 (API の並び)。タグ-radio 未選択 (ブランチ選択中) は灰色 + 操作不可 */
+  const sel = $("#br-tags"), tagRow = $("#br-tag-row"), tagRadio = $("#br-tag-radio");
+  sel.innerHTML = `<option value="" disabled>タグを選択</option>`
+    + tags.map(r => `<option value="${esc(r.ref)}">${esc(r.label)}</option>`).join("");
+  const syncTagSel = () => {
+    const on = tags.some(r => r.ref === W.ref);
+    tagRadio.checked = on;
+    tagRow.classList.toggle("sel", on);
+    tagRow.classList.toggle("off", !on);
+    sel.disabled = !on;              // 非選択中はプルダウンを開けない (ラジオで切替)
+    if (on) sel.value = W.ref;       // off の間は最後の選択を灰色で保持
+  };
+  syncTagSel();
   list.querySelectorAll("input").forEach(r => r.addEventListener("change", () => {
     W.ref = r.value;
     list.querySelectorAll(".opt").forEach(o => o.classList.toggle("sel", o.contains(r) && r.checked));
+    syncTagSel();                    // ブランチ選択 = タグ行は灰色 + 操作不可
   }));
+  tagRadio.onchange = () => {        // 要素は描画間で残るので addEventListener だと重複する
+    if (!tagRadio.checked || !tags.length) return;
+    // まだタグを選んでいなければ新しい順の先頭 (最新) を選ぶ
+    if (!tags.some(r => r.ref === sel.value)) sel.value = tags[0].ref;
+    W.ref = sel.value;
+    list.querySelectorAll("input").forEach(i => { i.checked = false; });
+    list.querySelectorAll(".opt").forEach(o => o.classList.remove("sel"));
+    syncTagSel();
+  };
+  sel.onchange = () => {
+    if (!sel.value || sel.disabled) return;
+    W.ref = sel.value;
+    syncTagSel();
+  };
+  tagRow.classList.toggle("hidden", !tags.length);
+  $("#br-tag-set").classList.toggle("hidden", !tags.some(r => r.ref === sp.current_ref));
+  /* タグ一覧はリモート取得 (TTL キャッシュ)。新しいタグをすぐ選びたいときの手動更新 */
+  $("#br-refresh-row").classList.toggle("hidden", !sp.tag_prefix);
   $$("button[data-go='s-review']").forEach(b => b.onclick = () => renderReview());
 }
+$("#br-refresh").addEventListener("click", async () => {
+  const b = $("#br-refresh");
+  b.disabled = true; b.textContent = "更新中…";
+  try {
+    const inst = await api("/api/installs?refresh=1");
+    W.installs = { jobs: inst.jobs || [], installable: inst.installable || [],
+                   tool: inst.tool || "uv", cacheDir: inst.cache_dir || "" };
+    const sp = spec();
+    if (sp && !(sp.refs || []).some(r => r.ref === W.ref)) W.ref = pickRef(sp);
+    renderBranches();
+  } catch (e) { alert("一覧を更新できませんでした: " + e.message); }
+  finally { b.disabled = false; b.textContent = "一覧を更新"; }
+});
 
 /* ---------------------------------------------------------------- 1c: 確認 */
 function renderReview() {
   const sp = spec(); if (!sp) { go("s-welcome"); return; }
   $("#rv-title").textContent = `${sp.name} をインストール`;
-  const doing = !sp.cloned ? `新しいバージョン (${W.ref || sp.ref || "既定"}) を取得`
-    : (sp.current_ref && sp.current_ref !== W.ref && W.ref ? `バージョンを ${sp.current_ref} → ${W.ref} に変更` : "取得済みのまま進める");
+  const doing = !sp.cloned ? `新しいバージョン ${refLabel(sp, W.ref || sp.ref) || "既定"} を取得`
+    : (sp.current_ref && sp.current_ref !== W.ref && W.ref ? `バージョンを ${refLabel(sp, sp.current_ref)} → ${refLabel(sp, W.ref)} に変更` : "取得済みのまま進める");
   const rows = [
     ["ソフト", `${esc(sp.name)} <span class="mono">${esc(sp.module_path)}</span>`],
-    ["バージョン", W.ref ? esc(W.ref) : "既定"],
-    ["実行内容", `1. リポジトリを取得 (git clone)<br>2. 実行環境を作成 (.venv)<br>`
-      + (sp.tools_step ? "3. 依存 + llama.cpp ソースを導入 (純正 tools_step)"
-         : `3. 依存パッケージを導入 (${sp.requirements ? `${toolLabel(sp)} -r ${esc(sp.requirements)}` : esc(toolLabel(sp))})`)
-      + (sp.cmake ? "<br>4. ネイティブエンジンをビルド (cmake → bin/basalt)" : "")
-      + (sp.engine_fetch ? "<br>4. ネイティブエンジンを受信 (公式リリース → engine/strata)" : "")],
+    ["バージョン", W.ref ? esc(refLabel(sp, W.ref)) : "既定"],
+    ["実行内容", `1. リポジトリを取得<br>2. 実行環境を作成<br>`
+      + (sp.tools_step ? "3. 依存と llama.cpp ソースを導入" : "3. 依存パッケージを導入")
+      + (sp.cmake ? "<br>4. ネイティブエンジンをビルド" : "")
+      + (sp.engine_fetch ? "<br>4. ネイティブエンジンを受信" : "")],
     ["この後の予定", doing],
   ];
-  if (sp.tools_step) rows.push(["エンジンビルド", "② のモデル設定で家系別に実行します (初回 10〜30 分・導入済みならスキップ)"]);
+  if (sp.tools_step) rows.push(["エンジンビルド",
+    `② のモデル設定で家系別に実行 ${infoBtn("初回は 10〜30 分かかります。導入済みならスキップされます。")}`]);
   $("#rv-rows").innerHTML = rows.map(([k, v]) =>
     `<div class="row-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   $("#rv-preview").textContent = `git clone → .venv → `
-    + (sp.tools_step ? "純正 tools_step (pip + llama.cpp ソース)"
+    + (sp.tools_step ? "純正 tools_step — pip + llama.cpp ソース"
        : (sp.requirements ? `${toolLabel(sp)} -r ${sp.requirements}` : `${toolLabel(sp)} -e ".[${sp.extras || "accel"}]"`))
     + (sp.cmake ? " → cmake configure + build" : "")
-    + (sp.engine_fetch ? " → エンジン受信 (公式リリース)" : "");
+    + (sp.engine_fetch ? " → エンジン受信 — 公式リリース" : "");
   $("#rv-start").disabled = false;
   $("#rv-start").textContent = "インストール";
   go("s-review");
@@ -394,7 +516,7 @@ function renderProgress() {
   $("#pg-title").textContent = W.kind === "install"
     ? (r.phase === "model"
         ? (r.status === "done" ? "モデルの準備が完了しました"
-           : r.status === "running" ? `${specName(r.backend) || "Strata"} がモデルを準備しています (時間がかかります)`
+           : r.status === "running" ? `${specName(r.backend) || "Strata"} がモデルを準備しています`
            : (STEP_NAMES[r.status] || "準備中"))
         : (r.status === "done" ? "インストールが完了しました" : STEP_NAMES[r.status] && r.status !== "running" ? STEP_NAMES[r.status] : "インストール中…"))
     : $("#pg-title").textContent;
@@ -429,14 +551,12 @@ async function pollTick() {
     await finishJob();
   }
 }
-/* インストール完了後の追い書き */
+/* インストール完了後の追い書き — 長い案内は完了タイトルの ⓘ に畳む */
 const INSTALL_NOTES = {
-  strata: "インストール完了です。次はモデルの設定 — 家系・サイズ・コンテキスト長を選ぶと、"
-    + "Strata 本体のセットアップ手順 (ダウンロードと strata-<model>.json 作成) がこの画面のまま"
-    + "走りきるため、シェルの準備はありません。",
-  maya: "インストール完了です。次はモデルの設定 — 家系 (GLM / DeepSeek / MiniMax / Qwen)・"
-    + "サイズ (量子化)・コンテキスト長を選ぶと、Maya 本体のセットアップ手順 (エンジンビルドと"
-    + "ダウンロード、maya-<model>.json 作成) がこの画面のまま走りきるため、シェルの準備はありません。",
+  strata: "家系・サイズ・コンテキスト長を選ぶと、Strata 本体のセットアップ手順がダウンロードと"
+    + "起動設定の作成までこの画面のまま走りきります。シェルの準備はありません。",
+  maya: "家系は GLM / DeepSeek / MiniMax / Qwen から選びます。Maya 本体のセットアップ手順が"
+    + "エンジンビルド・ダウンロード・起動設定の作成までこの画面のまま走りきります。シェルの準備はありません。",
 };
 async function finishJob() {
   const r = W.job || {};
@@ -446,8 +566,7 @@ async function finishJob() {
       // config 紐付け + ③ の回答適用をして調整 (⑤) へ。旧フロー (実行中ジョブの
       // 再開 / 済みモデルの即時採用) は従来どおり稼働設定 (③) へ直行する
       if (r.status === "done") {
-        const prefix = r.backend === "maya" ? "maya" : "strata";
-        W.summary.push({ ok: true, t: `${specName(r.backend) || "Strata"} のモデル設定が完了しました (${prefix}-<model>.json 作成済み)` });
+        W.summary.push({ ok: true, t: `${specName(r.backend) || "Strata"} のモデル設定が完了しました` });
         if (W.preJob && W.cfgProfId) {
           await bindSetupResult(r);
           renderCal(); go("s-cal"); return;
@@ -461,8 +580,8 @@ async function finishJob() {
     if (r.status === "done") {
       W.summary.push({ ok: true, t: `${specName(r.backend)} をインストールしました` });
       $("#ok-title").textContent = `${specName(r.backend)} のインストールが完了しました`;
-      $("#ok-sub").textContent = INSTALL_NOTES[r.backend]
-        || "次はモデルのダウンロードです。まだモデルが無い場合はダウンロードしてください。";
+      $("#ok-sub").textContent = INSTALL_NOTES[r.backend] ? "次はモデルの設定です。" : "次はモデルのダウンロードです。";
+      setInfo("#ok-info", INSTALL_NOTES[r.backend] || "");
       go("s-installed");
     } else {
       renderProgress();
@@ -495,7 +614,7 @@ async function finishJob() {
       $("#dl-retry").hidden = false;
     }
   } else if (W.kind === "cal") {
-    if (r.status === "done") { W.summary.push({ ok: true, t: "調整 (キャリブレーション) が完了しました" }); renderDone(); go("s-done"); }
+    if (r.status === "done") { W.summary.push({ ok: true, t: "調整が完了しました" }); renderDone(); go("s-done"); }
     else { renderProgress(); offerRetry("完了画面へ進む"); }
   }
 }
@@ -506,7 +625,7 @@ function offerRetry(label) {
   b.classList.remove("hidden");
   b.onclick = () => {
     b.classList.add("hidden");
-    if (W.kind === "cal") { W.summary.push({ ok: false, t: "調整は完了しませんでした (後で実行できます)" }); renderDone(); go("s-done"); }
+    if (W.kind === "cal") { W.summary.push({ ok: false, t: "調整は完了しませんでした — 後で実行できます" }); renderDone(); go("s-done"); }
     else if ((W.job || {}).phase === "model") { renderModel(); go("s-model"); }
     else { renderReview(); }
   };
@@ -530,19 +649,27 @@ const mdMode = () => ($$("#md-modes input").find(i => i.checked) || {}).value ||
 /* ---- Strata / Maya: 純正セットアップを --yes (非対話) で走らせる選択面板 --------
    面板 (家系/サイズ/コンテキスト/ビジョン) は共通。表の単一の源は submodule で、
    Strata は strata_setup / Maya は maya_setup が読み出す (mdT() が現在バックエンドの表)。 */
+/* 行は [見出し, 1 行補足, ⓘ の長い説明]。長い説明は選択肢の ⓘ に畳む */
 const MD_LABELS = {
-  other: [["モデルをダウンロードする", "対応モデルの一覧から選んで取得します"],
-          ["ダウンロード済みのモデルを使う", "この PC にあるモデルから選びます (再取得しません)"]],
-  strata: [["モデルをダウンロードする", "家系・サイズ・コンテキスト長を選ぶと、Strata 本体のセットアップ手順でダウンロードと設定作成まで走ります"],
-           ["ダウンロード済みのモデルを使う", "この PC に重みが在るモデルから選びます (再取得しません)"]],
-  maya: [["モデルをダウンロードする", "家系・サイズ (量子化)・コンテキスト長を選ぶと、Maya 本体のセットアップ手順でエンジンビルド・ダウンロード・設定作成まで走ります"],
-         ["ダウンロード済みのモデルを使う", "この PC に重みが在るモデルから選びます (再取得しません)"]],
+  other: [["モデルをダウンロードする", "対応モデルの一覧から選んで取得します",
+           "Hugging Face からモデルをダウンロードします。取得済みのモデルはグレー表示になり、「ダウンロード済みのモデルを使う」から選べます。"],
+          ["ダウンロード済みのモデルを使う", "この PC にあるモデルを再取得なしで選びます",
+           "HF キャッシュと各バックエンドのモデルフォルダから、この PC にあるモデルだけを表示します。"]],
+  strata: [["モデルをダウンロードする", "家系・サイズ・コンテキスト長を選びます",
+            "Strata 本体のセットアップ手順が走り、ダウンロードと起動設定の作成までこの画面で完了します。シェルの準備は不要です。中断しても続きから再開できます。"],
+           ["ダウンロード済みのモデルを使う", "この PC に重みがあるモデルから選びます",
+            "再取得はありません。起動設定が無い場合は、純正セットアップが設定だけ作成します。"]],
+  maya: [["モデルをダウンロードする", "家系・サイズ・コンテキスト長を選びます",
+          "Maya 本体のセットアップ手順が走り、エンジンビルド・ダウンロード・起動設定の作成までこの画面で完了します。シェルの準備は不要です。中断しても続きから再開できます。"],
+         ["ダウンロード済みのモデルを使う", "この PC に重みがあるモデルから選びます",
+          "再取得はありません。起動設定が無い場合は、純正セットアップが設定だけ作成します。"]],
 };
 const mdTableBackend = () => W.backend === "maya" || W.backend === "strata";
 function setMdModeLabels(backend) {
   const L = MD_LABELS[backend] || MD_LABELS.other;
   $("#md-dl-mode-t1").textContent = L[0][0]; $("#md-dl-mode-t2").textContent = L[0][1];
   $("#md-local-mode-t1").textContent = L[1][0]; $("#md-local-mode-t2").textContent = L[1][1];
+  setInfo("#md-dl-info", L[0][2]); setInfo("#md-local-info", L[1][2]);
   // Strata / Maya はモデル設定なしでは起動設定 (values.config) が作れないので「あとでする」を隠す。
   // profile モードはモデル選択が必須 (調整にモデルが要る) ので常に隠す
   $("#md-later").classList.toggle("hidden", profileFlow() || backend === "strata" || backend === "maya");
@@ -612,14 +739,15 @@ function mdStFillSizes() {
     }
     if (!mdStFull(m) && d.download_gb) bits.push(`DL ${isMaya ? Math.round(d.download_gb) : d.download_gb} GB`);
     const unpub = d.published === false;
-    const label = (d.label || m)
-      + (mdStFull(m) ? " (ダウンロード済み" + (((d.have || {}).gb) ? " " + d.have.gb + " GB" : "") + ")" : "")
-      + (unpub ? " (未公開)" : "")
-      + (bits.length ? " — " + bits.join(" / ") : "")
-      + (m === rec && avail(m) ? " (この PC 推奨)" : "");
+    const notes = [];
+    if (mdStFull(m)) notes.push("ダウンロード済み" + (((d.have || {}).gb) ? " " + d.have.gb + " GB" : ""));
+    if (unpub) notes.push("未公開");
+    notes.push(...bits);
+    if (m === rec && avail(m)) notes.push("推奨");
+    const label = (d.label || m) + (notes.length ? " — " + notes.join(" · ") : "");
     return `<option value="${esc(m)}"${m === W.mdStModel ? " selected" : ""}${mdStFull(m) || unpub ? " disabled" : ""}>`
       + `${esc(label)}</option>`;
-  }).join("") || '<option value="">(サイズ一覧が空です)</option>';
+  }).join("") || '<option value="">サイズ一覧が空です</option>';
   // vision は対応パックだけ選択を出して既定 ON。非対応は送信しない
   const d = ms[W.mdStModel] || {};
   $("#md-vision-opt").style.display = d.vision ? "" : "none";
@@ -647,7 +775,7 @@ function mdStFillCtx() {
     W.mdStCtx = cs.includes(rec) ? rec : (cs.includes(131072) ? 131072 : cs[0]);
   W.mdStCtxRec = rec;
   $("#md-ctx").innerHTML = cs.map(c => `<option value="${c}"${c === W.mdStCtx ? " selected" : ""}>`
-    + `${CF_TOK(c)}${c === rec ? " (推奨)" : c > rec ? " (大)" : ""}</option>`).join("");
+    + `${CF_TOK(c)}${c === rec ? " · 推奨" : ""}</option>`).join("");
   mdStHint();   // 推奨と選択の差はヒントに出す (サイズ変更後は ctx が後から変わるためここで再計算)
 }
 function mdStHint() {
@@ -656,44 +784,51 @@ function mdStHint() {
   const fam = (st.families || {})[W.mdStFam] || {};
   const isMaya = W.backend === "maya";
   const name = isMaya ? "Maya" : "Strata";
-  const pc = st.pc || {}; const parts = [];
-  if (!st.available) parts.push(`${name} のモデル一覧を読み出せませんでした (PC が高負荷の可能性) — 少し待ってからもう一度お試しください`);
-  else if (!st.venv_ready) parts.push(`${name} の実行環境 (.venv) がまだありません — 前に戻って ① インストールを実行してください`);
-  if (d.about) parts.push(d.about);
+  const pc = st.pc || {};
+  /* 説明はサイズ欄の ⓘ へ。画面に残すのは対処が要る警告だけ */
+  const info = []; const warn = [];
+  if (!st.available) warn.push(`${name} のモデル一覧を読み出せませんでした。PC が高負荷の可能性があります。少し待ってからもう一度お試しください`);
+  else if (!st.venv_ready) warn.push(`${name} の実行環境がまだありません。前に戻って ① インストールを実行してください`);
+  if (d.about) info.push(d.about);
   const h = d.have || {};
   if (h.files && h.found >= h.files) {
-    parts.push(`重みはこの PC に在ります — 純正セットアップが検証してダウンロードを素通りし、`
-      + "config JSON の作成だけ走るので速いです");
+    info.push("重みはこの PC にあります。純正セットアップが検証してダウンロードを素通りし、起動設定の作成だけ走るので速いです");
   } else if (h.found) {
-    parts.push(`重みが部分的です (${h.found}/${h.files}) — 足りない分は受信します`);
+    info.push(`重みが部分的です — ${h.found}/${h.files}。足りない分は受信します`);
   } else if (d.download_gb) {
-    parts.push(`ダウンロード ${isMaya ? Math.round(d.download_gb) : d.download_gb} GB`);
+    info.push(`ダウンロード ${isMaya ? Math.round(d.download_gb) : d.download_gb} GB`);
   }
   if (isMaya) {
-    if (d.memory_gb) parts.push(`VRAM+RAM 約${Math.round(d.memory_gb)} GB で全体を保持 (足りない分は SSD から読みます)`);
-    if (d.published === false) parts.push("この量子化はまだ公開されていません — 公開まで選べません");
-    if (d.gated) parts.push("ゲートリポジトリです: Hugging Face のトークン (HF_TOKEN / hf auth login) が必要です");
+    if (d.memory_gb) info.push(`VRAM+RAM 約${Math.round(d.memory_gb)} GB で全体を保持します。足りない分は SSD から読みます`);
+    if (d.published === false) info.push("この量子化はまだ公開されていません。公開まで選べません");
+    if (d.gated) {
+      warn.push("ゲートリポジトリです。Hugging Face のトークンが必要です");
+      info.push("トークンは HF_TOKEN 環境変数か hf auth login で設定できます");
+    }
     if (st.available && fam.engine_ready === false)
-      parts.push("エンジンはこの設定の中でこの PC 向けにコンパイルします (初回 10〜30 分)");
+      info.push("エンジンはこの設定の中でこの PC 向けにコンパイルします。初回は 10〜30 分かかります");
     if (st.available && W.mdStFam !== "glm")
-      parts.push("drafter (DSpark / MTP) の速度計測はセットアップでは行わず、⑤ の調整に集約します (スキップすると drafter なしで起動)");
+      info.push("DSpark / MTP drafter の速度計測はセットアップでは行わず、⑤ の調整に集約します。スキップすると drafter なしで起動します");
     if (st.available && W.mdStFam === "minimax")
-      parts.push("MiniMax は純正仕様どおり短い prefill 計測 (数分・エンジン起動 1 回) だけセットアップに含まれます");
+      info.push("MiniMax は純正仕様どおり、短い prefill 計測だけセットアップに含まれます。数分・エンジン起動 1 回です");
   } else if (d.ram_gb) {
-    parts.push(`RAM ${d.ram_gb} GB 推奨`);
+    info.push(`RAM ${d.ram_gb} GB 推奨`);
   }
-  if (pc.disk_free_gb) parts.push(`モデル保存先 (${pc.data_dir || (isMaya ? "Maya-data" : "Strata-data")}) の空き ${pc.disk_free_gb} GB`);
+  if (pc.disk_free_gb) info.push(`モデル保存先 ${pc.data_dir || (isMaya ? "Maya-data" : "Strata-data")} の空き ${pc.disk_free_gb} GB`);
   /* 純正の対話と同じ立場: 推奨より大きいコンテキストは「注記して従う」。
      24GB クラスで 512K はエンジン起動時の KV 確保に失敗しうる (2026-11-09 実測) */
   const rec = mdStRecCtx();
   if (W.mdStCtx > rec) {
-    parts.push(`※ コンテキスト ${CF_TOK(W.mdStCtx)} はこの PC 向け推奨 ${CF_TOK(rec)} より大きい — 起動時に VRAM/RAM 不足で失敗することがあります`);
+    warn.push(`コンテキスト ${CF_TOK(W.mdStCtx)} はこの PC 向け推奨 ${CF_TOK(rec)} より大きい値です。起動時に VRAM/RAM 不足で失敗することがあります`);
   }
   /* own-path 家系 (Qwen3.6) は純正が単一 GPU 宣言 — 2 枚在っても分割できない */
   const cards = ((st.pc || {}).gpus || []).filter(g => g.usable);
   if (cards.length >= 2 && fam.multi_gpu === false)
-    parts.push("この家系は現在単一 GPU 専用です (純正: runs on one GPU so far)");
-  $("#md-strata-hint").textContent = parts.join(" ・ ");
+    warn.push("この家系は現在単一 GPU 専用です");
+  setInfo("#md-size-info", info.join("\n"));
+  const hint = $("#md-strata-hint");
+  hint.textContent = warn.join(" ・ ");
+  hint.classList.toggle("hidden", !warn.length);
 }
 function mdSync() {
   const mode = mdMode();
@@ -711,19 +846,17 @@ function mdSync() {
     const btn = $("#md-start");
     const st = mdT();
     if (mode === "dl") {
-      btn.textContent = "次へ (稼働設定)";
+      btn.textContent = "次へ";
       const sizeOpt = $("#md-size").selectedOptions[0];
       btn.disabled = !st.available || !st.venv_ready || !W.mdStFam || !W.mdStModel
         || !!(sizeOpt && sizeOpt.disabled);   // 取得済み (グレー) の選択では開始しない
-      $("#md-dest").textContent = isMaya
-        ? "ダウンロードと設定は Maya 本体の手順が走ります — エンジンビルド (初回) と pack 作成も含みます。中断しても続きから再開できます"
-        : "ダウンロードと設定は Strata 本体の手順が走ります — 中断しても続きから再開できます";
+      $("#md-dest").textContent = "";        // 手順の長い案内はダウンロード択の ⓘ に畳んである
     } else {
       btn.textContent = "このモデルで続ける";
       btn.disabled = !$("#md-strata-exist").value;
       const sel = (st.downloaded || []).find(x => x.key === $("#md-strata-exist").value);
       $("#md-dest").textContent = sel
-        ? `${sel.label} — 重みはこの PC に在ります (${sel.gb || "?"} GB) / 再取得はありません`
+        ? `${sel.label} — ${sel.gb || "?"} GB · 再取得なし`
         : "";
     }
     return;
@@ -742,15 +875,15 @@ function mdSync() {
   $("#md-speed-field").classList.toggle("hidden", mode !== "dl");
   const btn = $("#md-start");
   if (mode === "dl") {
-    btn.textContent = "次へ (稼働設定)";
+    btn.textContent = "次へ";
     const repo = $("#md-repo").value.trim();
     const selOpt = $("#md-sel").selectedOptions[0];
     // repo id 手入力は明示 intent なので許可。一覧選択は取得済み (グレー) を弾く
     btn.disabled = repo ? false : (!$("#md-sel").value || !!(selOpt && selOpt.disabled));
     const sp = spec();
     $("#md-dest").textContent = sp && sp.model_data
-      ? `保存先: ${sp.name} のモデルフォルダ (起動設定に自動で反映されます)`
-      : `保存先: HF キャッシュ (${W.installs.cacheDir || "既定"})`;
+      ? `保存先: ${sp.name} のモデルフォルダ`
+      : `保存先: HF キャッシュ${W.installs.cacheDir ? " " + W.installs.cacheDir : ""}`;
   } else {
     btn.textContent = "このモデルを使う";
     btn.disabled = !$("#md-local").value;
@@ -794,15 +927,15 @@ async function renderModel() {
     ? ms.map((m, i) => {
         const got = haveRepo(m.repo_id);
         return `<option value="${esc(m.repo_id)}"${i === (firstAvail >= 0 ? firstAvail : 0) ? " selected" : ""}${got ? " disabled" : ""}>`
-          + `${esc(m.repo_id)}${m.name ? " — " + esc(m.name) : ""}${got ? " (ダウンロード済み)" : ""}</option>`;
+          + `${esc(m.repo_id)}${m.name ? " — " + esc(m.name) : ""}${got ? " — ダウンロード済み" : ""}</option>`;
       }).join("")
-    : '<option value="">(このバックエンドに対応モデル一覧がありません)</option>';
+    : '<option value="">このバックエンドに対応モデル一覧がありません</option>';
   $("#md-local").innerHTML = mdLocal.length
     ? mdLocal.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
         + `${esc(m.repo_id)}`
         + (W.backend === "basalt" && (m.basalt || []).length ? ` · ${esc(m.basalt[0].name)}` : "")
         + `${m.source === "data" ? " — 導入済みモデルフォルダ" : ""}</option>`).join("")
-    : '<option value="">(このバックエンドで使えるダウンロード済みモデルが見つかりません)</option>';
+    : '<option value="">このバックエンドで使えるダウンロード済みモデルが見つかりません</option>';
   /* 済みモデルが 0 件ならその選択を不可にしてダウンロード択に寄せる
      (profile モードはダウンロード択が無いので切り替えない — 開始ボタンだけ無効) */
   const localR = $$("#md-modes input").find(i => i.value === "local");
@@ -815,8 +948,11 @@ async function renderModel() {
   $("#md-sub").textContent = profileFlow()
     ? "この PC にダウンロード済みのモデルから選んでください。新しいダウンロードは行いません。"
     : (ms.length
-      ? "新しいモデルをダウンロードするか、この PC ですでにダウンロード済みのモデルを使うかを選んでください。"
-      : "このバックエンドには対応モデル一覧がないため、「その他: repo id を直接入力する」から選ぶか、ダウンロード済みのモデルを使ってください。");
+      ? "ダウンロードするか、この PC にあるモデルを使うかを選んでください。"
+      : "対応モデル一覧がありません。repo id を直接入力するか、ダウンロード済みのモデルを使ってください。");
+  setInfo("#md-info", profileFlow()
+    ? "この PC にあるモデルだけを表示します。新しいダウンロードは行いません。"
+    : "モデルをダウンロードするか、この PC にあるモデルを使うかを選べます。ダウンロード済みのモデルは再取得しません。");
   mdSync();
   if (profileFlow() && !mdLocal.length)
     $("#md-dest").textContent = "ダウンロード済みのモデルが見つかりません。先に通常のセットアップでモデルをダウンロードしてください。";
@@ -841,8 +977,11 @@ async function renderModelTable(backend) {
   mdForceLocal();
   setMdModeLabels(backend);
   $("#md-vision-t2").textContent = backend === "maya"
-    ? "ON のままなら Maya がこの PC に合う読み方 (エンジン内蔵 / 別エンコーダ) を選びます。オフにすると画像リクエストは使えません (--no-vision)"
-    : "ON のままなら Strata がこの PC に合う読み方 (VRAM に応じて GPU/CPU エンコーダ) を選びます。オフにすると画像リクエストは使えません";
+    ? "この PC に合う読み方を Maya が自動で選びます"
+    : "この PC に合う読み方を Strata が自動で選びます";
+  setInfo("#md-vision-info", backend === "maya"
+    ? "ON のままなら Maya がこの PC に合う読み方を選びます。エンジン内蔵か別エンコーダかは自動で決まります。オフにすると画像リクエストは使えません"
+    : "ON のままなら Strata がこの PC に合う読み方を選びます。VRAM に応じて GPU/CPU エンコーダを使い分けます。オフにすると画像リクエストは使えません");
   // 再入時は表も設定済み一覧も最新の取り直し (サーバー側に 60s キャッシュ)
   if (backend === "maya") W.mdMaya = null; else W.mdStrata = null;
   const st = await (backend === "maya" ? loadMaya() : loadStrata());
@@ -853,7 +992,7 @@ async function renderModelTable(backend) {
   if (!famIds.includes(W.mdStFam)) W.mdStFam = famIds.includes(defFam) ? defFam : (famIds[0] || "");
   $("#md-family").innerHTML = famIds.map(f => `<option value="${esc(f)}"${f === W.mdStFam ? " selected" : ""}>`
     + `${esc(fams[f].title || f)}</option>`).join("")
-    || `<option value="">(${isMaya ? "Maya" : "Strata"} のモデル一覧が読めません)</option>`;
+    || `<option value="">${isMaya ? "Maya" : "Strata"} のモデル一覧が読めません</option>`;
   mdStFillSizes(); mdStFillCtx();
   /* ダウンロード済み一覧: 表から作る (モデル名 + サイズ + GB)。JSON 名は内部では
      使うが UI には出さない — 「そのモデルが在る」だけがユーザーの情報。
@@ -876,8 +1015,8 @@ async function renderModelTable(backend) {
   $("#md-strata-exist").innerHTML = dl.map((x, i) => `<option value="${esc(x.key)}"${i === 0 ? " selected" : ""}>`
     + `${esc(x.model + " · " + (x.gb || "?") + " GB — " + x.label)}</option>`).join("")
     || (profileFlow()
-      ? '<option value="">(ダウンロード済みのモデルがありません — 先に通常のセットアップでダウンロードしてください)</option>'
-      : '<option value="">(ダウンロード済みのモデルがありません)</option>');
+      ? '<option value="">ダウンロード済みのモデルがありません — 先に通常のセットアップでダウンロードしてください</option>'
+      : '<option value="">ダウンロード済みのモデルがありません</option>');
   const localR = $$("#md-modes input").find(i => i.value === "local");
   localR.disabled = !dl.length;
   $$("#md-modes .opt").forEach(o => { if (o.contains(localR)) o.style.opacity = dl.length ? "" : ".45"; });
@@ -886,17 +1025,13 @@ async function renderModelTable(backend) {
   }
   $("#md-err").classList.add("hidden");
   $("#md-sub").textContent = profileFlow()
-    ? (isMaya
-      ? "この PC にダウンロード済みの Maya モデル (重み検証済み) から選んでください。config が無い場合は純正セットアップが config だけ作成します (再ダウンロードはありません)。"
-      : "この PC にダウンロード済みの Strata モデル (重み検証済み) から選んでください。config が無い場合は純正セットアップが config だけ作成します (再ダウンロードはありません)。")
+    ? "この PC にダウンロード済みのモデルから選んでください。"
+    : "家系・サイズ・コンテキスト長を選んでください。";
+  setInfo("#md-info", profileFlow()
+    ? "重み検証済みのモデルから選びます。起動設定が無い場合は純正セットアップが設定だけ作成します。再ダウンロードはありません。"
     : (isMaya
-    ? "Maya は家系 (GLM / DeepSeek / MiniMax / Qwen)・サイズ (量子化)・コンテキスト長を選ぶだけです。"
-      + "Maya 本体のセットアップ手順がこのまま走り、エンジンビルド (初回)・ダウンロードから起動設定 "
-      + "(maya-<model>.json) の作成まで完了します。ダウンロード済みのモデルは"
-      + "「ダウンロード済みのモデルを使う」から再取得なしで選べます。"
-    : "Strata は家系・サイズ・コンテキスト長を選ぶだけです。Strata 本体のセットアップ手順がこのまま走り、"
-      + "ダウンロードから起動設定 (strata-<model>.json) の作成まで完了します。ダウンロード済みのモデルは"
-      + "「ダウンロード済みのモデルを使う」から再取得なしで選べます。");
+      ? "家系は GLM / DeepSeek / MiniMax / Qwen から選びます。Maya 本体のセットアップ手順がこのまま走り、エンジンビルド・ダウンロード・起動設定の作成まで完了します。ダウンロード済みのモデルは「ダウンロード済みのモデルを使う」から再取得なしで選べます。"
+      : "Strata 本体のセットアップ手順がこのまま走り、ダウンロードから起動設定の作成まで完了します。ダウンロード済みのモデルは「ダウンロード済みのモデルを使う」から再取得なしで選べます。"));
   mdSync();
 }
 function mdStFullIn(f, m) {
@@ -1047,7 +1182,7 @@ function renderDownload() {
   /* 停滞検知: 3分以上バイトが増えていない場合は正直に警告する */
   const err = $("#dl-err");
   if (running && W.growT && t - W.growT > 180) {
-    err.textContent = "⚠ 3分以上バイトが増えていません。接続が停滞している可能性があります。"
+    err.textContent = "3分以上バイトが増えていません。接続が停滞している可能性があります。"
       + "「中断」してからもう一度ダウンロードすると、続きから再開できます。";
     err.classList.remove("hidden");
   } else if (!bad) err.classList.add("hidden");
@@ -1073,7 +1208,7 @@ $("#dl-cancel").addEventListener("click", async () => {
 });
 $("#dl-force").addEventListener("click", async () => {
   if (!W.job) return;
-  if (!confirm("それでも停止しません。強制停止 (SIGKILL) を実行しますか?\n転送中のデータは途中で止まります (破損ファイルは次の掃除画面で削除できます)。")) return;
+  if (!confirm("それでも停止しません。強制停止を実行しますか?\n転送中のデータは途中で止まります。破損ファイルは次の掃除画面で削除できます。")) return;
   $("#dl-force").disabled = true;
   $("#dl-force").textContent = "強制停止中…";
   try { await api(`/api/installs/${W.job.id}/cancel?force=true`, { method: "POST" }); }
@@ -1116,9 +1251,9 @@ async function renderCleanup() {
       `<div class="row-item"><span class="k">場所</span>`
     + `<span class="v"><span class="mono">${esc(clInfo.path)}</span></span></div>`
     + `<div class="row-item"><span class="k">サイズ</span>`
-    + `<span class="v">${bytes(clInfo.bytes)} (${clInfo.files} ファイル${clInfo.partials ? ` · 未完 ${clInfo.partials} 件` : ""})</span></div>`
+    + `<span class="v">${bytes(clInfo.bytes)} — ${clInfo.files} ファイル${clInfo.partials ? ` · 未完 ${clInfo.partials} 件` : ""}</span></div>`
     + (clInfo.pre_existing ? `<div class="row-item"><span class="k">注意</span>`
-        + `<span class="v">既存のモデルがある場所です。削除されるのは未完 (.incomplete) のファイルだけです。</span></div>` : "");
+        + `<span class="v">既存のモデルがある場所です。削除されるのは未完のファイルだけです。</span></div>` : "");
   $("#cl-box").classList.remove("hidden");
 }
 async function clDelete() {
@@ -1129,8 +1264,8 @@ async function clDelete() {
   b.disabled = true; b.textContent = "削除中…";
   try {
     const r = await api(`/api/installs/${id}/partial`, { method: "DELETE" });
-    $("#cl-sub").textContent = (r.bytes ? bytes(r.bytes) : "0 B") + " を削除しました。"
-      + (r.partial_only ? " (未完のファイルのみ)" : "") + "モデル選びに戻ります。";
+    $("#cl-sub").textContent = (r.partial_only ? "未完のファイルのみ削除しました。"
+      : (r.bytes ? bytes(r.bytes) : "0 B") + " を削除しました。") + "モデル選びに戻ります。";
     $("#cl-box").classList.add("hidden");
     $("#cl-del").classList.add("hidden");
     $("#cl-keep").textContent = "モデル選びに戻る";
@@ -1219,9 +1354,9 @@ function cfRecommend(backend, hw, sel, engine) {
   const outOpts = [8192, 16384, 32768, 65536, 131072];
   const outFit = outOpts.filter(n => n <= ctxN);
   rec.out = { v: String(outFit.includes(32768) ? 32768 : (outFit[outFit.length - 1] || 8192)),
-              why: "コード生成向け既定 (エンジン既定と同じ)" };
+              why: "コード生成向け既定 — エンジン既定と同じ" };
   if (backend === "basalt")
-    rec.vis = { v: "dynamic", why: "エンジンが必要時に読む (常駐VRAMなし)" };
+    rec.vis = { v: "dynamic", why: "エンジンが必要時に読む — 常駐VRAMなし" };
   if (!hw) return rec;   // GPU 不明 → 環境ベースの推奨は出さない (workload 推奨だけ)
 
   /* 使うカードの VRAM 合計: strata/basalt/maya はカード選択に従う。
@@ -1252,7 +1387,7 @@ function cfRecommend(backend, hw, sel, engine) {
   /* RAM 上限: 1 スロットあたりホスト側バッファ 4GiB 目安、RAM の半分まで。 */
   const ramCap = hw.ramGiB ? ([1, 2, 4, 8].filter(p => p * 4 <= hw.ramGiB * 0.5).pop() || 1) : 8;
   const vramTxt = `VRAM ${Math.round(vram)}GB`;
-  const budgetTxt = `KV予算 約${Math.floor(budget)}GB (${vramTxt} 全量・LLM 専用前提 — 重み配置はエンジン任せ)`;
+  const budgetTxt = `KV予算 約${Math.floor(budget)}GB — ${vramTxt} 全量・LLM 専用前提。重み配置はエンジン任せ`;
 
   /* ctx / par: basalt は KV を全員で共有 (総量 = ctx、並列で割る)。
      それ以外は 1 スロットあたり ctx × 並列数 が総 KV。 */
@@ -1270,12 +1405,12 @@ function cfRecommend(backend, hw, sel, engine) {
   const parFit = [1, 2, 4, 8].filter(p => (shared ? 1 : p) * slot <= budget);
   let parV = parFit.length ? parFit[parFit.length - 1] : 1;
   let parWhy = shared
-    ? `${budgetTxt} (KVは全員で共有 — 並列数を増やしても総量は増えない)`
-    : `${budgetTxt} ÷ 1スロット約${slot.toFixed(1)}GB (${CF_TOK(ctxN)} × ${sel.kv || "bf16"})`;
+    ? `${budgetTxt}。KVは全員で共有 — 並列数を増やしても総量は増えない`
+    : `${budgetTxt} ÷ 1スロット約${slot.toFixed(1)}GB — ${CF_TOK(ctxN)} × ${sel.kv || "bf16"}`;
   if (shared) parV = vram >= 16 ? 4 : vram >= 8 ? 2 : 1;
   if (!shared && slot > budget) parWhy += " — 1スロットでも収まらない見込み";
   if (parV > ramCap) { parV = ramCap; parWhy += ` / RAM ${Math.round(hw.ramGiB)}GB 上限`; }
-  rec.par = { v: String(parV), why: parWhy + " (上限目安)" };
+  rec.par = { v: String(parV), why: parWhy + " — 上限目安" };
 
   /* KV 形式: VRAM に余裕が無い (<48GB) なら圧縮、余裕があれば品質優先 / エンジン既定。
      fp8 は compute capability 8.0 (Ampere) 以上と確認できたときだけ推奨する。 */
@@ -1288,7 +1423,7 @@ function cfRecommend(backend, hw, sel, engine) {
     rec.kv = tight && ccMin >= 8
       ? { v: "fp8", why: `${vramTxt} はタイト + fp8 対応 GPU → メモリ半減` }
       : tight && ccMin >= 7.5
-        ? { v: "int8", why: `${vramTxt} はタイト → メモリ半減 (int8)` }
+        ? { v: "int8", why: `${vramTxt} はタイト → メモリ半減 — int8` }
         : { v: "auto", why: `${vramTxt} に余裕 → エンジンにまかせる` };
   else if (backend === "strata" || backend === "maya" || backend === "basalt")
     rec.kv = tight ? { v: "int8", why: `${vramTxt} はタイト → メモリ半減` }
@@ -1300,12 +1435,12 @@ function cfRecommend(backend, hw, sel, engine) {
     const nm = backend === "maya" ? "Maya" : "Strata";
     if (Number(engine.parallel) > 0)
       rec.par = { v: String(engine.parallel),
-                  why: nm + (backend === "maya" ? " config の --parallel (前回の設定)"
-                             : " エンジンの VRAM 予算判定 (config の parallel)") };
+                  why: nm + (backend === "maya" ? " config の --parallel — 前回の設定"
+                             : " エンジンの VRAM 予算判定 — config の parallel") };
     if (Number(engine.recContext) > 0) {
       const fit = ctxOpts.filter(c => c <= Number(engine.recContext));
       rec.ctx = { v: String(fit.length ? fit[fit.length - 1] : ctxOpts[0]),
-                  why: `${nm} 純正の公式 (この PC の VRAM/RAM) による推奨 ${CF_TOK(engine.recContext)}` };
+                  why: `${nm} 純正の公式による推奨 ${CF_TOK(engine.recContext)} — この PC の VRAM/RAM 基準` };
     }
   }
   return rec;
@@ -1349,7 +1484,7 @@ function cfSelNow() {
   }
   return sel;
 }
-/* 各選択肢の（推奨）タグを現在の環境 + 選択に合わせて付け替える。
+/* 各選択肢の「 · 推奨」タグを現在の環境 + 選択に合わせて付け替える。
    ユーザーの選択自体は動かさない (タグと根拠の表示だけ)。 */
 function cfApplyRec() {
   const cfg = W.cfgRendered || RUNCFG[W.backend] || {};
@@ -1362,8 +1497,8 @@ function cfApplyRec() {
       if (opt.dataset.raw === "1") continue;   // 「現在の値」の逃避行は触らない
       const isRec = !!(r && opt.value === r.v);
       opt.textContent = (opt.dataset.base || opt.textContent)
-        + (opt.dataset.tag ? `（${opt.dataset.tag}）` : "")
-        + (isRec ? "（推奨）" : "");
+        + (opt.dataset.tag ? ` · ${opt.dataset.tag}` : "")
+        + (isRec ? " · 推奨" : "");
     }
   }
   return recs;
@@ -1373,18 +1508,19 @@ function hwSummary(hw) {
   const by = {};
   hw.gpus.forEach(g => { (by[g.name] = by[g.name] || { n: 0, vram: g.vramGiB }).n++; });
   const gpuTxt = Object.entries(by)
-    .map(([n, x]) => `${n}${x.n > 1 ? " ×" + x.n : ""} (VRAM ${Math.round(x.vram)}GB)`).join(" / ");
+    .map(([n, x]) => `${n}${x.n > 1 ? " ×" + x.n : ""} — VRAM ${Math.round(x.vram)}GB`).join(" / ");
   return gpuTxt + (hw.ramGiB ? ` · RAM ${Math.round(hw.ramGiB)}GB` : "");
 }
-/* 見出し下の補足 1 行。perUser は「1人あたり × 並列 = 合計KV」を生きた値で示し、
-   推奨がある項目は根拠 (VRAM/RAM/並列数からの目安) を追記する */
+/* 長い補足 (説明 + 推奨の根拠) はラベルの ⓘ へ畳む。画面に残すのは
+   perUser の「1人あたり × 並列 = 合計KV」の生きた 1 行だけ */
 function cfSyncHints() {
   const cfg = W.cfgRendered || RUNCFG[W.backend] || {};
   const recs = cfApplyRec();
   for (const id of ["ctx", "out", "kv", "tp", "par", "vis"]) {
     const sec = cfg[id]; const hint = document.querySelector(`#cf-${id}-hint`);
     if (!sec || !hint) continue;
-    hint.textContent = sec.hint || "";
+    let info = sec.hint || "";
+    let line = "";
     if (sec.perUser) {
       const el = document.querySelector(`#cf-${id}`);
       const n = parseInt(el ? el.value : "", 10);
@@ -1392,12 +1528,14 @@ function cfSyncHints() {
         const par = cfParNow();
         const per = el.selectedOptions[0] && el.selectedOptions[0].dataset.raw === "1"
           ? Math.round(n / par) : n;
-        hint.innerHTML = esc(sec.hint)
-          + `<br>1人あたり ${esc(CF_TOK(per))} × ${par}並列 = KV合計 ${esc(CF_TOK(per * par))}`;
+        line = `1人あたり ${CF_TOK(per)} × ${par}並列 = KV合計 ${CF_TOK(per * par)}`;
       }
     }
     const r = recs[id];
-    if (r && r.why) hint.innerHTML += `<br>推奨の根拠: ${esc(r.why)}`;
+    if (r && r.why) info += (info ? "\n" : "") + "推奨の根拠: " + r.why;
+    setInfo(`#cf-${id}-info`, info);
+    hint.textContent = line;
+    hint.classList.toggle("hidden", !line);
   }
 }
 /* 稼働設定 (③) の質問セット。画面の質問順は全バックエンド共通で
@@ -1413,7 +1551,7 @@ const RUNCFG = {
     kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "会話履歴の格納精度です。fp8とint8はメモリ半減でTPも可。fp8/headはTP1+bf16専用です",
           opts: CF_KV_FT, cur: v => v },
-    tp: { key: "tp_size", label: "Tensor Parallel (GPU分割数)", short: "GPU分割",
+    tp: { key: "tp_size", label: "GPU分割数", short: "GPU分割",
           hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "max_running_requests", label: "並列推論数",
            hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
@@ -1427,7 +1565,7 @@ const RUNCFG = {
     out: { key: "max_output_tokens", label: "最大出力トークン", short: "出力",
            hint: "1回の応答で生成する上限。コード生成向けに32Kを推奨。大きくすると1リクエストあたりのKV予約が増えます",
            opts: CF_OUT, cur: CF_TOK },
-    tp: { key: "tp_size", label: "Tensor Parallel (GPU分割数)", short: "GPU分割",
+    tp: { key: "tp_size", label: "GPU分割数", short: "GPU分割",
           hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "max_running_requests", label: "並列推論数",
            hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
@@ -1436,7 +1574,7 @@ const RUNCFG = {
            hint: "長いほどVRAMを消費します", opts: CF_CTX, cur: CF_TOK },
     kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
-    tp: { key: "tp_size", label: "Tensor Parallel (GPU分割数)", short: "GPU分割",
+    tp: { key: "tp_size", label: "GPU分割数", short: "GPU分割",
           hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "max_running_requests", label: "並列推論数",
            hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: CF_NUM } },
@@ -1445,7 +1583,7 @@ const RUNCFG = {
            hint: "長いほどVRAMを消費します", opts: CF_CTX, cur: CF_TOK },
     kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "fp8はメモリ半減、bf16は品質優先", opts: CF_KV, cur: v => v },
-    tp: { key: "tensor_parallel_size", label: "Tensor Parallel (GPU分割数)", short: "GPU分割",
+    tp: { key: "tensor_parallel_size", label: "GPU分割数", short: "GPU分割",
           hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "max_num_seqs", label: "並列推論数",
            hint: "同時に処理するリクエスト数", opts: CF_PAR, cur: CF_NUM } },
@@ -1465,8 +1603,8 @@ const RUNCFG = {
        書き戻し先は config の gpu / layer_split (args ではない) */
     /* key は gpu_split (--gpu フィールドの key "gpu" と衝突させない。CLI の --gpu は
        単一カード専用で "0,1" を送ると起動が壊れる。config が正なので値は記録のみ) */
-    tp: { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方 (複数GPU共有)", short: "GPU",
-          hint: "2枚以上なら layer split でモデルを分け、約2倍のエキスパートを保持できます",
+    tp: { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方", short: "GPU",
+          hint: "2枚以上なら layer split でモデルを分け、約2倍のエキスパートを保持できます。まかせる = エンジン推奨の構成",
           opts: [], cur: v => v },
     par: { key: "parallel", label: "並列推論数",
            hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
@@ -1481,7 +1619,7 @@ const RUNCFG = {
     kv: { key: "kv", flag: "--kv", config: true, label: "KVキャッシュ形式",
           hint: "会話履歴の格納精度です。int8はメモリ半減、fp16は品質優先",
           opts: [["int8", "int8", ""], ["fp16", "fp16", ""]], cur: v => v },
-    tp: { key: "tp", flag: "--tp", config: true, label: "Tensor Parallel (GPU分割数)", short: "GPU分割",
+    tp: { key: "tp", flag: "--tp", config: true, label: "GPU分割数", short: "GPU分割",
           hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "parallel", label: "並列推論数",
            hint: "同時に処理するリクエスト数。調整はこの本数で実測します", opts: CF_PAR, cur: CF_NUM } },
@@ -1501,13 +1639,13 @@ const RUNCFG = {
           opts: [["fp16", "fp16", "既定"], ["int8", "int8", ""],
                  ["q4_0", "q4_0", ""], ["k8v4", "k8v4", ""]], cur: v => v },
     tp: { key: "gpu", label: "GPU の使い方", short: "GPU", gpusFrom: "system",
-          hint: "auto=全 Blackwell カード / 番号=そのカード (先頭がメイン)。共有方式はエンジンが自動選択",
+          hint: "auto は全 Blackwell カード、番号はそのカードだけを使います。先頭がメインです。共有方式はエンジンが自動選択します",
           opts: [], cur: v => v },
     par: { key: "parallel", label: "並列推論数",
-           hint: "同時に処理するリクエスト数 (1-8)。コンテキスト長はこの数で分割されます",
+           hint: "同時に処理するリクエスト数です。1〜8 から選びます。コンテキスト長はこの数で分割されます",
            opts: CF_PAR, cur: CF_NUM },
-    vis: { key: "vision", label: "画像入力 (ビジョン)",
-           hint: "dynamic=エンジン内で読む (常駐VRAMなし)。off にすると画像リクエストはエラーになります",
+    vis: { key: "vision", label: "画像入力",
+           hint: "dynamic はエンジン内で読みます。常駐 VRAM は使いません。off にすると画像リクエストはエラーになります",
            opts: [["dynamic", "dynamic", ""], ["off", "off", ""], ["cpu", "cpu", ""]], cur: v => v } },
 };
 /* 設定先行フローのプロファイル名既定: ② の選択から (config 名 / repo 名)。
@@ -1601,9 +1739,9 @@ async function renderConfig() {
        カード選択から --tp を純正同款 min(2, 枚数) で導出する — --tp だけ聞いて
        config の gpu を放置すると「tp=1 なのに 2 枚 layer split」で起動 / 計測される
        (2026-11-16 実害: gpu:[0,1] + --tp 1)。保存は cf-go の tpFromGpus が担う */
-    cfg.tp = { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方 (複数GPU共有)", short: "GPU",
+    cfg.tp = { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方", short: "GPU",
                hint: W.cfgArgs.tp_ok
-                 ? "使うカードを選びます。Tensor Parallel (--tp) は枚数から自動で決まり (純正同じ: min(2, 枚数))、調整 (⑤) が実測で詰めます"
+                 ? "使うカードを選びます。Tensor Parallel は枚数から自動で決まります。純正と同じく最大 2 です。調整が実測で詰めます"
                  : "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます",
                opts: [], cur: v => v, tpFromGpus: W.cfgArgs.tp_ok === true };
   }
@@ -1614,18 +1752,18 @@ async function renderConfig() {
   // 選択肢は検出カードから組み立てる (単一カード / 全カード layer split / まかせる)
   if (cfg.tp && cfg.tp.flag === "gpu") {
     const cards = W.cfgArgs.gpus || [];
-    const opts = [["auto", `まかせる (${W.backend === "maya" ? "Maya" : "Strata"} 推奨)`, ""]];
+    const opts = [["auto", "まかせる", ""]];
     cards.forEach(i => opts.push([String(i), `GPU ${i} のみ`, ""]));
     if (cards.length >= 2 && W.cfgArgs.gpu_multi !== false)
-      opts.push([cards.join(","), `全カード共有 (${cards.join(", ")}) — layer split`, ""]);
+      opts.push([cards.join(","), `全カード共有 ${cards.join(",")} — layer split`, ""]);
     cfg.tp = { ...cfg.tp, opts };
   }
   // basalt の GPU の使い方: 選択肢は /api/system の検出結果から (2 枚以上のときだけ質問)
   if (cfg.tp && cfg.tp.gpusFrom === "system") {
     const idx = W.sysGpus.map(g => String(g.index));
-    const opts = [["auto", "auto (全 Blackwell)", ""]];
+    const opts = [["auto", "auto", ""]];
     idx.forEach(i => opts.push([i, `GPU ${i} のみ`, ""]));
-    if (idx.length >= 2) opts.push([idx.join(","), `${idx.join(",")} (先頭がメイン)`, ""]);
+    if (idx.length >= 2) opts.push([idx.join(","), `${idx.join(",")} — 先頭がメイン`, ""]);
     cfg.tp = { ...cfg.tp, opts };
   }
   /* Strata / Maya のエンジン値: config の parallel (Strata: VRAM 予算判定 / Maya: args の
@@ -1663,15 +1801,14 @@ async function renderConfig() {
      この出し分け込みの定義を使う (RUNCFG の静的定義だと Maya GLM で
      「GPU の使い方」の選択を --tp として書いてしまう) */
   W.cfgRendered = cfg;
-  /* 検出環境の要約を根拠として見せる。GPU が読めない環境では「推奨なし」を正直に出す */
+  /* 検出環境の要約は ⓘ の根拠として見せる。GPU が読めない環境では「推奨なし」を正直に出す */
   const hwLine = W.hw
-    ? `この PC: ${hwSummary(W.hw)} — 推奨はこのスペックと選択中の並列数からの上限目安です (VRAM は LLM 専用前提)。調整 (⑤) が実測します。`
-    : "GPU を検出できませんでした — 環境ベースの推奨は表示しません。環境に合わせて選んでください (調整で実測できます)。";
+    ? `この PC: ${hwSummary(W.hw)}\n推奨はこのスペックと選択中の並列数からの上限目安です。VRAM は LLM 専用前提です。調整が実測します`
+    : "GPU を検出できませんでした。環境ベースの推奨は表示しません。環境に合わせて選んでください。調整で実測できます";
+  setInfo("#cf-info", "キャリブレーションはこの設定で計測します。後からダッシュボードでも変更できます。\n" + hwLine);
   $("#cf-sub").innerHTML = (W.cfgProfNew ? "新しい起動プロファイル <b>" : "プロファイル <b>")
     + esc(p.name) + "</b> に保存します。"
-    + (W.preJob ? "この後、接続設定 → ダウンロード / セットアップの順に進みます。" : "")
-    + "キャリブレーションはこの設定で計測します。後からダッシュボードでも変更できます。"
-    + `<br>${esc(hwLine)}`;
+    + (W.preJob ? "この後、接続設定 → ダウンロード / セットアップの順に進みます。" : "");
   const nmEl = $("#cf-name");
   if (nmEl && document.activeElement !== nmEl) nmEl.value = p.name || "";
   const parts = [];
@@ -1718,12 +1855,12 @@ async function renderConfig() {
                               || (sec.opts[0] || [""])[0]) : null;
     // 選択肢が 2つ以上の設定はプルダウンにまとめる (画面を縦に伸ばさない)。
     // 表示は数値と単位だけにし、data-t1 にサマリーへ使う短い名称を持たせる。
-    // data-base / data-tag は cfApplyRec が（推奨）タグを付け替えるための土台
+    // data-base / data-tag は cfApplyRec が「 · 推奨」タグを付け替えるための土台
     let rows = sec.opts.map(o => {
       const sel = cur ? cur === o[0] : o[0] === def;
       return `<option value="${esc(o[0])}"${sel ? " selected" : ""}`
         + ` data-t1="${esc(o[1])}" data-base="${esc(o[1])}" data-tag="${esc(o[2] || "")}">${esc(o[1])}`
-        + (o[2] ? `（${esc(o[2])}）` : "") + "</option>";
+        + (o[2] ? ` · ${esc(o[2])}` : "") + "</option>";
     }).join("");
     if (cur && !sec.opts.some(o => o[0] === cur)) {
       // 選択肢に無い既存値 (手動設定や、合計でしか書かれない値) はそのまま維持。
@@ -1733,13 +1870,14 @@ async function renderConfig() {
       const t = esc(sec.cur ? sec.cur(sec.perUser ? cur : kept)
                             : (sec.perUser ? CF_TOK(cur) : kept));
       rows = `<option value="${esc(kept)}" selected data-t1="${t}"`
-        + (sec.perUser ? ' data-raw="1"' : "") + `>${t}（現在の値）</option>` + rows;
+        + (sec.perUser ? ' data-raw="1"' : "") + `>${t} · 現在の値</option>` + rows;
     }
-    // 見出しはフローティングラベルが兼ねるので、 group 内は「選択 → 補足1行」だけ
+    // 見出しはフローティングラベルが兼ねる。長い説明はラベルの ⓘ に畳み、
+    // group 内は「選択 (+ perUser の生きた 1 行)」だけにする
     parts.push(`<div class="cf-group">`
       + `<div class="field sel-fixed"><select id="cf-${id}" data-name="${esc(id)}">${rows}</select>`
-      + `<label for="cf-${id}">${esc(sec.label)}</label></div>`
-      + `<div class="cf-hint" id="cf-${id}-hint">${esc(sec.hint)}</div></div>`);
+      + `<label for="cf-${id}">${esc(sec.label)} ${infoBtn(sec.hint || "", `cf-${id}-info`)}</label></div>`
+      + `<div class="cf-hint" id="cf-${id}-hint"></div></div>`);
   }
   $("#cf-groups").innerHTML = parts.join("");
   cfSyncHints();
@@ -1751,7 +1889,7 @@ $("#cf-groups").addEventListener("change", e => {
     document.querySelectorAll(`#cf-groups input[name="${inp.name}"]`).forEach(i =>
       i.closest(".opt").classList.toggle("sel", i.checked));
   }
-  cfSyncHints();   // 選択変更 → 1人あたり/KV合計の補足と（推奨）タグ・根拠も追従させる
+  cfSyncHints();   // 選択変更 → 1人あたり/KV合計の補足と「 · 推奨」タグ・根拠も追従させる
 });
 // PUT はドキュメント全体を置き換えるため、保存のたびにサーバーの最新を再取得して
 // 土台にする。古い W.calProfile のまま PUT すると、前の保存で書き込まれた
@@ -1878,7 +2016,7 @@ $("#cf-go").addEventListener("click", async () => {
     }
     p.name = newName;
     await refreshProf(p); // config (起動JSON) 込みの最新を次のステップへ渡す
-    W.summary.push({ ok: true, t: "稼働設定を保存しました (" + chosen.join(" · ") + ")" });
+    W.summary.push({ ok: true, t: "稼働設定を保存しました — " + chosen.join(" · ") });
     renderNet(); go("s-net");
   } catch (e) {
     err.textContent = "保存に失敗しました: " + e.message;
@@ -1913,7 +2051,9 @@ async function renderNet() {
     ? (W.tableReq ? "保存してセットアップを開始" : "保存してダウンロードを開始")
     : "保存して次へ";
   $("#nt-sub").textContent = "プロファイル「" + p.name + "」に保存します。"
-    + (willJob ? " この後、モデルのダウンロード / セットアップを開始します (完了まで時間がかかります)。" : "");
+    + (willJob ? " この後、モデルのダウンロード / セットアップを開始します。" : "");
+  setInfo("#nt-info", "サーバーの待ち受け先と API キーです。後からダッシュボードでも変更できます。"
+    + (willJob ? "\nダウンロード / セットアップは完了まで時間がかかります。" : ""));
   $("#nt-err").classList.add("hidden");
 }
 $("#nt-go").addEventListener("click", async () => {
@@ -1935,7 +2075,7 @@ $("#nt-go").addEventListener("click", async () => {
   if (host) { vals.host = host; if (on) on.host = true; chosen.push("host " + host); }
   if (port) { vals.port = port; if (on) on.port = true; chosen.push("port " + port); }
   if (key) { vals.api_key = key; if (on) on.api_key = true; chosen.push("APIキー設定済"); }
-  if (!key && !String((p.values || {}).api_key || "").trim()) chosen.push("APIキーなし (認証なし)");
+  if (!key && !String((p.values || {}).api_key || "").trim()) chosen.push("APIキーなし — 認証なし");
   const body = { name: p.name, backend: p.backend, values: vals, on,
     extra_args: p.extra_args || "", env: p.env || {}, cwd: p.cwd || "", command: p.command || "",
     custom_only: !!p.custom_only, note: p.note || "", simple_visible: !!p.simple_visible };
@@ -1951,7 +2091,7 @@ $("#nt-go").addEventListener("click", async () => {
                 { method: "POST" });
     }
     await refreshProf(p); // 再生成後の config 込み最新を後続ステップへ
-    W.summary.push({ ok: true, t: "接続設定を保存しました (" + chosen.join(" · ") + ")" });
+    W.summary.push({ ok: true, t: "接続設定を保存しました — " + chosen.join(" · ") });
     if (W.preJob) { await startModelJob(); return; }
     renderCal(); go("s-cal");
   } catch (e) {
@@ -2009,7 +2149,7 @@ async function startModelJob() {
     if (W.kind === "download") {
       renderDownload(); go("s-download");
     } else {
-      setProgChrome("ステップ 2 / 5 — モデル", `${specName(W.backend)} がモデルを準備しています (時間がかかります)`);
+      setProgChrome("ステップ 2 / 5 — モデル", `${specName(W.backend)} がモデルを準備しています`);
       renderProgress(); go("s-progress");
     }
     startPoll();
@@ -2065,7 +2205,7 @@ async function bindSetupResult(r) {
     await refreshProf(p);
     W.summary.push({ ok: true, t: "モデル設定をプロファイルに紐付け、稼働設定を反映しました" });
   } catch (e) {
-    W.summary.push({ ok: false, t: "モデル設定の紐付けに失敗しました: " + e.message + " (プロファイル編集から設定できます)" });
+    W.summary.push({ ok: false, t: "モデル設定の紐付けに失敗しました: " + e.message + " — プロファイル編集から設定できます" });
   }
 }
 
@@ -2086,9 +2226,9 @@ async function bindDownloadResult(r) {
                 { method: "POST" });
     }
     await refreshProf(p);
-    W.summary.push({ ok: true, t: "モデルをプロファイルに紐付けました" + (mp ? " (" + mp.split("/").pop() + ")" : "") });
+    W.summary.push({ ok: true, t: "モデルをプロファイルに紐付けました" + (mp ? " — " + mp.split("/").pop() : "") });
   } catch (e) {
-    W.summary.push({ ok: false, t: "モデルの紐付けに失敗しました: " + e.message + " (プロファイル編集から設定できます)" });
+    W.summary.push({ ok: false, t: "モデルの紐付けに失敗しました: " + e.message + " — プロファイル編集から設定できます" });
   }
 }
 
@@ -2126,22 +2266,24 @@ async function renderCal() {
     }
     $("#ca-time").textContent = (profs.find(p => (p.backend || "").includes("freetoken"))
       ? "FreeToken は目安 3〜4 時間かかります"
-      : W.backend === "maya" ? "Maya: GLM 約 10〜15 分 / DeepSeek 約 35〜70 分 (TP 調整 + drafter 速度計測)"
-      : "目安: 10〜30 分 (バックエンドにより変わります)");
+      : W.backend === "maya" ? "Maya: GLM 約 10〜15 分 / DeepSeek 約 35〜70 分"
+      : "目安 10〜30 分");
+    /* Maya: drafter の速度計測もここに含まれる (セットアップでは計測しない)。
+       スキップすると drafter なしで起動する — 正直に予告する (ⓘ に畳む) */
+    const cn = String(((W.calPick || {}).values || {}).config || "").split("/").pop();
+    let caInfo = "調整はキャリブレーションとも呼ばれ、この PC 向けの性能調整です。実行中は GPU を独占します。"
+      + "\nスキップしてもダッシュボードの「キャリブレーション」からいつでも実行できます。";
+    if (W.backend === "maya" && /^maya-(ds4|mm3|minimax|cyber-frost|qwen)/.test(cn))
+      caInfo += "\nDSpark / MTP drafter の速度計測もここで行います。スキップすると drafter なしで起動します。後からダッシュボードのキャリブレーションで実行できます。";
+    setInfo("#ca-info", caInfo);
     if (!canCal) $("#ca-sub").textContent = "調整はキャリブレーション権限のあるアカウントで実行できます。ダッシュボードの「キャリブレーション」から後で実行できます。";
-    else if (calRunning) $("#ca-sub").textContent = "別のキャリブレーションが実行中です (同時に 1 件)。完了後に開始できます。";
-    else if (W.busyInstall) $("#ca-sub").textContent = "セットアップ (インストール / ダウンロード) ジョブが実行中です。完了後に調整を開始できます。";
+    else if (calRunning) $("#ca-sub").textContent = "別のキャリブレーションが実行中です。完了後に開始できます。";
+    else if (W.busyInstall) $("#ca-sub").textContent = "セットアップジョブが実行中です。完了後に調整を開始できます。";
     else if (!c) $("#ca-sub").textContent = "キャリブレーション情報を取得できませんでした。ダッシュボードの「キャリブレーション」から後で実行できます。";
     else if (!profs.length) $("#ca-sub").textContent = "調整対象のプロファイルがまだありません。プロファイルを作成してから、ダッシュボードの「キャリブレーション」で実行してください。";
     else {
-      let sub = "調整 (キャリブレーション) はこの機械向けの性能調整です。実行中は GPU を独占します。"
-        + "対象: " + (W.calPick ? W.calPick.name : "(未選択)");
-      /* Maya: drafter の速度計測もここに含まれる (セットアップでは計測しない)。
-         スキップすると drafter なしで起動する — 正直に予告する */
-      const cn = String(((W.calPick || {}).values || {}).config || "").split("/").pop();
-      if (W.backend === "maya" && /^maya-(ds4|mm3|minimax|cyber-frost|qwen)/.test(cn))
-        sub += " drafter (DSpark / MTP) の速度計測もここで行います。スキップすると drafter なしで起動します (後から 🎯 で実行可)。";
-      $("#ca-sub").textContent = sub;
+      $("#ca-sub").textContent = "この PC 向けの性能調整です。実行中は GPU を独占します。"
+        + "対象: " + (W.calPick ? W.calPick.name : "未選択");
     }
   } catch { ok = false; }
   runOpt.disabled = !ok;
@@ -2159,7 +2301,7 @@ $$("#ca-list input").forEach(i => i.addEventListener("change", syncCalSel));
 $("#ca-go").addEventListener("click", async () => {
   const run = $$("#ca-list input").find(i => i.checked)?.value === "run";
   if (!run) {
-    W.summary.push({ ok: true, t: "調整 (キャリブレーション) は実行しませんでした — ダッシュボードからいつでも実行できます" });
+    W.summary.push({ ok: true, t: "調整は実行しませんでした — ダッシュボードからいつでも実行できます" });
     renderDone(); go("s-done"); return;
   }
   const profs = W.calProfiles || [];
