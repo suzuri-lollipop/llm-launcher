@@ -548,17 +548,25 @@ function setMdModeLabels(backend) {
   $("#md-later").classList.toggle("hidden", profileFlow() || backend === "strata" || backend === "maya");
 }
 async function loadStrata() {
-  // profile モードは setup-options が読んだ表を使う (/api/installs/* は install 権限)
-  if (profileFlow()) return (W.options && W.options.strata)
-    || { available: false, families: {}, contexts: [], configs: [], venv_ready: false };
+  // profile モードは setup-options が読んだ表を使う (/api/installs/* は install 権限)。
+  // W.mdStrata にも入れる — mdT() / mdAdoptLocalTable がここを参照するため
+  // (入れないと済みモデル選択が無反応で先に進めない。2026-11-16 実害)
+  if (profileFlow()) {
+    W.mdStrata = (W.options && W.options.strata)
+      || { available: false, families: {}, contexts: [], configs: [], venv_ready: false };
+    return W.mdStrata;
+  }
   if (W.mdStrata) return W.mdStrata;
   try { W.mdStrata = await api("/api/installs/strata-model"); }
   catch { W.mdStrata = { available: false, families: {}, contexts: [], configs: [], venv_ready: false }; }
   return W.mdStrata;
 }
 async function loadMaya() {
-  if (profileFlow()) return (W.options && W.options.maya)
-    || { available: false, families: {}, configs: [], venv_ready: false };
+  if (profileFlow()) {
+    W.mdMaya = (W.options && W.options.maya)
+      || { available: false, families: {}, configs: [], venv_ready: false };
+    return W.mdMaya;
+  }
   if (W.mdMaya) return W.mdMaya;
   try { W.mdMaya = await api("/api/installs/maya-model"); }
   catch { W.mdMaya = { available: false, families: {}, configs: [], venv_ready: false }; }
@@ -628,7 +636,8 @@ function mdStFillCtx() {
   const st = mdT();
   const fam = (st.families || {})[W.mdStFam] || {};
   const maxc = Number(fam.max_context) || 524288;
-  // コンテキスト一覧は家系が持つ (Maya: GLM 128K / DS4・MM3 1M / Qwen 256K が上限)
+  // コンテキスト一覧は家系が持つ (Maya: GLM・DS4・MM3 1M / Qwen 256K、
+  // Strata: Flash-Next・DS4.1 1M / Qwen3.6 256K が上限。owner 方針: 対応する全てで 1M まで)
   const src = (fam.contexts || []).length ? fam.contexts : (st.contexts || []);
   const cs = (src.length ? src : [8192, 32768, 65536, 131072, 204800, 262144])
     .filter(c => c <= maxc);
@@ -638,7 +647,7 @@ function mdStFillCtx() {
     W.mdStCtx = cs.includes(rec) ? rec : (cs.includes(131072) ? 131072 : cs[0]);
   W.mdStCtxRec = rec;
   $("#md-ctx").innerHTML = cs.map(c => `<option value="${c}"${c === W.mdStCtx ? " selected" : ""}>`
-    + `${c >= 1024 ? Math.round(c / 1024) + "K" : c}${c === rec ? " (推奨)" : c > rec ? " (大)" : ""}</option>`).join("");
+    + `${CF_TOK(c)}${c === rec ? " (推奨)" : c > rec ? " (大)" : ""}</option>`).join("");
   mdStHint();   // 推奨と選択の差はヒントに出す (サイズ変更後は ctx が後から変わるためここで再計算)
 }
 function mdStHint() {
@@ -648,7 +657,7 @@ function mdStHint() {
   const isMaya = W.backend === "maya";
   const name = isMaya ? "Maya" : "Strata";
   const pc = st.pc || {}; const parts = [];
-  if (!st.available) parts.push(`${name} のモデル一覧が読めません — 前に戻って ① インストールを先に実行してください`);
+  if (!st.available) parts.push(`${name} のモデル一覧を読み出せませんでした (PC が高負荷の可能性) — 少し待ってからもう一度お試しください`);
   else if (!st.venv_ready) parts.push(`${name} の実行環境 (.venv) がまだありません — 前に戻って ① インストールを実行してください`);
   if (d.about) parts.push(d.about);
   const h = d.have || {};
@@ -678,7 +687,7 @@ function mdStHint() {
      24GB クラスで 512K はエンジン起動時の KV 確保に失敗しうる (2026-11-09 実測) */
   const rec = mdStRecCtx();
   if (W.mdStCtx > rec) {
-    parts.push(`※ コンテキスト ${Math.round(W.mdStCtx / 1024)}K はこの PC 向け推奨 ${Math.round(rec / 1024)}K より大きい — 起動時に VRAM/RAM 不足で失敗することがあります`);
+    parts.push(`※ コンテキスト ${CF_TOK(W.mdStCtx)} はこの PC 向け推奨 ${CF_TOK(rec)} より大きい — 起動時に VRAM/RAM 不足で失敗することがあります`);
   }
   /* own-path 家系 (Qwen3.6) は純正が単一 GPU 宣言 — 2 枚在っても分割できない */
   const cards = ((st.pc || {}).gpus || []).filter(g => g.usable);
@@ -703,7 +712,9 @@ function mdSync() {
     const st = mdT();
     if (mode === "dl") {
       btn.textContent = "次へ (稼働設定)";
-      btn.disabled = !st.available || !st.venv_ready || !W.mdStFam || !W.mdStModel;
+      const sizeOpt = $("#md-size").selectedOptions[0];
+      btn.disabled = !st.available || !st.venv_ready || !W.mdStFam || !W.mdStModel
+        || !!(sizeOpt && sizeOpt.disabled);   // 取得済み (グレー) の選択では開始しない
       $("#md-dest").textContent = isMaya
         ? "ダウンロードと設定は Maya 本体の手順が走ります — エンジンビルド (初回) と pack 作成も含みます。中断しても続きから再開できます"
         : "ダウンロードと設定は Strata 本体の手順が走ります — 中断しても続きから再開できます";
@@ -712,7 +723,7 @@ function mdSync() {
       btn.disabled = !$("#md-strata-exist").value;
       const sel = (st.downloaded || []).find(x => x.key === $("#md-strata-exist").value);
       $("#md-dest").textContent = sel
-        ? `重みはこの PC に在ります (${sel.gb || "?"} GB) — 再取得はありません`
+        ? `${sel.label} — 重みはこの PC に在ります (${sel.gb || "?"} GB) / 再取得はありません`
         : "";
     }
     return;
@@ -732,7 +743,10 @@ function mdSync() {
   const btn = $("#md-start");
   if (mode === "dl") {
     btn.textContent = "次へ (稼働設定)";
-    btn.disabled = !$("#md-repo").value.trim() && !$("#md-sel").value;
+    const repo = $("#md-repo").value.trim();
+    const selOpt = $("#md-sel").selectedOptions[0];
+    // repo id 手入力は明示 intent なので許可。一覧選択は取得済み (グレー) を弾く
+    btn.disabled = repo ? false : (!$("#md-sel").value || !!(selOpt && selOpt.disabled));
     const sp = spec();
     $("#md-dest").textContent = sp && sp.model_data
       ? `保存先: ${sp.name} のモデルフォルダ (起動設定に自動で反映されます)`
@@ -772,9 +786,16 @@ async function renderModel() {
       : shape === "gguf" ? ((m.gguf || []).length || m.has_weights)
       : m.has_weights));
   } catch { mdLocal = []; }
+  /* ダウンロード択の一覧: 取得済みは選択不可 (グレー) — 済みモデルは
+     「ダウンロード済みのモデルを使う」側で選ぶ (再ダウンロードの誤起動防止) */
+  const haveRepo = r => mdLocal.some(x => x.repo_id === r);
+  const firstAvail = ms.findIndex(m => !haveRepo(m.repo_id));
   $("#md-sel").innerHTML = ms.length
-    ? ms.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
-        + `${esc(m.repo_id)}${m.name ? " — " + esc(m.name) : ""}</option>`).join("")
+    ? ms.map((m, i) => {
+        const got = haveRepo(m.repo_id);
+        return `<option value="${esc(m.repo_id)}"${i === (firstAvail >= 0 ? firstAvail : 0) ? " selected" : ""}${got ? " disabled" : ""}>`
+          + `${esc(m.repo_id)}${m.name ? " — " + esc(m.name) : ""}${got ? " (ダウンロード済み)" : ""}</option>`;
+      }).join("")
     : '<option value="">(このバックエンドに対応モデル一覧がありません)</option>';
   $("#md-local").innerHTML = mdLocal.length
     ? mdLocal.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
@@ -836,38 +857,38 @@ async function renderModelTable(backend) {
   mdStFillSizes(); mdStFillCtx();
   /* ダウンロード済み一覧: 表から作る (モデル名 + サイズ + GB)。JSON 名は内部では
      使うが UI には出さない — 「そのモデルが在る」だけがユーザーの情報。
-     profile モードは config JSON 作成済みのモデルだけ (セットアップジョブを
-     走らせないフローなので、重みが在っても config が無いモデルは選べない) */
+     有無は「重みがディスクに揃っているか」(表の have) で決める — config JSON の
+     有無 / quant_key で決めない (共有 config の quant_key が最後の設定を指すと
+     他の量子化の重みが在っても一覧から消える。2026-11-16 実害)。
+     config が無い量子化は選択後に純正セットアップが config だけ作る (DL なし) */
   const dl = [];
   for (const fid of famIds) {
     const f = fams[fid];
     for (const [m, d] of Object.entries(f.models || {})) {
       if (mdStFullIn(f, m)) dl.push({ key: fid + "/" + m, fam: fid, model: m,
-                                      label: (f.title || fid) + " · " + (d.label || m),
+                                      label: (d.label || m),
                                       gb: (d.have || {}).gb });
     }
   }
-  const ready = profileFlow()
-    ? dl.filter(x => (st.configs || []).some(y => y.name === mdCfgKey(fams[x.fam] || {}, x.model)
-        && (y.weights || {}).ok === true && (!y.quant_key || y.quant_key === x.model)))
-    : dl;
-  st.downloaded = ready;
-  $("#md-strata-exist").innerHTML = ready.map((x, i) => `<option value="${esc(x.key)}"${i === 0 ? " selected" : ""}>`
-    + `${esc(x.label + " — " + (x.gb || "?") + " GB")}</option>`).join("")
+  st.downloaded = dl;
+  /* 選択肢は「量子化キー + 実サイズ」を先頭に — 家族名が長く先頭を占めると
+     末尾だけ違うモデル (Mix-128G / Mix-256G) が見分けられない (2026-11-16 報告) */
+  $("#md-strata-exist").innerHTML = dl.map((x, i) => `<option value="${esc(x.key)}"${i === 0 ? " selected" : ""}>`
+    + `${esc(x.model + " · " + (x.gb || "?") + " GB — " + x.label)}</option>`).join("")
     || (profileFlow()
-      ? '<option value="">(設定作成済みのモデルがありません — 先に通常のセットアップでモデル設定を実行してください)</option>'
+      ? '<option value="">(ダウンロード済みのモデルがありません — 先に通常のセットアップでダウンロードしてください)</option>'
       : '<option value="">(ダウンロード済みのモデルがありません)</option>');
   const localR = $$("#md-modes input").find(i => i.value === "local");
-  localR.disabled = !ready.length;
-  $$("#md-modes .opt").forEach(o => { if (o.contains(localR)) o.style.opacity = ready.length ? "" : ".45"; });
+  localR.disabled = !dl.length;
+  $$("#md-modes .opt").forEach(o => { if (o.contains(localR)) o.style.opacity = dl.length ? "" : ".45"; });
   if (localR.disabled && mdMode() === "local" && !profileFlow()) {
     $$("#md-modes input").find(i => i.value === "dl").checked = true;
   }
   $("#md-err").classList.add("hidden");
   $("#md-sub").textContent = profileFlow()
     ? (isMaya
-      ? "この PC にダウンロード済みで設定 (maya-<model>.json) 作成済みの Maya モデルから選んでください。新しいダウンロード / エンジンビルドは行いません。"
-      : "この PC にダウンロード済みで設定 (strata-<model>.json) 作成済みの Strata モデルから選んでください。新しいダウンロードは行いません。")
+      ? "この PC にダウンロード済みの Maya モデル (重み検証済み) から選んでください。config が無い場合は純正セットアップが config だけ作成します (再ダウンロードはありません)。"
+      : "この PC にダウンロード済みの Strata モデル (重み検証済み) から選んでください。config が無い場合は純正セットアップが config だけ作成します (再ダウンロードはありません)。")
     : (isMaya
     ? "Maya は家系 (GLM / DeepSeek / MiniMax / Qwen)・サイズ (量子化)・コンテキスト長を選ぶだけです。"
       + "Maya 本体のセットアップ手順がこのまま走り、エンジンビルド (初回)・ダウンロードから起動設定 "
@@ -938,13 +959,10 @@ async function mdAdoptLocalTable() {
     renderConfig(); go("s-config");
     return;
   }
-  /* profile モードはセットアップジョブ (config 作成) を走らせない — 一覧は
-     config 作成済みだけで作るので通常ここには来ない。万一の取りこぼしは正直に止める */
-  if (profileFlow()) {
-    $("#md-err").textContent = "このモデルの config JSON が見つかりません。先に通常のセットアップでモデル設定を実行してください。";
-    $("#md-err").classList.remove("hidden");
-    return;
-  }
+  /* config が無い (削除 / 別経路 / 共有 config の quant_key が別の量子化) ときは
+     純正セットアップジョブで検証・config 作成だけ走らせる (重みが在るので
+     ダウンロードは起きない)。profile モードも同じ — 一覧は重み基準なので
+     「config が無い = 選べない」にはしない (2026-11-16 実害の修正) */
   const d = (f.models || {})[x.model] || {};
   W.tableReq = { family: x.fam, model: x.model,
                  context: d.rec_context || (W.backend === "maya" ? 32768 : 131072), vision: "" };
@@ -1206,10 +1224,10 @@ function cfRecommend(backend, hw, sel, engine) {
     rec.vis = { v: "dynamic", why: "エンジンが必要時に読む (常駐VRAMなし)" };
   if (!hw) return rec;   // GPU 不明 → 環境ベースの推奨は出さない (workload 推奨だけ)
 
-  /* 使うカードの VRAM 合計: strata/basalt はカード選択に従う。
+  /* 使うカードの VRAM 合計: strata/basalt/maya はカード選択に従う。
      他は TP 数 n 枚分 (既定 1、大きいカード順)。同一構成想定で n × 最小 VRAM。 */
   let cards = hw.gpus;
-  if (backend === "strata" || backend === "basalt") {
+  if (backend === "strata" || backend === "basalt" || backend === "maya") {
     const g = String(sel.gpu ?? "auto").trim();
     if (g && g !== "auto") {
       const idx = g.split(",").map(s => s.trim());
@@ -1567,22 +1585,27 @@ async function renderConfig() {
     try {
       const r = (await api(`/api/profiles/${p.id}/config-args`)) || {};
       W.cfgArgs = { ...(r.args || {}), gpu: r.gpu, gpus: r.gpus, gpu_multi: r.gpu_multi,
-                    family: r.family, kv_ok: r.kv_ok, tp_ok: r.tp_ok };
+                    family: r.family, kv_ok: r.kv_ok, tp_ok: r.tp_ok,
+                    source_config: r.source_config || "" };
     } catch { /* 読めなければ未設定扱い (推奨プリチェック) */ }
   }
   /* Maya: 家系別の質問出し分け (エンジン実装が単一の源)。
      GLM / Qwen / MiniMax GGUF = --kv + GPU の使い方 (config の gpu = layer split。--tp は無い)。
-     DeepSeek / MiniMax EXL3 = --tp (--kv は無い: KV はエンジン固有の形式)。
+     DeepSeek / MiniMax EXL3 = GPU の使い方 + --tp (導出)。--kv は無い (KV はエンジン固有)。
      Qwen は --parallel 非対応 (1 リクエストずつ) — 並列数の質問自体を出さない
      (2 以上を保存すると起動が check_parallel で失敗するため)。 */
   if (W.backend === "maya" && W.cfgArgs.family) {
     if (W.cfgArgs.kv_ok === false) delete cfg.kv;
     if (W.cfgArgs.family === "qwen") delete cfg.par;
-    if (W.cfgArgs.tp_ok === false) {
-      cfg.tp = { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方 (複数GPU共有)", short: "GPU",
-                 hint: "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます",
-                 opts: [], cur: v => v };
-    }
+    /* GPU の使い方は全家系で聞く (純正 choose_gpus と同じ立場)。DS4 / MM3-EXL3 は
+       カード選択から --tp を純正同款 min(2, 枚数) で導出する — --tp だけ聞いて
+       config の gpu を放置すると「tp=1 なのに 2 枚 layer split」で起動 / 計測される
+       (2026-11-16 実害: gpu:[0,1] + --tp 1)。保存は cf-go の tpFromGpus が担う */
+    cfg.tp = { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方 (複数GPU共有)", short: "GPU",
+               hint: W.cfgArgs.tp_ok
+                 ? "使うカードを選びます。Tensor Parallel (--tp) は枚数から自動で決まり (純正同じ: min(2, 枚数))、調整 (⑤) が実測で詰めます"
+                 : "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます",
+               opts: [], cur: v => v, tpFromGpus: W.cfgArgs.tp_ok === true };
   }
   /* 設定先行フロー: コンテキスト長は ② で既に選んでいる (セットアップが config に書く)。
      ③ で二重に聞かない */
@@ -1619,7 +1642,9 @@ async function renderConfig() {
       const d = (f.models || {})[W.tableReq.model] || {};
       W.cfgEngine = { parallel: null, recContext: Number(d.rec_context) || null };
     } else {
-      const cfgName = String(v.config || "").split("/").pop();
+      // 専用コピー (data/launch/<backend>-<slug>-<uuid8>.json) は source_config で
+      // 元の installer config 名を引く (純正表の parallel / rec_context 突合用)
+      const cfgName = String(W.cfgArgs.source_config || String(v.config || "").split("/").pop());
       const c = (st.configs || []).find(x => x.name === cfgName);
       let recCtx = null;
       for (const f of Object.values(st.families || {})) {
@@ -1764,6 +1789,17 @@ $("#cf-go").addEventListener("click", async () => {
     vals[sec.key] = (sec.perUser && !raw && Number.isFinite(per)) ? String(per * par) : el.value;
     if (on) on[sec.key] = true;
     if (sec.config && sec.flag) updates[sec.flag] = vals[sec.key];
+    /* Maya DS4 / MM3-EXL3: --tp は GPU 選択から導出 (純正 maya.py と同じ min(2, 枚数))。
+       auto = 現状のカード構成 (config の gpu、無ければ全 usable) を維持する */
+    if (sec.tpFromGpus) {
+      const g = String(vals[sec.key] || "auto").trim();
+      const cur = String(W.cfgArgs.gpu || "auto").trim();
+      const base = g !== "auto" ? g : (cur !== "auto" ? cur : (W.cfgArgs.gpus || []).join(","));
+      const n = Math.max(1, base.split(",").filter(x => x.trim() !== "").length);
+      vals.tp = String(Math.min(2, n));
+      if (on) on.tp = true;
+      updates["--tp"] = vals.tp;
+    }
     chosen.push((sec.short || sec.label.split(" ")[0]) + " "
       + ((opt && opt.dataset.t1) || el.value)
       + (sec.perUser && !raw ? `×${par}並列` : ""));
@@ -1934,14 +1970,18 @@ $("#nt-skip").addEventListener("click", async () => {
    エンジンビルド / 速度計測も選択カードで走る (他カードを空けておける)。 */
 async function startModelJob() {
   if (!W.preJob || W.modelSkipped) { renderCal(); go("s-cal"); return; }
-  // 開始済み (「もどる」で戻ってきた等): 二重 POST せず進捗 / 調整へ
-  if (W.job && W.job.id) {
-    if (W.job.status === "running" || W.job.status === "queued") {
+  // 開始済み (「もどる」で戻ってきた等): 二重 POST せず進捗 / 調整へ。
+  // 対象はモデルジョブ (② の DL / モデル構成) だけ — ① インストールジョブ (done) を
+  // 「モデルジョブ完了」と誤認してダウンロードをスキップしない (2026-11-16 実害:
+  // 256G を選んでも POST されず調整画面へ飛んでいた)
+  const mj = (W.job && W.job.id && (W.kind === "download" || W.job.phase === "model")) ? W.job : null;
+  if (mj) {
+    if (mj.status === "running" || mj.status === "queued") {
       if (W.kind === "download") { renderDownload(); go("s-download"); }
       else { renderProgress(); go("s-progress"); }
       startPoll(); return;
     }
-    if (W.job.status === "done") { renderCal(); go("s-cal"); return; }
+    if (mj.status === "done") { renderCal(); go("s-cal"); return; }
   }
   const err = $("#nt-err");
   err.classList.add("hidden");

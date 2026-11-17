@@ -383,3 +383,12 @@ def test_frontend_models_escapes_and_confirms():
     assert "const force = (m.used_by || []).length > 0;" in src
     assert 'body: {id, force}' in src
     assert "if (m.running) return toast(" in src
+
+
+def test_download_form_catalog_greys_downloaded():
+    """モデル管理のダウンロードフォーム「対応モデルから選択」も取得済みは選択不可。"""
+    import llm_launcher
+
+    js = (Path(llm_launcher.__file__).parent / "static" / "js" / "views" / "models.js").read_text("utf-8")
+    assert '${s.downloaded ? " disabled" : ""}' in js
+    assert "(取得済み — 再利用は棚卸しから)" in js
