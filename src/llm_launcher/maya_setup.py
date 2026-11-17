@@ -118,8 +118,14 @@ for q, m in M.MODELS.items():
 glm_rec = next(iter(glm), "")
 if usable and all(g["vram_gb"] <= 24.5 for g in usable) and "Maya-S24" in glm:
     glm_rec = "Maya-S24"
-families["glm"] = {"title": "GLM-5.3-Flash", "models": glm, "contexts": list(M.CONTEXTS),
-                   "max_context": max(M.CONTEXTS), "multi_gpu": True, "rec": glm_rec,
+# GLM-5.3-Flash の trained context は 1M (GGUF ヘッダの context_length = 1048576)。エンジンは
+# KV streaming で latent cache を RAM に持つため 1M が動き、ダッシュボードも 1M まで出す。
+# 純正メニューの CONTEXTS は 128K で止まるが、owner 方針 (2026-11-17: 対応する全ての
+# バックエンド / モデルで 1M まで) で選択肢をここで拡張する。推奨は純正の式
+# (recommended_context) のまま — より大きい選択は UI が注記して従う (純正の対話と同じ立場)。
+glm_contexts = sorted(set(M.CONTEXTS) | {262144, 524288, 1048576})
+families["glm"] = {"title": "GLM-5.3-Flash", "models": glm, "contexts": glm_contexts,
+                   "max_context": max(glm_contexts), "multi_gpu": True, "rec": glm_rec,
                    "engine_ready": M.EXE.exists()}
 # ---- DeepSeek-V4.1-Flash-1017 (DS4_QUANTS: Maya quant / unsloth GGUF / EXL3 / abliterated)
 ds4 = {}

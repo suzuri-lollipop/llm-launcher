@@ -636,7 +636,8 @@ function mdStFillCtx() {
   const st = mdT();
   const fam = (st.families || {})[W.mdStFam] || {};
   const maxc = Number(fam.max_context) || 524288;
-  // コンテキスト一覧は家系が持つ (Maya: GLM 128K / DS4・MM3 1M / Qwen 256K が上限)
+  // コンテキスト一覧は家系が持つ (Maya: GLM・DS4・MM3 1M / Qwen 256K、
+  // Strata: Flash-Next・DS4.1 1M / Qwen3.6 256K が上限。owner 方針: 対応する全てで 1M まで)
   const src = (fam.contexts || []).length ? fam.contexts : (st.contexts || []);
   const cs = (src.length ? src : [8192, 32768, 65536, 131072, 204800, 262144])
     .filter(c => c <= maxc);
@@ -646,7 +647,7 @@ function mdStFillCtx() {
     W.mdStCtx = cs.includes(rec) ? rec : (cs.includes(131072) ? 131072 : cs[0]);
   W.mdStCtxRec = rec;
   $("#md-ctx").innerHTML = cs.map(c => `<option value="${c}"${c === W.mdStCtx ? " selected" : ""}>`
-    + `${c >= 1024 ? Math.round(c / 1024) + "K" : c}${c === rec ? " (推奨)" : c > rec ? " (大)" : ""}</option>`).join("");
+    + `${CF_TOK(c)}${c === rec ? " (推奨)" : c > rec ? " (大)" : ""}</option>`).join("");
   mdStHint();   // 推奨と選択の差はヒントに出す (サイズ変更後は ctx が後から変わるためここで再計算)
 }
 function mdStHint() {
@@ -686,7 +687,7 @@ function mdStHint() {
      24GB クラスで 512K はエンジン起動時の KV 確保に失敗しうる (2026-11-09 実測) */
   const rec = mdStRecCtx();
   if (W.mdStCtx > rec) {
-    parts.push(`※ コンテキスト ${Math.round(W.mdStCtx / 1024)}K はこの PC 向け推奨 ${Math.round(rec / 1024)}K より大きい — 起動時に VRAM/RAM 不足で失敗することがあります`);
+    parts.push(`※ コンテキスト ${CF_TOK(W.mdStCtx)} はこの PC 向け推奨 ${CF_TOK(rec)} より大きい — 起動時に VRAM/RAM 不足で失敗することがあります`);
   }
   /* own-path 家系 (Qwen3.6) は純正が単一 GPU 宣言 — 2 枚在っても分割できない */
   const cards = ((st.pc || {}).gpus || []).filter(g => g.usable);

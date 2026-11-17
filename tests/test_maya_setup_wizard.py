@@ -242,8 +242,8 @@ def test_wizard_copy_mentions_maya_model_step():
 FAKE_TABLES = {
     "available": True,
     "families": {
-        "glm": {"title": "GLM-5.3-Flash", "contexts": [8192, 32768, 65536, 131072],
-                "max_context": 131072, "multi_gpu": True, "rec": "Maya-S24", "engine_ready": False,
+        "glm": {"title": "GLM-5.3-Flash", "contexts": [8192, 32768, 65536, 131072, 262144, 524288, 1048576],
+                "max_context": 1048576, "multi_gpu": True, "rec": "Maya-S24", "engine_ready": False,
                 "models": {"Maya-S24": {"label": "GLM-5.3 · Maya-S24", "download_gb": 94.7,
                                         "vision": True, "config": "maya-maya-s24.json",
                                         "rec_context": 32768},
@@ -333,11 +333,14 @@ def test_build_argv_whitelist_and_rejection(monkeypatch, tmp_path: Path):
                                               "context": 131072})
     assert argv4[1:5] == ["--model", "cyber-frost", "--qwen-quant", "ud-iq2_xs"]
     assert cfg4 == "maya-qwen-ud-iq2_xs.json"
+    # GLM は trained 1M まで選択肢 (owner 方針: 対応する全てで 1M まで。純正 --context は任意値を受ける)
+    argv5, _ = maya_setup.build_argv(mod, {"family": "glm", "model": "Maya-S24", "context": 1048576})
+    assert argv5[argv5.index("--context") + 1] == "1048576"
     # ホワイトリスト外 (注入を試みる値も含む) は全て ValueError
     for bad in ({"family": "glm", "model": "../evil", "context": 32768},
                 {"family": "--x", "model": "Maya-S24", "context": 32768},
                 {"family": "nope", "model": "Maya-S24", "context": 32768},
-                {"family": "glm", "model": "Maya-S24", "context": 262144},   # GLM の上限超え
+                {"family": "glm", "model": "Maya-S24", "context": 204800},   # GLM の選択肢に無い
                 {"family": "glm", "model": "Maya-S24", "context": "32768 --yes"},
                 {"family": "glm", "model": "Maya-S24", "context": 32768, "vision": "-x"},
                 {"family": "deepseek", "model": "Maya-S24", "context": 65536}):  # 家系違いの quant
