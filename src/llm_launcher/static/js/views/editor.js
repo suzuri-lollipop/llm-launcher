@@ -224,6 +224,10 @@ function renderEditor() {
     </div>
     <div class="sec-h">ユーザーパラメータ (最小) <span class="muted" style="font-weight:400">(空 = JSON 側の値を使う)</span></div>
     ${minimalFields.map(fieldHtml).join("")}
+    <div class="fitem" id="ed-json-env-wrap" hidden>
+      <label class="f">JSON 側の環境変数 <span class="muted" style="font-weight:400">(読み取り専用 — キャリブレーションの勝者はここへ書き込まれます。上の override が優先)</span></label>
+      <pre class="cmdprev mono" id="ed-json-env" style="margin:0;white-space:pre-wrap"></pre>
+    </div>
   ` : `
     <div class="row" style="gap:8px;margin:2px 2px 10px">
       <button type="button" class="ghost" onclick="launchJsonExport()"><svg class=ic aria-hidden=true><use href=#i-file /></svg> 現在のパラメータから起動 JSON を作成 (Strata 方式へ切替)</button>
@@ -255,7 +259,7 @@ function renderEditor() {
         <textarea id="ed-extra" placeholder="多くの項目は上のリストから設定できます">${esc(d.extra_args)}</textarea>
       </div>
     </details>` : ""}
-    <label class="f" for="ed-env">環境変数 (KEY=VALUE を1行ずつ)</label>
+    <label class="f" for="ed-env">環境変数 (KEY=VALUE を1行ずつ)${launchCap && cfgPath ? ' <span class="muted" style="font-weight:400">(override のみ — キャリブ結果は JSON 側 env に記載)</span>' : ""}</label>
     <textarea id="ed-env" placeholder="CUDA_VISIBLE_DEVICES=0">${esc(envToText(d.env))}</textarea>
     <details class="adv" ${d.cwd||d.command||d.custom_only?"open":""}>
       <summary>高度な設定 (コマンド上書き / 作業ディレクトリ)</summary>
@@ -303,6 +307,19 @@ function renderEditor() {
   $("#ed-simple").addEventListener("change", collectDraft);
   ["ed-name","ed-note"].forEach(id => $(`#${id}`).addEventListener("input", collectDraft));
   schedulePreview();
+  loadJsonEnvPanel();
+}
+async function loadJsonEnvPanel() {
+  const d = S.editing;
+  const wrap = $("#ed-json-env-wrap"), pre = $("#ed-json-env");
+  if (!wrap || !pre || !d?.id) return;
+  try {
+    const r = await api(`/api/profiles/${d.id}/launch-json`);
+    const env = r.exists ? (r.launch?.env || {}) : {};
+    const text = envToText(env);
+    pre.textContent = text || "(空)";
+    wrap.hidden = !r.exists;
+  } catch (e) { wrap.hidden = true; }
 }
 async function launchJsonExport() {
   const d = S.editing;
@@ -346,6 +363,7 @@ async function launchJsonSave() {
               {method:"PUT", body:{text: $("#ed-launch-json").value}});
     toast("起動 JSON を保存しました");
     schedulePreview();
+    loadJsonEnvPanel();
   } catch (e) { toast("保存失敗: " + e.message); }
 }
 function launchJsonRelease() {
