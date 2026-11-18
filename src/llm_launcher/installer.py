@@ -308,8 +308,13 @@ def proxy_log_line() -> str:
     prox = proxy_from_env()
     if not prox:
         return ("プロキシ: 環境変数 (HTTP_PROXY / HTTPS_PROXY / ALL_PROXY) は未設定 — "
-                "ダイレクト接続になります")
-    return ("プロキシ: 環境変数から使用 — "
+                "ダイレクト接続になります (~/.bashrc 等に export があれば launcher 起動時に"
+                "補完します。変更後は launcher の再起動が必要です)")
+    from . import shellenv
+    fb = sorted(k for k in prox if k in shellenv.applied_keys())
+    src = "環境変数から使用" + (f" ({', '.join(k.upper() for k in fb)} は ~/.bashrc 等から補完)"
+                               if fb else "")
+    return ("プロキシ: " + src + " — "
             + ", ".join(f"{k.upper()}={_mask_proxy_val(v)}" for k, v in sorted(prox.items())))
 
 

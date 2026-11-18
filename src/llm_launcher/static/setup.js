@@ -905,6 +905,18 @@ function mdForceLocal() {
   $("#md-modes").classList.add("hidden");
   $("#md-later").classList.add("hidden");   // モデル無し完了はこのフローの目的外 (調整にモデルが要る)
 }
+/* 済みモデル一覧が空のとき「どこを探したか」を出す (純粋関数)。
+   サービスと端末で FREETOKEN_DATA_DIR / HF_HOME が違うと置き場がズレて
+   「モデルがあるのに見つからない」になる (2026-11-18 報告) — 探索先が
+   見えればズレに気づける。launcher は起動時に ~/.bashrc 等からこれらを
+   補完するが、変更後は再起動が要る。 */
+function mdDirsNote(hm) {
+  const dirs = [];
+  if (hm && hm.cache_dir) dirs.push(String(hm.cache_dir));
+  for (const d of (hm && hm.model_dirs) || [])
+    if (d && !dirs.includes(String(d))) dirs.push(String(d));
+  return dirs.length ? "探索先: " + dirs.join(" ・ ") : "";
+}
 async function renderModel() {
   mdForceLocal();
   if (W.backend === "strata") { await renderModelStrata(); return; }
@@ -913,8 +925,9 @@ async function renderModel() {
   const sp = spec();
   const ms = (sp && sp.supported_models) || [];
   W.mdList = ms;                                    // クリック時に include (取得ファイル) を引く
+  let hm = null;
   try {
-    const hm = await api("/api/hf-models");
+    hm = await api("/api/hf-models");
     /* 選択中バックエンドが読める形のモデルだけに出す
        (basalt = .basalt pack / llama.cpp = gguf / 他は汎用重みディレクトリ)。
        has_weights は .basalt を含まない (API 側で basalt 専用 pack と分離済み) なので、
@@ -956,12 +969,15 @@ async function renderModel() {
     : (ms.length
       ? "ダウンロードするか、この PC にあるモデルを使うかを選んでください。"
       : "対応モデル一覧がありません。repo id を直接入力するか、ダウンロード済みのモデルを使ってください。");
-  setInfo("#md-info", profileFlow()
+  const dirsNote = mdLocal.length ? "" : mdDirsNote(hm);
+  setInfo("#md-info", (profileFlow()
     ? "この PC にあるモデルだけを表示します。新しいダウンロードは行いません。"
-    : "モデルをダウンロードするか、この PC にあるモデルを使うかを選べます。ダウンロード済みのモデルは再取得しません。");
+    : "モデルをダウンロードするか、この PC にあるモデルを使うかを選べます。ダウンロード済みのモデルは再取得しません。")
+    + (dirsNote ? "\n" + dirsNote : ""));
   mdSync();
   if (profileFlow() && !mdLocal.length)
-    $("#md-dest").textContent = "ダウンロード済みのモデルが見つかりません。先に通常のセットアップでモデルをダウンロードしてください。";
+    $("#md-dest").textContent = "ダウンロード済みのモデルが見つかりません。先に通常のセットアップでモデルをダウンロードしてください。"
+      + (dirsNote ? " " + dirsNote : "");
 }
 $$("#md-modes input").forEach(i => i.addEventListener("change", mdSync));
 $("#md-sel").addEventListener("change", mdSync);

@@ -40,11 +40,21 @@ def main(argv: list[str] | None = None) -> None:
     import uvicorn
 
     from .app import create_app, lan_ip
+    from .shellenv import apply_shell_env, describe_applied
+
+    # サービスは .bashrc を読まない: プロキシ / モデル置き場 (HF_HOME /
+    # HF_HUB_CACHE / FREETOKEN_DATA_DIR) が環境に無いときだけシェル設定から
+    # 補完する (明示 env が優先)。create_app より前 = スキャン / 子プロセス /
+    # huggingface_hub のキャッシュ解決すべてに効く。
+    applied = apply_shell_env()
 
     root = find_root()
     app = create_app(root)
     print(f"llm-launcher v{__version__}")
     print(f"  project root : {root}")
+    if applied:
+        print(f"  shell env    : ~/.bashrc 等から補完 (サービスはシェル設定を読まないため): "
+              f"{describe_applied(applied)}")
     print(f"  local        : http://127.0.0.1:{args.port}")
     print(f"  network      : http://{lan_ip()}:{args.port}  <- スマホからはこのURL")
     auth = getattr(app.state, "auth", None)
