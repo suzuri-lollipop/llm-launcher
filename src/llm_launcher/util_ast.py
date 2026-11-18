@@ -56,6 +56,13 @@ def collect_module_constants(path):
                     if isinstance(e, ast.Constant) and isinstance(e.value, str)]
             if vals:
                 consts[name] = vals
+        elif isinstance(value, ast.Dict):
+            # alias maps (KV_DTYPE_ALIASES = {"fp8": "fp8_e4m3", ...}): the KEYS are
+            # the accepted spellings a choices expression unpacks
+            keys = [k.value for k in value.keys
+                    if isinstance(k, ast.Constant) and isinstance(k.value, str)]
+            if keys:
+                consts[name] = keys
         elif (isinstance(value, ast.Call) and value.args
                 and isinstance(value.args[0], ast.Constant)
                 and isinstance(value.args[0].value, str)):
