@@ -196,3 +196,45 @@ def test_cal_start_sends_mode_only_for_freetoken():
     # multi ジョブの step 名は進捗チップでも日本語化する (ダッシュボードと同じ)
     assert '"calibrate-multi": "multi 並行校正"' in JS
     assert '"calibrate-lookup": "lookup sweep"' in JS
+
+
+# ---------------------------------------------------------------- ② 済みモデルが空のときの探索先表示
+
+def test_empty_model_list_shows_search_dirs():
+    """「モデルがあるのにダウンロード済みが見つからない」(2026-11-18 報告:
+    サービスと端末で FREETOKEN_DATA_DIR / HF_HOME が違う) に気づけるよう、
+    済み一覧が空のときはスキャンした置き場を表示する。"""
+    fn = _block("async function renderModel()", '$$("#md-modes input").forEach')
+    assert "let hm = null;" in fn
+    assert 'const dirsNote = mdLocal.length ? "" : mdDirsNote(hm);' in fn
+    assert '+ (dirsNote ? "\\n" + dirsNote : "")' in fn      # ⓘ 情報へ
+    assert '+ (dirsNote ? " " + dirsNote : "")' in fn        # profile フローの案内へ
+
+
+def test_md_dirs_note_pure_function():
+    """mdDirsNote は HF キャッシュ + model_dirs を重複なく並べる (node 単体)。"""
+    import json
+    import re
+    import shutil
+    import subprocess
+    m = re.search(r"function mdDirsNote\(hm\) \{.*?\n\}", JS, re.S)
+    assert m, "mdDirsNote が setup.js に無い"
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+        pytest.skip("node not available")
+    cases = [
+        {"hm": {"cache_dir": "/home/u/.cache/huggingface/hub",
+                "model_dirs": ["/proj/module/fork/Freetoken-data/models"]},
+         "want": "探索先: /home/u/.cache/huggingface/hub ・ /proj/module/fork/Freetoken-data/models"},
+        {"hm": {"cache_dir": "/a", "model_dirs": ["/a", "/b"]},
+         "want": "探索先: /a ・ /b"},                       # 重複は畳む
+        {"hm": None, "want": ""},
+        {"hm": {}, "want": ""},
+    ]
+    script = (m.group(0) + "\nconst items = JSON.parse(require('fs').readFileSync(0,'utf8'));\n"
+              "console.log(JSON.stringify(items.map(it => mdDirsNote(it.hm))));")
+    out = subprocess.run([node, "-e", script],
+                         input=json.dumps(cases, ensure_ascii=False),
+                         capture_output=True, text=True, check=True)
+    assert json.loads(out.stdout) == [c["want"] for c in cases]
