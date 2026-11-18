@@ -1362,6 +1362,71 @@ def test_freetoken_multi_job_writes_full_knob_set(tmp_path):
     assert saved["X"] == "1"
 
 
+def test_freetoken_multi_moe_winner_appends_launch_argv(tmp_path):
+    """MoE 戦略勝者は起動 JSON の argv へ書く (env では argv を運べない)。
+    古い戦略フラグは重複でなく置換され、無関係フラグは残る。"""
+    j = _write_launch_json(tmp_path, prof_id="p_ftm2",
+                           argv=["-m", "freetoken", "--port", "1919", "--tp-size", "2",
+                                 "--moe-strategy", "offload"])
+    prof = _ft_multi_profile()
+    prof["values"]["config"] = str(j)
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+
+    async def fake_step(job, step):
+        name, doc, env = _multi_doc(job["id"], "none")
+        doc["chosen"]["moe"] = {"strategy": "hybrid", "applied": True,
+                                "argv": ["--moe-strategy", "hybrid"]}
+        (tmp_path / "data" / "calibrations" / name).write_text(json.dumps(doc))
+        return 0, ""
+    mgr._run_step = fake_step
+
+    async def go():
+        job = await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert job["report"]["moe"] == "hybrid"
+    argv = json.loads(j.read_text())["argv"]
+    assert argv.count("--moe-strategy") == 1
+    assert argv[argv.index("--moe-strategy") + 1] == "hybrid"
+    assert "--tp-size" in argv
+
+
+def test_freetoken_multi_moe_not_applied_keeps_launch_argv(tmp_path):
+    """勝っても stack 検証で落ちた (applied=False) 戦略は argv に書かない。"""
+    j = _write_launch_json(tmp_path, prof_id="p_ftm2",
+                           argv=["-m", "freetoken", "--port", "1919",
+                                 "--moe-strategy", "offload"])
+    prof = _ft_multi_profile()
+    prof["values"]["config"] = str(j)
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+
+    async def fake_step(job, step):
+        name, doc, env = _multi_doc(job["id"], "none")
+        doc["chosen"]["moe"] = {"strategy": "hybrid", "applied": False,
+                                "argv": ["--moe-strategy", "hybrid"]}
+        (tmp_path / "data" / "calibrations" / name).write_text(json.dumps(doc))
+        return 0, ""
+    mgr._run_step = fake_step
+
+    async def go():
+        job = await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert job["report"]["moe"] is None
+    argv = json.loads(j.read_text())["argv"]
+    assert argv[argv.index("--moe-strategy") + 1] == "offload"
+
+
 def test_freetoken_multi_none_winner_still_clears_stale_knobs(tmp_path):
     prof = _ft_multi_profile()
     _seed_profiles(tmp_path, prof)
