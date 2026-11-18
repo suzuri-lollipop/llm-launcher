@@ -36,7 +36,7 @@ from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         cached_tags, clone_exists, current_ref, fork_tags, install_tool)
 from .models import (ModelError, build_inventory, delete_entry, hf_hub_cache_dir,
-                     scan_data_models, scan_hf_cache)
+                     profile_cache_misses, scan_data_models, scan_hf_cache)
 from . import maya_setup
 from . import oom
 from . import parallel_metrics as pm
@@ -2028,6 +2028,10 @@ def create_app(root: Path) -> FastAPI:
                 for mr in dirs:
                     if mr is not None:
                         data["models"] += scan_data_models(mr)
+                # プロファイルが実際にロードしているキャッシュ配下のモデルは、
+                # スキャン規約から外れた置き場でも一覧に出す (取りこぼし保険)
+                data["models"] += profile_cache_misses(
+                    root, profiles_store.load(), Path(data["cache_dir"]), data["models"])
                 data["model_dirs"] = [str(mr) for mr in dirs if mr is not None and mr.is_dir()]
                 return data
             hf_cache_state["data"] = await asyncio.to_thread(_scan)

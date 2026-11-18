@@ -128,6 +128,55 @@ def _dir_weights(d: Path, max_files: int = 400) -> tuple[bool, list[dict[str, An
     return has_weights, gguf
 
 
+def _weights_in(d: Path, max_files: int = 400) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]]]:
+    """モデルディレクトリの重み判定 (汎用重み + GGUF + Basalt pack)。
+
+    直下に重みが無ければ 1 階層だけ下も見る (GGUF のサブフォルダ / シャード
+    ディレクトリ等)。名前は d からの相対 (ネスト時は "sub/file" — ウィザードの
+    pack パス結合 snapshot + "/" + name がそのまま効く)。
+    has_weights は「汎用重み」の有無 — .basalt は Basalt 専用 pack で他バック
+    エンドは読めないため含めない (含めると FreeToken 等の「ダウンロード済み
+    モデル」に basalt pack が漏れる)。
+    hf 2.x の共有 blob (snapshots が hub/blobs への symlink) は is_file/stat が
+    実体を辿るのでそのまま判定できる。"""
+    has_weights = False
+    gguf: list[dict[str, Any]] = []
+    basalt: list[dict[str, Any]] = []
+
+    def scan_dir(sd: Path, prefix: str) -> None:
+        nonlocal has_weights
+        try:
+            entries = sorted(sd.iterdir())
+        except OSError:
+            return
+        for f in entries:
+            try:
+                if not f.is_file():
+                    continue
+                size = f.stat().st_size
+            except OSError:
+                continue
+            suf = f.suffix.lower()
+            if suf in _WEIGHT_SUFFIXES and size > _WEIGHT_MIN:
+                has_weights = True
+            if suf == ".gguf":
+                gguf.append({"name": prefix + f.name, "size": size})
+            if suf == ".basalt":
+                basalt.append({"name": prefix + f.name, "size": size})
+            if len(gguf) + len(basalt) >= max_files:
+                return
+
+    scan_dir(d, "")
+    if not (has_weights or gguf or basalt):
+        try:
+            subs = sorted(c for c in d.iterdir() if c.is_dir())
+        except OSError:
+            subs = []
+        for c in subs:
+            scan_dir(c, c.name + "/")
+    return has_weights, gguf, basalt
+
+
 # Maya のモデル置き場で「モデルではない」構成要素ディレクトリ (drafter / vision エンコーダ)。
 # これらは pack の付属物で、単独のモデルとして棚卸しに出さない (純正 maya.py の置き場規約)。
 _MAYA_COMPONENT_DIRS = {"dspark", "vision", "mmproj"}
@@ -182,23 +231,8 @@ def scan_data_models(models_root: Path, max_files: int = 400) -> list[dict[str, 
     for d in models_root.iterdir():
         if not d.is_dir():
             continue
-        gguf: list[dict[str, Any]] = []
-        basalt: list[dict[str, Any]] = []
-        has_weights = False
+        has_weights, gguf, basalt = _weights_in(d, max_files)
         try:
-            for f in sorted(d.iterdir()):
-                if not f.is_file():
-                    continue
-                size = f.stat().st_size
-                suf = f.suffix.lower()
-                if suf in _WEIGHT_SUFFIXES and size > _WEIGHT_MIN:
-                    has_weights = True
-                if suf == ".gguf":
-                    gguf.append({"name": f.name, "size": size})
-                if suf == ".basalt":
-                    basalt.append({"name": f.name, "size": size})
-                if len(gguf) + len(basalt) >= max_files:
-                    break
             mtime = d.stat().st_mtime
         except OSError:
             continue
@@ -243,30 +277,22 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
                 return 0
         snaps.sort(key=snap_mtime, reverse=True)
         wanted = refs.get("main") or refs.get("master")
-        chosen = next((s for s in snaps if wanted and s.name.startswith(wanted)), snaps[0])
-        revision = next((k for k, v in refs.items() if chosen.name.startswith(v)), None) or (wanted or "")[:10] or "main"
-        gguf: list[dict[str, Any]] = []
-        basalt: list[dict[str, Any]] = []
-        has_weights = False
-        try:
-            for f in sorted(chosen.iterdir()):
-                if not f.is_file():
-                    continue
-                size = f.stat().st_size
-                suf = f.suffix.lower()
-                # has_weights は「汎用重み」の有無 (scan_data_models と同じ基準)。
-                # .basalt は Basalt 専用 pack で他バックエンドは読めないため含めない
-                # (含めると FreeToken 等の「ダウンロード済みモデル」に basalt pack が漏れる)
-                if suf in _WEIGHT_SUFFIXES and size > _WEIGHT_MIN:
-                    has_weights = True
-                if suf == ".gguf":
-                    gguf.append({"name": f.name, "size": size})
-                if suf == ".basalt":        # Basalt の pack (単一ファイル = モデル正体)
-                    basalt.append({"name": f.name, "size": size})
-                if len(gguf) + len(basalt) >= max_files:
-                    break
-        except OSError:
-            pass
+        preferred = next((s for s in snaps if wanted and s.name.startswith(wanted)), None)
+        # 全 snapshot を評価して「重みのあるもの」を選ぶ。refs/main が空 /
+        # config だけの snapshot を指していても、別 rev に重みがあればそちらを
+        # 出す — プロファイルが旧 rev の snapshot で稼働中なのに一覧に出ない
+        # (2026-11-18 報告) を防ぐ。重みがどこにも無ければ従来どおり
+        # refs/main 優先 / mtime 最新 (config だけの repo も一覧には残す)。
+        evaluated = [(s, *_weights_in(s, max_files)) for s in snaps]
+        with_weights = [t for t in evaluated if t[1] or t[2] or t[3]]
+        if with_weights:
+            chosen, has_weights, gguf, basalt = next(
+                (t for t in with_weights if preferred is not None and t[0] == preferred),
+                with_weights[0])
+        else:
+            chosen = preferred or snaps[0]
+            has_weights, gguf, basalt = next(t[1:] for t in evaluated if t[0] == chosen)
+        revision = next((k for k, v in refs.items() if chosen.name.startswith(v)), None) or chosen.name[:10] or "main"
         entries.append((snap_mtime(chosen), {
             "repo_id": repo_id,
             "snapshot": str(chosen),
@@ -280,6 +306,55 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
     entries.sort(key=lambda t: t[0], reverse=True)
     result["models"] = [m for _, m in entries]
     return result
+
+
+def profile_cache_misses(root: Path, profiles: list[dict[str, Any]],
+                         cache_base: Path, known: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """プロファイルが HF キャッシュ配下を参照しているのにスキャンが拾わなかった
+    モデルの保険エントリ (一覧 API 専用)。
+
+    「稼働中プロファイルが .cache からロードできているのに、プロファイル作成 /
+    セットアップのダウンロード済み一覧に出ない」(2026-11-18 報告) への最終防衛線。
+    scan_hf_cache は models--* / snapshots 規約を見るが、local_dir 配置等で
+    規約から外れた置き場でも、プロファイルが実際に使える重みディレクトリなら
+    一覧に出す。重みが実在するディレクトリだけを対象にする (空参照は出さない)。
+    削除単位の解決は棚卸し (build_inventory) の責務なのでここには含めない。"""
+    base = cache_base.resolve()
+    known_paths = {str(m.get("snapshot") or "") for m in known}
+    known_repos = {str(m.get("repo_id") or "") for m in known}
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for p in profiles:
+        for ref in profile_model_refs(root, p):
+            rp = Path(ref).expanduser()
+            if rp.is_file():
+                rp = rp.parent
+            try:
+                rel = rp.resolve().relative_to(base)
+            except (ValueError, OSError):
+                continue
+            if not rp.is_dir() or str(rp) in known_paths or str(rp) in seen:
+                continue
+            has_weights, gguf, basalt = _weights_in(rp)
+            if not (has_weights or gguf or basalt):
+                continue
+            parts = rel.parts
+            if parts[0].startswith("models--"):
+                repo_id = parts[0][len("models--"):].replace("--", "/", 1)
+            else:
+                repo_id = "/".join(parts[:2]) if len(parts) >= 2 else parts[0]
+            if repo_id in known_repos:
+                continue        # 同 repo が既に一覧にあればそれで足りる
+            seen.add(str(rp))
+            try:
+                mtime = rp.stat().st_mtime
+            except OSError:
+                mtime = 0
+            out.append({"repo_id": repo_id, "snapshot": str(rp), "revision": "",
+                        "has_weights": has_weights, "gguf": gguf, "basalt": basalt,
+                        "source": "cache", "mtime": mtime, "size_bytes": dir_size(rp)})
+    out.sort(key=lambda m: m["mtime"], reverse=True)
+    return out
 
 
 # ---------------------------------------------------------------------------
