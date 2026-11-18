@@ -295,6 +295,15 @@
         <span class="txt"><span class="t1">今すぐ実行する</span>
         <span class="t2" id="ca-time">FreeToken は目安 3〜4 時間かかります</span></span></label>
     </div>
+    <!-- FreeToken 系の校正対象 (single / multi) — ダッシュボードの「キャリブレーション」
+         タブと同じ問い。「今すぐ実行する」を選んだときだけ出す -->
+    <div class="cf-group hidden" id="ca-mode-group">
+      <div class="field sel-fixed"><select id="ca-mode">
+        <option value="auto" selected>single: 単一ストリーム (投機モード自動選定)</option>
+        <option value="multi">multi: 並行 prefill (piped/mixed 腕比較)</option>
+      </select><label for="ca-mode">校正対象 <button type="button" class="info" id="ca-mode-info" aria-label="くわしい説明"></button></label></div>
+      <div class="cf-hint" id="ca-mode-hint"></div>
+    </div>
     <div class="foot-btns">
       <button class="btn-text btn-back" data-back><span class="arr">←</span>もどる</button>
       <span class="spacer"></span>

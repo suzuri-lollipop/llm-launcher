@@ -19,10 +19,14 @@
      ジョブの POST を含まないこと (POST は startModelJob に集約)
   2. ④ (nt-go / nt-skip) が preJob のとき startModelJob を呼ぶこと
   3. ジョブ完了 (finishJob) が preJob のとき紐付け (bind*) して ⑤ へ進むこと
-  4. ③ の pre-job 描画: config 未作成でも ② の表から質問を組み立て、ctx の
-     二重質問をしないこと。Maya Qwen は --parallel 非対応なので並列数を聞かない
+  4. ③ の pre-job 描画: config 未作成でも ② の表から質問を組み立て、② の面板で
+     ctx 選択済みの経路は二重質問しないこと。済みモデル採用 (config 無し =
+     ctx 未選択) は ③ で ctx を聞き、回答をジョブへ渡すこと。
+     Maya Qwen は --parallel 非対応なので並列数を聞かない
   5. 保存 (cf-go) は描画済みの質問セット (W.cfgRendered) を使うこと —
      Maya GLM の「GPU の使い方」を静的 RUNCFG の --tp として書かない
+  6. ⑤ は FreeToken 系の校正対象 (single / multi) をダッシュボードと同じ問いで
+     聞き、選択を API へ送ること (他バックエンドは mode を送らない)
 """
 from __future__ import annotations
 
@@ -111,8 +115,10 @@ def test_pre_job_config_questions_built_from_table():
     # config 未作成でも ② の表から GPU / 家系情報を組み立てる
     assert "if (W.preJob && mdTableBackend() && W.tableReq) {" in fn
     assert "tp_ok: isMaya && (W.tableReq.family === \"deepseek\"" in fn
-    # ctx は ② で選択済み — 二重に聞かない
-    assert "if (W.preJob && mdTableBackend()) delete cfg.ctx;" in fn
+    # ctx を ② の面板で選択済みの経路は二重に聞かない。済みモデル採用
+    # (tableCtxPick = ctx 未選択) は ③ で聞く (2026-11-17 の選択不能修正)
+    assert "if (W.preJob && mdTableBackend() && !W.tableCtxPick) delete cfg.ctx;" in fn
+    assert "if (W.preJob && mdTableBackend() && W.tableCtxPick && cfg.ctx && W.tableReq) {" in fn
     # Qwen は --parallel 非対応 (2 以上で起動が check_parallel で失敗する)
     assert 'if (W.cfgArgs.family === "qwen") delete cfg.par;' in fn
     # 保存 / 推奨 / 補足は描画済みの定義を使う (GLM の GPU 回答を --tp と誤記しない)
@@ -151,3 +157,42 @@ def test_start_model_job_ignores_the_install_job():
     assert 'const mj = (W.job && W.job.id && (W.kind === "download" || W.job.phase === "model")) ? W.job : null;' in fn
     assert 'if (mj.status === "done") { renderCal(); go("s-cal"); return; }' in fn
     assert 'if (mj.status === "running" || mj.status === "queued") {' in fn
+
+
+# ---------------------------------------------------------------- ⑤ 校正対象 (FreeToken single / multi)
+
+def test_cal_step_asks_single_or_multi_for_freetoken():
+    """FreeToken 系の ⑤ はダッシュボードの「キャリブレーション」タブと同じ
+    校正対象の問い (single / multi) を出す。これが無いとウィザードは常に
+    single (auto) で走り、multi (並行 prefill 腕比較) はダッシュボードから
+    しか実行できなかった (2026-11-17 報告: fork のセットアップの調整に
+    シングル / マルチの問いが無い)。"""
+    assert 'id="ca-mode-group"' in HTML and 'id="ca-mode"' in HTML
+    # 選択肢はダッシュボードの #cal-mode と同じ文言・同じ値 (auto / multi)
+    for opt in ('<option value="auto" selected>single: 単一ストリーム (投機モード自動選定)</option>',
+                '<option value="multi">multi: 並行 prefill (piped/mixed 腕比較)</option>'):
+        assert opt in HTML, opt
+    dash = (STATIC / "js" / "views" / "calibrate.js").read_text("utf-8")
+    assert '<option value="auto">single: 単一ストリーム (投機モード自動選定)</option>' in dash
+    assert '<option value="multi">multi: 並行 prefill (piped/mixed 腕比較)</option>' in dash
+    cal = _block("async function renderCal()", '$("#ca-go").addEventListener')
+    assert 'const calIsFt = () => W.backend === "freetoken" || W.backend === "freetoken-fork";' in cal
+    # 「今すぐ実行する」選択中だけ出す (スキップ時は隠す)
+    assert '$("#ca-mode-group").classList.toggle("hidden", !(calIsFt() && run));' in cal
+    assert '$("#ca-mode").addEventListener("change", syncCalTime);' in cal
+    assert 'if (calIsFt()) setInfo("#ca-mode-info",' in cal
+    # 所要時間目安はモードで出し分け (single 3〜4 時間 / multi 15〜25 分)
+    assert "multi は目安 15〜25 分かかります (4 腕 × エンジン再起動)" in cal
+    assert "FreeToken は目安 3〜4 時間かかります (全部測りの 1 発)" in cal
+
+
+def test_cal_start_sends_mode_only_for_freetoken():
+    """⑤ の開始は FreeToken 系だけ mode を送る (auto / multi は API が
+    FreeToken 系専用で検証するため、他バックエンドでは送らない)。"""
+    cago = _block('$("#ca-go").addEventListener("click"', "/* ---------------------------------------------------------------- 完了 */")
+    assert "const body = { profile_id: p.id, restart_after: false };" in cago
+    assert 'if (calIsFt()) body.mode = $("#ca-mode").value;' in cago
+    assert 'api("/api/calibrations", { method: "POST", body });' in cago
+    # multi ジョブの step 名は進捗チップでも日本語化する (ダッシュボードと同じ)
+    assert '"calibrate-multi": "multi 並行校正"' in JS
+    assert '"calibrate-lookup": "lookup sweep"' in JS
