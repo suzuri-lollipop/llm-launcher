@@ -96,6 +96,8 @@ const INS_STEPS = { clone: "リポジトリを取得", branch: "ブランチ切�
 const CAL_STEPS = { prepare: "調整の準備", auto: "最適構成を自動で探す", lookup: "キャッシュを引く",
                     sweep: "実際に測る", create: "プロファイルを更新", adjust: "調整を反映",
                     calibrate: "実測調整", speed: "drafter 速度計測",
+                    "calibrate-lookup": "lookup sweep", "calibrate-multi": "multi 並行校正",
+                    "phase-mtp": "MTP 実測", "phase-lookup": "lookup 実測", tournament: "決勝",
                     restart: "サーバーを起動し直す" };
 const STEP_NAMES = { queued: "待機しています", running: "", done: "完了", failed: "失敗",
                      cancelled: "中断しました", lost: "サーバー再起動で中断されました" };
@@ -128,6 +130,10 @@ const W = {
      preJob=false のまま従来の経路を通る。 */
   preJob: false, modelSkipped: false,
   dlReq: null, tableReq: null,
+  /* 設定先行フローでコンテキストを ② で選んでいない (config 無し済みモデルの採用)
+     とき true — ③ でコンテキスト長を聞き、回答を tableReq.context に反映して
+     セットアップジョブへ渡す (② の面板を選んだ経路は false = 二重に聞かない) */
+  tableCtxPick: false,
   pendingUpdates: null, setupGpus: "", setupParallel: 0,
   cfgRendered: null,      // ③ が実際に描画した質問セット (家系別の削除・差し替え込み)
   summary: [],
@@ -658,11 +664,11 @@ const MD_LABELS = {
   strata: [["モデルをダウンロードする", "家系・サイズ・コンテキスト長を選びます",
             "Strata 本体のセットアップ手順が走り、ダウンロードと起動設定の作成までこの画面で完了します。シェルの準備は不要です。中断しても続きから再開できます。"],
            ["ダウンロード済みのモデルを使う", "この PC に重みがあるモデルから選びます",
-            "再取得はありません。起動設定が無い場合は、純正セットアップが設定だけ作成します。"]],
+            "再取得はありません。コンテキスト長は稼働設定で選びます。起動設定が無い場合は、純正セットアップが設定だけ作成します。"]],
   maya: [["モデルをダウンロードする", "家系・サイズ・コンテキスト長を選びます",
           "Maya 本体のセットアップ手順が走り、エンジンビルド・ダウンロード・起動設定の作成までこの画面で完了します。シェルの準備は不要です。中断しても続きから再開できます。"],
          ["ダウンロード済みのモデルを使う", "この PC に重みがあるモデルから選びます",
-          "再取得はありません。起動設定が無い場合は、純正セットアップが設定だけ作成します。"]],
+          "再取得はありません。コンテキスト長は稼働設定で選びます。起動設定が無い場合は、純正セットアップが設定だけ作成します。"]],
 };
 const mdTableBackend = () => W.backend === "maya" || W.backend === "strata";
 function setMdModeLabels(backend) {
@@ -1028,7 +1034,7 @@ async function renderModelTable(backend) {
     ? "この PC にダウンロード済みのモデルから選んでください。"
     : "家系・サイズ・コンテキスト長を選んでください。";
   setInfo("#md-info", profileFlow()
-    ? "重み検証済みのモデルから選びます。起動設定が無い場合は純正セットアップが設定だけ作成します。再ダウンロードはありません。"
+    ? "重み検証済みのモデルから選びます。コンテキスト長は次の稼働設定で選びます。起動設定が無い場合は純正セットアップが設定だけ作成します。再ダウンロードはありません。"
     : (isMaya
       ? "家系は GLM / DeepSeek / MiniMax / Qwen から選びます。Maya 本体のセットアップ手順がこのまま走り、エンジンビルド・ダウンロード・起動設定の作成まで完了します。ダウンロード済みのモデルは「ダウンロード済みのモデルを使う」から再取得なしで選べます。"
       : "Strata 本体のセットアップ手順がこのまま走り、ダウンロードから起動設定の作成まで完了します。ダウンロード済みのモデルは「ダウンロード済みのモデルを使う」から再取得なしで選べます。"));
@@ -1061,6 +1067,7 @@ function mdCaptureTable() {
   W.tableReq = { family: W.mdStFam, model: W.mdStModel,
                  context: parseInt($("#md-ctx").value, 10) || (W.backend === "maya" ? 32768 : 131072),
                  vision };
+  W.tableCtxPick = false;   // コンテキストは ② の面板で選択済み — ③ では聞かない
   W.dlReq = null;
   return true;
 }
@@ -1089,6 +1096,7 @@ async function mdAdoptLocalTable() {
               repo_id: "", config_name: c.name, model: x.fam + "/" + x.model,
               result: { config: c.file, parallel: c.parallel || null } };
     W.preJob = false; W.modelSkipped = false;
+    W.tableCtxPick = false;   // 既存 config の値を ③ がプリフィルする (ジョブなし)
     W.cfgProfId = null; W.cfgProfNew = false;
     W.summary.push({ ok: true, t: `ダウンロード済みの ${x.label} を使用します` });
     renderConfig(); go("s-config");
@@ -1097,10 +1105,14 @@ async function mdAdoptLocalTable() {
   /* config が無い (削除 / 別経路 / 共有 config の quant_key が別の量子化) ときは
      純正セットアップジョブで検証・config 作成だけ走らせる (重みが在るので
      ダウンロードは起きない)。profile モードも同じ — 一覧は重み基準なので
-     「config が無い = 選べない」にはしない (2026-11-16 実害の修正) */
+     「config が無い = 選べない」にはしない (2026-11-16 実害の修正)。
+     コンテキストはこの経路ではまだ選んでいない — 推奨を既定として ③ で聞く
+     (tableCtxPick)。profile モードは ② が済みモデル一覧だけなので、ここで
+     聞かないとコンテキスト長を選ぶ画面がどこにも無くなる (2026-11-17 報告) */
   const d = (f.models || {})[x.model] || {};
   W.tableReq = { family: x.fam, model: x.model,
                  context: d.rec_context || (W.backend === "maya" ? 32768 : 131072), vision: "" };
+  W.tableCtxPick = true;
   W.dlReq = null;
   mdEnterSettings();
 }
@@ -1136,6 +1148,7 @@ $("#md-start").addEventListener("click", async () => {
                 allow_patterns: (entry && entry.include) || [],
                 max_kbps: parseInt($("#md-speed").value, 10) || 0 };
     W.tableReq = null;
+    W.tableCtxPick = false;
   }
   mdEnterSettings();
 });
@@ -1143,6 +1156,7 @@ $("#md-start").addEventListener("click", async () => {
 $("#md-later").addEventListener("click", () => {
   W.modelSkipped = true; W.preJob = true;
   W.dlReq = null; W.tableReq = null;
+  W.tableCtxPick = false;
   W.pendingUpdates = null; W.setupGpus = ""; W.setupParallel = 0;
 });
 function renderDownload() {
@@ -1342,11 +1356,13 @@ function cfKvBytes(kv) {
 /* backend + 環境 + 現在の選択 + Strata / Maya エンジン値 → 質問ごとの推奨 {v, why}。
    sel = {ctx, kv, tp, par, gpu} (ctx は freetoken では 1 人あたり)、
    engine = {parallel, recContext} (strata / maya の config 由来。無ければ null)。
+   ctxList = 実際に描画するコンテキスト選択肢 (数値の昇順配列。省略時は CF_CTX
+   相当 — 家系ホワイトリストを描く経路ではその範囲内で推奨する)。
    予算則 (2026-11-15 方針): VRAM は LLM 専用なので、選択中カードの VRAM 全量を
    KV 予算の上限とする (一律の重み予約は計算外 — 重みの配置と起動時の実空き検査は
    エンジンの仕事。Strata は config の parallel / rec_context が常に優先)。
    推奨は上限目安であり、最適値はキャリブレーション (⑤) が実測する。 */
-function cfRecommend(backend, hw, sel, engine) {
+function cfRecommend(backend, hw, sel, engine, ctxList) {
   sel = sel || {};
   const rec = { ctx: null, kv: null, par: null, out: null, vis: null };
   const ctxN = Number(sel.ctx) > 0 ? Number(sel.ctx) : 131072;
@@ -1392,9 +1408,13 @@ function cfRecommend(backend, hw, sel, engine) {
   /* ctx / par: basalt は KV を全員で共有 (総量 = ctx、並列で割る)。
      それ以外は 1 スロットあたり ctx × 並列数 が総 KV。 */
   const shared = backend === "basalt";
-  /* 選択肢は CF_CTX (32K〜1M) と揃える。basalt だけ 8K (既定) も持つ */
-  const ctxOpts = [32768, 131072, 262144, 524288, 1048576];
-  if (backend === "basalt") ctxOpts.unshift(8192);
+  /* 選択肢は CF_CTX (32K〜1M) と揃える。basalt だけ 8K (既定) も持つ。
+     呼び出し側が描画済みの選択肢 (家系ホワイトリスト等) を渡したらその中で推奨する
+     — 一覧に無い値を推奨タグしても選べない / ジョブが拒否するため */
+  const ctxOpts = (ctxList && ctxList.length)
+    ? ctxList.map(Number).filter(n => Number.isFinite(n) && n > 0).sort((a, b) => a - b)
+    : [32768, 131072, 262144, 524288, 1048576];
+  if (backend === "basalt" && !(ctxList && ctxList.length)) ctxOpts.unshift(8192);
   const ctxFit = ctxOpts.filter(c => (shared ? 1 : parNow) * c * kvB / 2 ** 30 <= budget);
   const ctxV = ctxFit.length ? ctxFit[ctxFit.length - 1] : ctxOpts[0];
   rec.ctx = { v: String(ctxV),
@@ -1484,11 +1504,18 @@ function cfSelNow() {
   }
   return sel;
 }
+/* ③ が実際に描画する ctx 選択肢 (家系別の出し分け込み)。推奨はこの範囲内で
+   計算する — 家系ホワイトリストを描く経路 (tableCtxPick) で一覧外の値を
+   推奨しないため。ctx を聞かない場合は null (= cfRecommend の既定リスト) */
+function cfCtxList() {
+  const cfg = W.cfgRendered || RUNCFG[W.backend] || {};
+  return cfg.ctx ? cfg.ctx.opts.map(o => Number(o[0])) : null;
+}
 /* 各選択肢の「 · 推奨」タグを現在の環境 + 選択に合わせて付け替える。
    ユーザーの選択自体は動かさない (タグと根拠の表示だけ)。 */
 function cfApplyRec() {
   const cfg = W.cfgRendered || RUNCFG[W.backend] || {};
-  const recs = cfRecommend(W.backend, W.hw, cfSelNow(), W.cfgEngine);
+  const recs = cfRecommend(W.backend, W.hw, cfSelNow(), W.cfgEngine, cfCtxList());
   for (const id of CF_ORDER) {
     const el = document.querySelector(`#cf-${id}`);
     if (!el || !cfg[id]) continue;
@@ -1719,6 +1746,8 @@ async function renderConfig() {
                   kv_ok: isMaya ? (W.tableReq.family === "glm" || W.tableReq.family === "qwen") : true,
                   tp_ok: isMaya && (W.tableReq.family === "deepseek"
                                     || (W.tableReq.family === "minimax" && W.tableReq.model === "exl3")) };
+    // コンテキスト未選択 (済みモデル採用) は ② が控えた推奨を現在値としてプリフィル
+    if (W.tableCtxPick) W.cfgArgs["--max-context"] = String(W.tableReq.context || "");
   } else if (Object.values(cfg).some(s => s && s.config)) {
     try {
       const r = (await api(`/api/profiles/${p.id}/config-args`)) || {};
@@ -1745,9 +1774,28 @@ async function renderConfig() {
                  : "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます",
                opts: [], cur: v => v, tpFromGpus: W.cfgArgs.tp_ok === true };
   }
-  /* 設定先行フロー: コンテキスト長は ② で既に選んでいる (セットアップが config に書く)。
-     ③ で二重に聞かない */
-  if (W.preJob && mdTableBackend()) delete cfg.ctx;
+  /* 設定先行フロー: コンテキスト長を ② の面板で選んだ経路はセットアップが
+     config に書くので ③ で二重に聞かない。済みモデル採用 (config 無し) は
+     ② で選んでいないので ③ で聞く (tableCtxPick — profile モードは ② が
+     済みモデル一覧だけでコンテキスト選択が無いため、ここで聞かないと
+     選ぶ画面がどこにも無くなる) */
+  if (W.preJob && mdTableBackend() && !W.tableCtxPick) delete cfg.ctx;
+  let ctxCs = null;   // ③ で ctx を聞く経路の家系ホワイトリスト (保存値の検証用)
+  if (W.preJob && mdTableBackend() && W.tableCtxPick && cfg.ctx && W.tableReq) {
+    /* 選択肢は ② の面板と同じ家系ホワイトリスト (表の contexts / max_context)。
+       一覧外の値はセットアップジョブ (build_argv) が拒否するので出さない。
+       既定 = 純正の推奨 (rec_context — ② が tableReq に控えた値) */
+    const st = mdT();
+    const fam = (st.families || {})[W.tableReq.family] || {};
+    const maxc = Number(fam.max_context) || 524288;
+    const src = (fam.contexts || []).length ? fam.contexts : (st.contexts || []);
+    const cs = (src.length ? src : [8192, 32768, 65536, 131072, 204800, 262144])
+      .filter(c => Number(c) <= maxc);
+    if (cs.length) {
+      cfg.ctx = { ...cfg.ctx, opts: cs.map(c => [String(c), CF_TOK(c), ""]) };
+      ctxCs = cs.map(Number);
+    }
+  }
   // GPU の使い方 (strata / maya の layer split 系) は純正と同じく usable 2 枚以上のときだけ質問する。
   // 選択肢は検出カードから組み立てる (単一カード / 全カード layer split / まかせる)
   if (cfg.tp && cfg.tp.flag === "gpu") {
@@ -1819,6 +1867,10 @@ async function renderConfig() {
     curs[id] = String(v[sec.key] ?? "")
       || (sec.config ? String(W.cfgArgs[sec.flag] || "") : "");
   }
+  /* 家系ホワイトリスト外の保存値 (③ 保存後に ② で家系を乗り換えた等) は
+     セットアップジョブへ送れない — ② が控えた推奨へ戻してプリフィルする */
+  if (ctxCs && curs.ctx && !ctxCs.includes(Number(curs.ctx)))
+    curs.ctx = String((W.tableReq || {}).context || "");
   // perUser 項目は保存値 (合計) を並列数で割って 1 人あたりとして見せる。
   // 並列数の初期値は保存値、無ければ環境ベースの推奨 (フォーム描画前なので DOM を使わない)
   const parInit = (() => {
@@ -1833,10 +1885,10 @@ async function renderConfig() {
       const jp = (W.job || {}).result || {};
       return Number((W.cfgEngine || {}).parallel) || Number(jp.parallel) || 1;
     }
-    const r0 = cfRecommend(W.backend, W.hw, cfSelFrom(curs, 1), W.cfgEngine);
+    const r0 = cfRecommend(W.backend, W.hw, cfSelFrom(curs, 1), W.cfgEngine, cfCtxList());
     return parseInt((r0.par || {}).v, 10) || parseInt((cfg.par.opts[0] || ["1"])[0], 10) || 1;
   })();
-  const recs = cfRecommend(W.backend, W.hw, cfSelFrom(curs, parInit), W.cfgEngine);
+  const recs = cfRecommend(W.backend, W.hw, cfSelFrom(curs, parInit), W.cfgEngine, cfCtxList());
   for (const id of ["ctx", "out", "kv", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     if (sec.flag === "gpu" && (W.cfgArgs.gpus || []).length < 2) continue;  // 純正同じく2枚以上でだけ聞く
@@ -1957,6 +2009,11 @@ $("#cf-go").addEventListener("click", async () => {
      「あとでする」(modelSkipped) はモデルなし完了を許す (後でプロファイル編集) */
   if (W.preJob) {
     W.pendingUpdates = updates;
+    /* コンテキスト (済みモデル採用で ③ が聞いた経路): 回答をセットアップジョブへ
+       渡す — ジョブ後の書き戻しだけだと、純正 setup が推奨値に対して計算した
+       rope scaling / KV 予約などがズレた config になる */
+    if (W.tableCtxPick && W.tableReq && vals.max_context)
+      W.tableReq.context = parseInt(vals.max_context, 10) || W.tableReq.context;
     W.setupGpus = String(vals.gpu_split || "");        // layer split 回答 → セットアップの --gpus
     W.setupParallel = parseInt(vals.parallel, 10) || 0; // Maya → セットアップの --parallel
   }
@@ -2276,6 +2333,13 @@ async function renderCal() {
     if (W.backend === "maya" && /^maya-(ds4|mm3|minimax|cyber-frost|qwen)/.test(cn))
       caInfo += "\nDSpark / MTP drafter の速度計測もここで行います。スキップすると drafter なしで起動します。後からダッシュボードのキャリブレーションで実行できます。";
     setInfo("#ca-info", caInfo);
+    /* FreeToken 系: 校正対象 (single / multi) の説明 — ダッシュボードの
+       「キャリブレーション」タブと同じ問いをウィザードでも出す (2026-11-17 報告:
+       セットアップの調整にシングル / マルチの問いが無かった) */
+    if (calIsFt()) setInfo("#ca-mode-info",
+      "single: MTP / lookup を単一ストリームで実測 (自動選定) し、勝者の --speculative と env を起動構成へ書き戻します。\n"
+      + "multi: none / mixed / piped / piped+short-first を並行ワークロードで実測し、勝者の並行ノブ一式 (不要なら明示的 0) を起動構成へ書き戻します。\n"
+      + "校正対象はダッシュボードの「キャリブレーション」から実行するときにも選べます。");
     if (!canCal) $("#ca-sub").textContent = "調整はキャリブレーション権限のあるアカウントで実行できます。ダッシュボードの「キャリブレーション」から後で実行できます。";
     else if (calRunning) $("#ca-sub").textContent = "別のキャリブレーションが実行中です。完了後に開始できます。";
     else if (W.busyInstall) $("#ca-sub").textContent = "セットアップジョブが実行中です。完了後に調整を開始できます。";
@@ -2291,13 +2355,33 @@ async function renderCal() {
   if (!ok) $$("#ca-list input").find(i => i.value === "skip").checked = true;
   syncCalSel();
 }
+/* FreeToken 系 (本家 / fork) の校正対象: single (auto) / multi。
+   ダッシュボードの「キャリブレーション」タブの #cal-mode と同じ値を送る */
+const calIsFt = () => W.backend === "freetoken" || W.backend === "freetoken-fork";
+/* 選択中の校正対象に合わせて所要時間目安 (ca-time) と 1 行補足を出し分ける。
+   single = 全部測りの 1 発 (3〜4 時間) / multi = 4 腕 × エンジン再起動 (15〜25 分) */
+function syncCalTime() {
+  if (!calIsFt()) return;   // 他バックエンドの ca-time は renderCal が設定する
+  const multi = $("#ca-mode").value === "multi";
+  $("#ca-time").textContent = multi
+    ? "multi は目安 15〜25 分かかります (4 腕 × エンジン再起動)"
+    : "FreeToken は目安 3〜4 時間かかります (全部測りの 1 発)";
+  $("#ca-mode-hint").textContent = multi
+    ? "none / mixed / piped / piped+short-first を並行ワークロードで実測し、勝者の並行ノブ一式を書き戻します"
+    : "none / MTP / lookup から自動選定し、勝者の --speculative と env を書き戻します";
+}
 function syncCalSel() {
   $$("#ca-list .opt").forEach(o => {
     const i = o.querySelector("input"); o.classList.toggle("sel", i.checked);
   });
-  $("#ca-go").textContent = $$("#ca-list input").find(i => i.checked)?.value === "run" ? "調整を開始" : "設定を完了する";
+  const run = $$("#ca-list input").find(i => i.checked)?.value === "run";
+  $("#ca-go").textContent = run ? "調整を開始" : "設定を完了する";
+  /* 校正対象の問いは FreeToken 系で「今すぐ実行する」を選んだときだけ出す */
+  $("#ca-mode-group").classList.toggle("hidden", !(calIsFt() && run));
+  syncCalTime();
 }
 $$("#ca-list input").forEach(i => i.addEventListener("change", syncCalSel));
+$("#ca-mode").addEventListener("change", syncCalTime);
 $("#ca-go").addEventListener("click", async () => {
   const run = $$("#ca-list input").find(i => i.checked)?.value === "run";
   if (!run) {
@@ -2311,7 +2395,12 @@ $("#ca-go").addEventListener("click", async () => {
   const p = W.calPick || calPick(profs) || profs[0];
   if (!p) { W.summary.push({ ok: false, t: "調整対象のプロファイルがなく、スキップしました" }); renderDone(); go("s-done"); return; }
   try {
-    const job = await api("/api/calibrations", { method: "POST", body: { profile_id: p.id, restart_after: false } });
+    /* FreeToken 系は校正対象 (single=auto / multi) を送る — ダッシュボードの
+       「キャリブレーション」と同じ問い。他バックエンドは mode を送らない
+       (auto / single / multi は FreeToken 系専用で API が拒否する) */
+    const body = { profile_id: p.id, restart_after: false };
+    if (calIsFt()) body.mode = $("#ca-mode").value;
+    const job = await api("/api/calibrations", { method: "POST", body });
     W.kind = "cal"; W.job = job; W.logCursor = 0; W.logText = "";
     setProgChrome(calKicker(), "この PC に調整しています…");
     $("#pg-next").classList.add("hidden");
