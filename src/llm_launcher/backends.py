@@ -1196,6 +1196,85 @@ def replace_arg(argv: list[str], flag: str, value: str) -> list[str]:
     return out + [flag, value]
 
 
+def freetoken_yarn_override(values: dict[str, Any], root: Path) -> str | None:
+    """1人あたり ctx が checkpoint の trained 長を超えるときの --hf-overrides (YaRN) JSON。
+
+    エンジンの 1 リクエスト上限は rope テーブル (max_seq_len) で、--num-tokens は
+    KV プールの総量しか決めない — trained 超え (Flash-Next は 262144) は rope を
+    伸ばさないと選んだ長さが効かない (2026-11-18 報告: 512K を選んでも rope が入らない)。
+    factor = 1人あたり ctx / trained は Strata 純正 resolve_rope と同じ導出で、
+    fork エンジンの model card 1M レシピ (factor 4 / original 262144) と一致する。
+    --hf-overrides は config section 以外の値を丸ごと置換するため、checkpoint の
+    rope_parameters キー (rope_theta / mrope / partial_rotary_factor) は保ったまま
+    yarn キーだけ足す。scaling 済み checkpoint / rope を明示したユーザーの
+    hf_overrides / 読めない config は触らない (黙って上書きしない)。
+    """
+    mp = str(values.get("model_path") or "").strip()
+    if not mp:
+        return None
+    p = Path(mp)
+    if not p.is_absolute():
+        p = root / p
+    try:
+        cfg = json.loads((p / "config.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    text = cfg.get("text_config")
+    nested = isinstance(text, dict)
+    if not nested:
+        text = cfg
+    try:
+        trained = int(text.get("max_position_embeddings") or 0)
+    except (TypeError, ValueError):
+        return None
+    if trained <= 0:
+        return None
+    rope_key = "rope_parameters" if isinstance(text.get("rope_parameters"), dict) else "rope_scaling"
+    rope = text.get(rope_key) or {}
+    if not isinstance(rope, dict):
+        return None
+    rope_type = rope.get("rope_type") or rope.get("type") or "default"
+    if rope_type not in ("default", "none"):
+        return None    # scaling 済み checkpoint はエンジンの rope テーブルがもう伸びている
+    try:
+        total = int(float(str(values.get("num_tokens") or 0)))
+        par = max(1, int(float(str(values.get("max_running_requests") or 1))))
+    except (TypeError, ValueError):
+        return None
+    if total <= 0:
+        return None
+    # wizard は 1人あたり × 並列数 を num_tokens に書く。手動の端数は切り上げ。
+    ctx = -(-total // par)
+    if ctx <= trained:
+        return None
+    payload: dict[str, Any] = {}
+    cur = str(values.get("hf_overrides") or "").strip()
+    if cur:
+        try:
+            payload = json.loads(cur)
+        except ValueError:
+            return None    # 解析できないユーザー JSON は壊さない
+        if not isinstance(payload, dict):
+            return None
+        scopes = [payload]
+        if nested and isinstance(payload.get("text_config"), dict):
+            scopes.append(payload["text_config"])
+        if any("rope_parameters" in s or "rope_scaling" in s for s in scopes):
+            return None    # rope の明示指定はユーザーが正
+    new_rope = {k: v for k, v in rope.items() if k != "type"}
+    new_rope.update({"rope_type": "yarn", "factor": ctx / trained,
+                     "original_max_position_embeddings": trained})
+    if nested:
+        tc = dict(payload.get("text_config") or {})
+        tc[rope_key] = new_rope
+        payload["text_config"] = tc
+    else:
+        payload[rope_key] = new_rope
+    return json.dumps(payload, ensure_ascii=False)
+
+
 # ---------------------------------------------------------------------------
 # Basalt の設定 JSON (basalt_config.json / v2)
 # ---------------------------------------------------------------------------
@@ -1371,6 +1450,15 @@ def render_argv(backend: dict[str, Any], profile: dict[str, Any], *, python: str
             else:
                 if sval and field["flag"]:
                     argv += [field["flag"], sval]
+        # FreeToken fork: 1人あたり ctx が trained 超えなら YaRN で rope を伸ばす
+        # (--num-tokens は KV 総量だけで、エンジンの 1 リクエスト上限は rope テーブル)。
+        # --hf-overrides はフォーム項目に出さずここで導出する (起動 JSON に焼き込まれ、
+        # JSON 主体モードでは JSON が正なので上の分岐は触らない)。
+        if (backend.get("id") == "freetoken-fork" and not profile.get("custom_only")
+                and (on is None or bool(on.get("hf_overrides", True)))):
+            ho = freetoken_yarn_override(values, root) or str(values.get("hf_overrides") or "").strip()
+            if ho:
+                argv = replace_arg(argv, "--hf-overrides", ho)
     extra = (profile.get("extra_args") or "").strip()
     if extra:
         try:
