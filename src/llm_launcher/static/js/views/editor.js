@@ -330,7 +330,11 @@ async function launchJsonExport() {
     const r = await api(`/api/profiles/${d.id}/launch-json`, {method:"POST"});
     toast("起動 JSON を作成しました");
     await refresh(false);
-    go(routeUrl(S.tab, "editor", d.id), true);   // config 主体モードで開き直す (履歴は積まない)
+    /* 同一 URL への go() は syncDialog の same 判定で開き直されず、全項目モードの
+       古い draft (config="") が残る — そのまま保存すると config を空で上書きして
+       JSON 紐付けが振り出しに戻る (2026-11-18 報告: JSON に戻せない)。
+       最新プロファイルから draft を組み直して config 主体モードへ切り替える。 */
+    openEditorDom(d.id);
   } catch (e) { toast("作成失敗: " + e.message); }
 }
 /* Basalt: 現在のフォーム値から basalt_config.json (v2) を作り直して --config に繋ぐ */
@@ -343,7 +347,7 @@ async function basaltConfigExport() {
     const r = await api(`/api/profiles/${d.id}/config-json`, {method:"POST"});
     toast("basalt_config.json を作成しました: " + (r.path || ""));
     await refresh(false);
-    go(routeUrl(S.tab, "editor", d.id), true);   // config 値の入った状態で開き直す
+    openEditorDom(d.id);   // 最新プロファイルで開き直す (同一 URL の go() では再構築されない)
   } catch (e) { toast("作成失敗: " + e.message); }
 }
 async function launchJsonShow(btn) {
