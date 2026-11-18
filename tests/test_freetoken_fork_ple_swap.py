@@ -52,11 +52,15 @@ def test_fork_kv_field_options_match_table():
 
 
 def test_gen_fields_resolves_kv_registry_choices():
-    # 生成器が *(name for name in KV_FORMATS if name != NONE.name) を解決できること
-    # (解決できないと choices が auto だけに痩せ、量子化形式が UI から消える)
+    # 生成器が *(name for name in KV_FORMATS if name != NONE.name) と *KV_DTYPE_ALIASES
+    # の両方を解決できること (解決できないと choices が auto だけに痩せたり旧スペルが
+    # UI から消えたりする)。CLI が受理する全スペル = canonical 名 + エイリアス。
     from llm_launcher.gen_fields import gen_freetoken
     tbl = gen_freetoken(ROOT, "fork/freetoken")
-    assert tbl["--kv-cache-dtype"]["choices"] == ["auto", "fp8", "int8", "fp8_e4m3", "fp8_per_token_head", "int8_per_token_head"]
+    assert tbl["--kv-cache-dtype"]["choices"] == [
+        "auto", "fp8_e4m3", "fp8_per_token_head", "int8_per_token_head",
+        "fp8", "fp8e4m3", "e4m3", "float8_e4m3fn", "int8",
+    ]
 
 
 def test_fork_field_options_match_table():

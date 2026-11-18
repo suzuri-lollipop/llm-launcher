@@ -1025,6 +1025,30 @@ class CalibrationManager:
                                          for k, v in winner.items()))
         else:
             self._append_log(job, "chosen.env が空のため env は書き戻しません")
+        # MoE 戦略勝者: argv は env では運べないので起動 JSON の argv へ追記する。
+        # 古い戦略フラグ (両スペル) は置換のため剥がしてから勝者を足す。
+        moe = chosen.get("moe") or {}
+        moe_args = [str(x) for x in (moe.get("argv") or [])]
+        if moe.get("applied") and moe_args:
+            def patch_argv(doc: dict[str, Any]) -> None:
+                argv = [str(x) for x in (doc.get("argv") or [])]
+                out: list[str] = []
+                i = 0
+                while i < len(argv):
+                    t = argv[i]
+                    if t in ("--moe-strategy", "--moe-backend"):
+                        i += 2
+                        continue
+                    if t.startswith("--moe-strategy=") or t.startswith("--moe-backend="):
+                        i += 1
+                        continue
+                    out.append(t)
+                    i += 1
+                doc["argv"] = out + moe_args
+            if self._ft_launch_update(profile, patch_argv):
+                self._append_log(job, "起動 JSON argv に適用: " + " ".join(moe_args))
+            else:
+                self._append_log(job, "MoE 勝者があるが起動 JSON が無い (レガシープロファイル): argv は未適用")
         arms = doc.get("arms") or []
         best_line = "; ".join(
             f"{a.get('label')}: stall {a.get('stall_worst', 0):.2f}s "
@@ -1032,9 +1056,11 @@ class CalibrationManager:
         return {
             "tuned": True, "backend": "freetoken-multi", "applied": applied,
             "settings": winner if applied else {},
+            "moe": moe.get("strategy") if moe.get("applied") else None,
             "improvement_pct": round(float(chosen.get("gain_stall_s") or 0.0) * 10, 1),
             "latency": (f"chosen={chosen.get('label')} "
                         f"stall {chosen.get('stall_worst', 0):.2f}s "
+                        f"moe={moe.get('strategy') if moe.get('applied') else '-'} "
                         f"ttft={chosen.get('note', '')[:80]} | {best_line}")[:400],
         }
 

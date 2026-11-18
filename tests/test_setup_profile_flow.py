@@ -269,3 +269,55 @@ def test_downloaded_option_labels_frontload_quant():
     # 選択中の完全名はヒント (md-dest) にも出す
     sync = _block("function mdSync()", "async function renderModel()")
     assert '${sel.label} — ${sel.gb || "?"} GB · 再取得なし' in sync
+
+
+# ---------------------------------------------------------------- コンテキスト選択 (2026-11-17 修正)
+
+def test_adopt_without_config_asks_context_in_settings():
+    """config 無し済みモデルの採用はコンテキストを ② で選んでいない (profile
+    モードの ② は済みモデル一覧だけ)。それなのに ③ が「② で選択済み」として
+    ctx 質問を削除すると、コンテキスト長を選ぶ画面がどこにも無くなる
+    (2026-11-17 報告: strata でコンテキストサイズが選択できない)。
+    tableCtxPick で ③ に質問を残し、回答をセットアップジョブへ渡す。"""
+    fn = _block("async function mdAdoptLocalTable()", '$("#md-start").addEventListener')
+    # config 無し → ③ で聞く。推奨 (rec_context) は既定として控える
+    assert "W.tableCtxPick = true;" in fn
+    assert 'context: d.rec_context || (W.backend === "maya" ? 32768 : 131072), vision: "" };' in fn
+    # config 一致の即時採用はフラグを立てない (③ が既存 config をプリフィル)
+    assert "W.tableCtxPick = false;" in fn
+    # ② の面板で選択済みの経路 (ダウンロード択) は二重に聞かない
+    cap = _block("function mdCaptureTable()", "function mdEnterSettings()")
+    assert "W.tableCtxPick = false;" in cap
+
+
+def test_settings_ctx_question_uses_family_whitelist():
+    """③ が聞くコンテキストの選択肢は家系のホワイトリスト (② の面板と同じ表)。
+    一覧外の値はセットアップジョブの build_argv が拒否するので出さない。
+    プリフィルは ② が控えた推奨値 (rec_context)。"""
+    fn = _block("async function renderConfig()", '$("#cf-groups").addEventListener')
+    assert "if (W.preJob && mdTableBackend() && !W.tableCtxPick) delete cfg.ctx;" in fn
+    assert "if (W.preJob && mdTableBackend() && W.tableCtxPick && cfg.ctx && W.tableReq) {" in fn
+    assert "const src = (fam.contexts || []).length ? fam.contexts : (st.contexts || []);" in fn
+    assert "if (cs.length) {" in fn
+    assert 'cfg.ctx = { ...cfg.ctx, opts: cs.map(c => [String(c), CF_TOK(c), ""]) };' in fn
+    assert 'if (W.tableCtxPick) W.cfgArgs["--max-context"] = String(W.tableReq.context || "");' in fn
+    # ホワイトリスト外の保存値 (家系乗り換え等) は推奨へ戻す — ジョブが拒否するため
+    assert "if (ctxCs && curs.ctx && !ctxCs.includes(Number(curs.ctx)))" in fn
+
+
+def test_settings_ctx_answer_goes_to_setup_job():
+    """③ のコンテキスト回答は tableReq.context に入ってセットアップジョブへ渡る。
+    ジョブ後の config-args 書き戻しだけだと、純正 setup が推奨値に対して計算した
+    rope scaling / KV 予約などがズレた config になる。"""
+    cfgo = _block('$("#cf-go").addEventListener("click"', "/* ---------------------------------------------------------------- 3: 接続設定 */")
+    assert "if (W.tableCtxPick && W.tableReq && vals.max_context)" in cfgo
+    assert "W.tableReq.context = parseInt(vals.max_context, 10) || W.tableReq.context;" in cfgo
+    # ジョブ開始は tableReq をそのまま送る (context 込み)
+    job = _block("async function startModelJob()", "ジョブ完了後の紐付け")
+    assert "const body = { ...W.tableReq };" in job
+
+
+def test_profile_model_screen_announces_context_step():
+    """モデル選択画面の案内が「コンテキストは次の稼働設定で選ぶ」を予告する。"""
+    fn = _block("async function renderModelTable(backend)", "function mdStFullIn(")
+    assert "コンテキスト長は次の稼働設定で選びます" in fn

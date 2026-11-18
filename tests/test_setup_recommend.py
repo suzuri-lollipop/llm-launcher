@@ -17,6 +17,7 @@ GPU が検出できない環境では環境ベースの推奨を一切出さな�
      - fp8 は compute capability 8.0+ と確認できたときだけ
      - basalt は KV 共有 (総量 = ctx、並列で割る) の予算則
      - Strata はエンジン値 (config parallel / 純正 rec_context) が優先
+     - ctxList (描画済みの選択肢 = 家系ホワイトリスト) が渡されたらその範囲内で推奨
 """
 from __future__ import annotations
 
@@ -43,7 +44,7 @@ const out = items.map(it => {
   if (it.kind === "hw") return { name: it.name, hw: hwFromSystem(it.sys) };
   if (it.kind === "kvbytes") return { name: it.name, bytes: cfKvBytes(it.kv) };
   const hw = it.sys ? hwFromSystem(it.sys) : null;
-  const r = cfRecommend(it.backend, hw, it.sel, it.engine);
+  const r = cfRecommend(it.backend, hw, it.sel, it.engine, it.ctxList);
   const rec = {}, why = {};
   for (const k of ["ctx", "kv", "par", "out", "vis"]) {
     rec[k] = r[k] ? r[k].v : null;
@@ -385,6 +386,37 @@ def test_strata_engine_rec_context_1m_label():
                  "engine": {"parallel": None, "recContext": 1048576}}])
     assert got["r"]["rec"]["ctx"] == "1048576"
     assert "1M" in got["r"]["why"]["ctx"]
+
+
+def test_recommendation_respects_rendered_ctx_whitelist():
+    """描画済みの選択肢 (ctxList = 家系ホワイトリスト) が渡されたらその範囲内で
+    推奨する。純正 rec_context (200K / 64K 等) は CF_CTX に無いが家系一覧に在る
+    ときはそのまま推奨 — config 無し済みモデルのコンテキストを ③ が聞く経路
+    (2026-11-17)。ctxList 無しは従来の CF_CTX 丸めを維持する。"""
+    wl = [8192, 32768, 65536, 131072, 204800, 262144]   # own-path (Qwen3.6) 家系
+    got = _run([
+        {"kind": "rec", "name": "rec200k", "backend": "strata",
+         "sys": _hw([_gpu(24, cc=12.0)]),
+         "sel": _sel(ctx="131072", kv="int8", par="1"),
+         "engine": {"parallel": None, "recContext": 204800}, "ctxList": wl},
+        {"kind": "rec", "name": "rec64k", "backend": "strata",
+         "sys": _hw([_gpu(24, cc=12.0)]),
+         "sel": _sel(ctx="65536", kv="int8", par="1"),
+         "engine": {"parallel": None, "recContext": 65536}, "ctxList": wl},
+        {"kind": "rec", "name": "cap", "backend": "strata",
+         "sys": _hw([_gpu(192, cc=12.0)]),
+         "sel": _sel(ctx="131072", kv="int8", par="1"),
+         "engine": None, "ctxList": wl},
+        {"kind": "rec", "name": "default", "backend": "strata",
+         "sys": _hw([_gpu(24, cc=12.0)]),
+         "sel": _sel(ctx="131072", kv="int8", par="1"),
+         "engine": {"parallel": None, "recContext": 204800}},
+    ])
+    assert got["rec200k"]["rec"]["ctx"] == "204800"   # 一覧に在る推奨は丸めない
+    assert "200K" in got["rec200k"]["why"]["ctx"]
+    assert got["rec64k"]["rec"]["ctx"] == "65536"
+    assert got["cap"]["rec"]["ctx"] == "262144"       # VRAM が大きくても一覧を超えない
+    assert got["default"]["rec"]["ctx"] == "131072"   # ctxList 無しは従来の丸め
 
 
 def test_strata_basalt_card_selection_changes_budget():
