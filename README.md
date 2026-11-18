@@ -120,6 +120,7 @@ scripts/systemd-install.sh --uninstall  # 停止 + 登録解除 + ユニット�
 - 並列推論数の推奨は「1 スロットあたり KV × 本数 ≤ KV 予算」で決まり、RAM 上限 (ホストバッファ目安) でも絞ります。Basalt は KV を全員で共有する (総量 = コンテキスト長) ため並列数では予算が増えません。
 - fp8 KV は compute capability 8.0 (Ampere) 以上と確認できたときだけ推奨。VRAM に余裕 (48 GB 以上) があれば品質優先の形式 (bf16 / fp16 / auto) を推奨します。
 - **Strata はエンジン自身が決めた値を優先** — config の `parallel` (VRAM 予算判定) と純正公式の `rec_context` (この PC の VRAM/RAM から計算) が launcher の目安より上位です。並列数の既定も config の `parallel` (無い = 1) で、固定の「4 推奨」は焼きません (2026-11-09、24 GB で 128K×4 並列がエンジンの VRAM 事前検査に拒否され exit 1 になった回帰。実ログ検証済み)。
+- **FreeToken (fork) のコンテキスト長は 1人あたり**で、起動 JSON には `--num-tokens` = 1人あたり × 並列数 (KV 総量) を書きます。エンジンの 1 リクエスト上限は rope テーブル (`max_seq_len`) なので、**1人あたりが checkpoint の学習済みコンテキスト (`max_position_embeddings`、Flash-Next は 262144) を超える選択では YaRN rope scaling (`--hf-overrides` の `rope_parameters`、factor = 1人あたり / 学習長) を自動で設定します** — Strata 純正 `resolve_rope` と同じ導出で、fork エンジンの model card 1M レシピ (factor 4 / original 262144) と一致。checkpoint の rope キー (`rope_theta` / `mrope_section` / `partial_rotary_factor`) は保ったまま yarn キーだけ足し、scaling 済み checkpoint / rope を明示した `hf_overrides` / 読めない config は触りません (2026-11-18、512K を選んでも `--num-tokens` しか書かれず rope が伸びなかった報告の修正。`--num-tokens` は KV プール総量だけでコンテキスト上限には効かない)。
 
 **モデル表の読み出し耐性**: ② のモデル表 (Strata / Maya) は submodule から subprocess で読み出します。高負荷 (キャリブレーション等) で timeout することがありますが、失敗を長くキャッシュせず短いバックオフで再試行し、その間は直近の成功表 (10 分以内) を返すため、ウィザード / ダウンロード検証は止まりません。読み出し失敗時は「読み出せませんでした (PC が高負荷の可能性) — 再試行してください」と正直に表示します (2026-11-16: 失敗の 60 秒キャッシュで 256G ダウンロードが開始できなくなった回帰の修正)。
 

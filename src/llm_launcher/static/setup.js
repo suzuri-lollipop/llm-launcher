@@ -1571,7 +1571,7 @@ function cfSyncHints() {
 const RUNCFG = {
   "freetoken-fork": { regen: true, model: true,
     ctx: { key: "num_tokens", label: "一人当たりのコンテキスト長", short: "1人あたり", perUser: true,
-           hint: "長いほどVRAMを消費します。調整はこの長さ前提のKVキャッシュで行います", opts: CF_CTX, cur: CF_TOK },
+           hint: "長いほどVRAMを消費します。調整はこの長さ前提のKVキャッシュで行います。モデルの学習長を超える選択ではYaRN (rope scaling) を自動設定します", opts: CF_CTX, cur: CF_TOK },
     out: { key: "max_output_tokens", label: "最大出力トークン", short: "出力",
            hint: "1回の応答で生成する上限。コード生成向けに32Kを推奨。大きくすると1リクエストあたりのKV予約が増えます",
            opts: CF_OUT, cur: CF_TOK },
