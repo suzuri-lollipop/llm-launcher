@@ -1738,6 +1738,12 @@ async function renderConfig() {
       const initVals = {};
       const jcfg = String(((j || {}).result || {}).config || "").trim();
       if (cfg.model === "config" && jcfg) initVals.config = jcfg;
+      /* FreeToken (fork): キャッシュレポート (usage の cached_tokens /
+         cache_read_input_tokens) は既定で有効にする。ウィザードが作るプロファイルは
+         起動 JSON 主体になるため、作成時に値を入れておかないと --enable-cache-report
+         が JSON に焼き込まれず、エンジン既定 (OFF) のままになる。bool は値が真なら
+         送信される (render_argv / TRUTHY)。既存プロファイルの再利用時は触らない。 */
+      if (W.backend === "freetoken-fork") initVals.enable_cache_report = "on";
       p = await api("/api/profiles", { method: "POST",
         body: { name: nm, backend: W.backend, values: initVals, simple_visible: true,
                 note: profileFlow() ? "プロファイルウィザードで作成" : "初回セットアップで作成" } });
