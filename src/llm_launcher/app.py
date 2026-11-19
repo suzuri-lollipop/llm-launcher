@@ -520,6 +520,9 @@ def create_app(root: Path) -> FastAPI:
             # check_cwd (Strata 用): serve のようなリポジトリ直下パッケージは、submodule を cwd にして
             # 実 import しないと判定できない。find_spec だと GUI .venv でもパス検索だけで成功し、
             # 依存 (numpy/jinja2/...) を持つ module/<name>/.venv を選ばないため実 import にする。
+            # Strata 0.2.16+ は serve が terminal/ 配下 → setup_dir を cwd にする。
+            check_dir = (strata_setup.setup_dir(module_dir)
+                         if backend_id in ("strata", "strata-fork") else module_dir)
             snippet = ("import importlib,sys;importlib.import_module(sys.argv[1])"
                        if b.get("check_cwd") else
                        "import importlib.util,sys;"
@@ -532,7 +535,7 @@ def create_app(root: Path) -> FastAPI:
                     proc = await asyncio.wait_for(
                         asyncio.create_subprocess_exec(
                             py, "-c", snippet, b["check_module"],
-                            cwd=str(module_dir) if b.get("check_cwd") else None,
+                            cwd=str(check_dir) if b.get("check_cwd") else None,
                             stdout=asyncio.subprocess.DEVNULL,
                             stderr=asyncio.subprocess.DEVNULL,
                         ),
@@ -596,6 +599,25 @@ def create_app(root: Path) -> FastAPI:
     @app.on_event("startup")
     async def _startup() -> None:
         migrate_profiles(profiles_store)
+        # Strata 0.2.16 レイアウト移行 (setup.py / serve / engine / config が terminal/ へ):
+        # 専用コピー / installer config 内の旧絶対パスとプロファイルの values.config を
+        # 新 location へ書き換える (旧パスが消えて新パスが在るものだけ。起動毎に冪等)。
+        try:
+            n_cfg = n_prof = 0
+            for mod in (root / "module/strata", root / "module/fork/strata",
+                        root / "module/fork/Strata"):
+                if mod.is_dir():
+                    c, p = strata_setup.migrate_terminal_layout(root, mod, profiles_store.load())
+                    n_cfg += c
+                    n_prof += p
+            if n_prof:
+                profiles_store.save()
+            if n_cfg or n_prof:
+                print(f"strata: 0.2.16 レイアウト移行 — config {n_cfg} 件 / "
+                      f"プロファイル {n_prof} 件のパスを terminal/ へ書き換えました")
+        except Exception as e:  # noqa: BLE001 — 移行失敗で起動を止めない (ログに正直に)
+            print(f"strata: レイアウト移行に失敗 (起動は続行): {type(e).__name__}: {e}",
+                  file=sys.stderr)
         bench.on_startup()
         # キャリブレーションは 10-40 分の fire-and-forget ジョブ。launcher が OOM kill / restart されると
         # task は死ぬがファイル上の status は "running" のまま残るので、起動時に "lost" へ回復する。
@@ -1585,7 +1607,8 @@ def create_app(root: Path) -> FastAPI:
             mod = root / INSTALL_SPECS[bid]["module_path"]
             out = dict(await asyncio.to_thread(setup_mod.load_options, mod))
             out["configs"] = await asyncio.to_thread(setup_mod.installed_configs, mod)
-            out["venv_ready"] = (mod / ".venv" / "bin" / "python").is_file()
+            venv_base = strata_setup.setup_dir(mod) if bid == "strata" else mod
+            out["venv_ready"] = (venv_base / ".venv" / "bin" / "python").is_file()
             return out
 
         return {"installable": specs, "installed": installed,
@@ -2599,15 +2622,16 @@ def create_app(root: Path) -> FastAPI:
                  "module_path": spec["module_path"], "extras": spec["extras"],
                  # requirements 系 (pyproject の無いリポジトリ) / cmake ビルド有無は
                  # セットアップタブのプレビュー文言組み立てに使う (Basalt 対応)。
-                 # engine_fetch = Strata の既製エンジン受信 step (strata_engine.py)。
-                 # tools_step = Maya の純正 tools_step (pip + llama.cpp ソース) step
-                 # (maya_tools.py)。エンジンビルドは ② のモデル構成の中。
+                 # tools_step = 純正のパッケージ導入 step を薄い driver から呼ぶ
+                 # (Maya: tools_step = pip + llama.cpp ソース / Strata: pip_install)。
+                 # エンジンビルド / 受信はどちらも ② のモデル構成の中。tools_label は
+                 # UI の手順名 (ジョブ実体と揃える)。
                  # tool = このバックエンドで実際に走る install ツール表示: venv_pip spec
                  # (Strata / Maya) は uv が在っても pip を使うので、UI の手順名をジョブ実体と揃える
                  "requirements": spec.get("requirements", ""),
                  "cmake": bool(spec.get("cmake")),
-                 "engine_fetch": bool(spec.get("engine_fetch")),
                  "tools_step": bool(spec.get("tools_step")),
+                 "tools_label": spec.get("tools_label", ""),
                  "tool": "pip" if spec.get("venv_pip") else install_tool(),
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
                                 if BACKENDS[bid].get("model_data") else ""),
@@ -2639,7 +2663,8 @@ def create_app(root: Path) -> FastAPI:
         # 表の読み出しは subprocess (初回 ~1s) — イベントループを止めない
         out = dict(await asyncio.to_thread(strata_setup.load_options, mod))
         out["configs"] = await asyncio.to_thread(strata_setup.installed_configs, mod)
-        out["venv_ready"] = (mod / ".venv" / "bin" / "python").is_file()
+        # 0.2.16+ は .venv が terminal/ 配下 (setup_dir が解決)
+        out["venv_ready"] = (strata_setup.setup_dir(mod) / ".venv" / "bin" / "python").is_file()
         return out
 
     @app.post("/api/installs/strata-model", status_code=201)

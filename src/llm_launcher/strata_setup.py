@@ -155,6 +155,112 @@ for fid, f in fams.items():
 print(json.dumps({"families": fams, "contexts": ctx_all, "pc": pc}))
 """
 
+def setup_dir(module_dir: Path) -> Path:
+    """setup.py / serve / .venv / engine / config JSON が在るディレクトリ。
+
+    Strata 0.2.16 は Terminal 部分 (setup.py / strata.py / serve / requirements.txt) を
+    リポジトリ直下から terminal/ へ移した (.venv も terminal/.venv。純正 setup.sh が
+    旧 clone の .venv を一度だけ移す)。古い clone とフォークはリポジトリ直下のまま。
+    渡されたディレクトリ自身が terminal/ ならそのまま返す (冪等)。"""
+    t = module_dir / "terminal"
+    return t if (t / "setup.py").is_file() else module_dir
+
+
+def _remap_layout_path(s: str, module_dir: Path, work: Path, *, output: bool = False) -> str:
+    """module_dir 直下の旧パスを terminal/ の新パスへ。実在するものだけ書き換える
+    (output=True のログパスは出力先なので新パスが未作成でも移す)。
+    既に work 配下を指すパスは触らない (冪等 — 2 回目で terminal/terminal/ にしない)。"""
+    prefix = str(module_dir) + os.sep
+    if not s.startswith(prefix) or s.startswith(str(work) + os.sep):
+        return s
+    old = Path(s)
+    try:
+        new = work / old.relative_to(module_dir)
+    except ValueError:
+        return s
+    if output or (not old.exists() and new.exists()):
+        return str(new)
+    return s
+
+
+def migrate_terminal_layout(root: Path, module_dir: Path,
+                            profiles: list[dict[str, Any]]) -> tuple[int, int]:
+    """0.2.16 レイアウト移行: config JSON 内の旧絶対パス (exe / args / vision / log) と
+    プロファイルの values.config を terminal/ へ書き換える。旧パスが消えて新パスが
+    在るものだけ触る (純正 setup が既に移行済みの config は実在するので無変更)。
+
+    対象: installer config (setup_dir 直下の strata-*.json) / プロファイル専用コピー
+    (data/launch/strata-*.json) / 全プロファイルの values.config (この module 配下を
+    指すもの)。profiles は in-place で書き換える (保存は呼び出し側)。
+    返り値: (書き換えた config ファイル数, 書き換えたプロファイル数)。"""
+    module_dir = module_dir.resolve()
+    work = setup_dir(module_dir)
+    if work == module_dir:
+        return (0, 0)
+    n_prof = 0
+    for p in profiles:
+        if not isinstance(p, dict):
+            continue
+        v = p.get("values") or {}
+        raw = str(v.get("config") or "").strip()
+        if not raw:
+            continue
+        new = _remap_layout_path(raw, module_dir, work)
+        if new != raw:
+            v["config"] = new
+            n_prof += 1
+    n_cfg = 0
+    files = list(work.glob("strata-*.json"))
+    files += (root / "data" / "launch").glob("strata-*.json")
+    for f in files:
+        if f.name.endswith(".shared-settings.json"):
+            continue
+        try:
+            doc = json.loads(f.read_text("utf-8", errors="replace"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(doc, dict) or ("exe" not in doc and "args" not in doc):
+            continue
+        hit = False
+        for key in ("exe", "cwd", "tokenizer"):
+            s = str(doc.get(key) or "")
+            if s:
+                r = _remap_layout_path(s, module_dir, work)
+                if r != s:
+                    doc[key] = r
+                    hit = True
+        s = str(doc.get("log") or "")
+        if s:
+            r = _remap_layout_path(s, module_dir, work, output=True)
+            if r != s:
+                doc["log"] = r
+                hit = True
+        for key in ("args", "args_written"):
+            arr = doc.get(key)
+            if isinstance(arr, list):
+                for i, a in enumerate(arr):
+                    if isinstance(a, str):
+                        r = _remap_layout_path(a, module_dir, work)
+                        if r != a:
+                            arr[i] = r
+                            hit = True
+        vis = doc.get("vision")
+        if isinstance(vis, dict):
+            for k in ("exe", "model", "mmproj"):
+                s = str(vis.get(k) or "")
+                if s:
+                    r = _remap_layout_path(s, module_dir, work)
+                    if r != s:
+                        vis[k] = r
+                        hit = True
+        if hit:
+            tmp = f.with_suffix(".json.tmp")
+            tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            tmp.replace(f)
+            n_cfg += 1
+    return (n_cfg, n_prof)
+
+
 _CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _CACHE_TTL = 60.0
 # 読み出し失敗は長くキャッシュしない (maya_setup と同じ規律): 短いバックオフで
@@ -170,7 +276,8 @@ VISIONS = ["yes", "no", "gpu", "cpu"]
 def load_options(module_dir: Path) -> dict[str, Any]:
     """submodule 純正の表を JSON で読む。未 clone / 読み出し失敗なら {"available": false}。
     失敗時は直近の成功表 (10 分以内) を返し、短いバックオフで再試行する。"""
-    if not (module_dir / "setup.py").is_file():
+    d = setup_dir(module_dir)
+    if not (d / "setup.py").is_file():
         return {"available": False, "families": {}, "contexts": [], "pc": {}}
     key = str(module_dir)
     now = time.monotonic()
@@ -181,12 +288,12 @@ def load_options(module_dir: Path) -> dict[str, Any]:
     unavailable = {"available": False, "families": {}, "contexts": [], "pc": {}}
     if key in _FAIL and now - _FAIL[key] < _FAIL_RETRY:
         return stale if stale is not None else unavailable
-    py = module_dir / ".venv" / "bin" / "python"
+    py = d / ".venv" / "bin" / "python"
     if not py.exists():
         py = Path(sys.executable)
     out: dict[str, Any] = {"available": False, "families": {}, "contexts": [], "pc": {}}
     try:
-        proc = subprocess.run([str(py), "-c", _DUMP_SNIPPET], cwd=str(module_dir),
+        proc = subprocess.run([str(py), "-c", _DUMP_SNIPPET], cwd=str(d),
                               capture_output=True, text=True, timeout=_READ_TIMEOUT,
                               env=dict(os.environ, PYTHONNOUSERSITE="1"))
         text = proc.stdout.strip()
@@ -292,7 +399,7 @@ def weights_status(data: dict) -> dict:
 def installed_configs(module_dir: Path) -> list[dict[str, Any]]:
     """既に設定済みの strata-<model>.json (純正 setup が作った / 前回この画面で作った)。"""
     out = []
-    for p in sorted(module_dir.glob("strata-*.json")):
+    for p in sorted(setup_dir(module_dir).glob("strata-*.json")):
         if p.name.endswith(".shared-settings.json"):
             continue
         try:
@@ -327,7 +434,7 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
         raise ValueError("context が不正です")
     if vision and vision not in VISIONS:
         raise ValueError(f"vision が不正です ({'/'.join(VISIONS)})")
-    if not (module_dir / "setup.py").is_file():
+    if not (setup_dir(module_dir) / "setup.py").is_file():
         raise ValueError("Strata のソースが未取得です (git submodule update --init module/strata)")
     data = load_options(module_dir)
     if not data.get("available"):

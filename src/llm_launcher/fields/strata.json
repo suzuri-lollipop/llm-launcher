@@ -49,7 +49,7 @@
  },
  "--host": {
   "aliases": [],
-  "help": "the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices on your network (set an API key); also \"host\" in the config",
+  "help": "the address to listen on: 127.0.0.1 = this PC only (the default), 0.0.0.0 = also other devices on your network, :: = all IPv6 interfaces (set an API key); also \"host\" in the config",
   "type": "str"
  },
  "--idle-unload": {
@@ -153,6 +153,12 @@
   "aliases": [],
   "help": "enable POST /slots/0?action=save|restore {\"filename\": NAME} (llama-server's API): the conversation the engine holds, to or from DIR/NAME (also \"slot_save_path\" in the config)",
   "metavar": "DIR",
+  "type": "str"
+ },
+ "--split-serve": {
+  "aliases": [],
+  "help": "split serving (opt-in): one engine on card PREFILL reads the prompt, a second on card DECODE makes the answer, the session handed over in RAM (also \"split_serve\" in the config: {\"prefill_gpu\": 0, \"dec",
+  "metavar": "PREFILL,DECODE",
   "type": "str"
  },
  "--tokenizer": {

@@ -141,6 +141,10 @@ ManagedOOMPreference=avoid
 #   実際メモリの 88%。MemoryMax を書かないのは、超過時に oomd ではなくカーネルの内圧での
 #   ページ回収に委ねるため (MemoryMax は即 kill に繋がる)。
 MemoryHigh=88%
+# Strata エンジンの PLE テーブル (Q2_0 で 26.8 GiB) は RLIMIT_MEMLOCK が 0 だと RAM に
+#   ロックできず「not locked」で動く (デコード最大 ~6% 低速。純正ログ #4671 の案内どおり
+#   systemd サービスでは LimitMEMLOCK=infinity が正)。エンジン以外の用途にも無害。
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=default.target
