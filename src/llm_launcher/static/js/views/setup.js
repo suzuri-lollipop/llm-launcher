@@ -24,13 +24,20 @@ const INS_ST = {queued: ["info", "待機"], running: ["warn", "実行中"], done
                 failed: ["err", "失敗"], cancelled: ["", "中断"], lost: ["err", "launcher 再起動で中断"]};
 const INS_STEPS = {clone: "clone", branch: "ブランチ切替", venv: "venv 作成", precheck: "確認",
                    install: "uv pip install", cmake: "cmake 設定", "cmake-build": "cmake ビルド",
-                   engine: "エンジン受信", tools: "tools step",
+                   tools: "依存導入 (純正)",
                    model: "モデル準備", verify: "import 確認"};
 /* install ステップの実体は uv があれば uv pip、無い環境だけ venv の pip。
-   手順名はサーバーが返す tool (実行する argv と同じ判定) で出す。 */
+   手順名はサーバーが返す tool (実行する argv と同じ判定) で出す。
+   tools (純正パッケージ導入) は spec の tools_label — Maya と Strata で中身が違う。 */
 const insToolLabel = tool => tool === "pip" ? "pip install" : "uv pip install";
-const insStepName = (name, job) =>
-  name === "install" ? insToolLabel((job || {}).tool) : (INS_STEPS[name] || name);
+const insStepName = (name, job) => {
+  if (name === "install") return insToolLabel((job || {}).tool);
+  if (name === "tools") {
+    const sp = ((S.ins || {}).installable || []).find(x => x.id === (job || {}).backend);
+    return (sp && sp.tools_label) || INS_STEPS.tools;
+  }
+  return INS_STEPS[name] || name;
+};
 /* セットアップ画面で走るジョブ = インストール / DL とキャリブレーションの両方 */
 const calUiOn = () => can("calibrate");
 const calBusy = () => calUiOn() && !!(S.cal && (S.cal.active || S.cal.busy));
@@ -381,15 +388,14 @@ function renderSetup() {
           : `既存 clone のブランチが判別できないため ${ref} への切替を試みます`))));
   const tl = insToolLabel((sp && sp.tool) || S.ins.tool);
   /* 手順の末尾: requirements 系 (pyproject の無い Basalt など) は -r + cmake ビルド、
-     Strata (engine_fetch) は -r + 公式リリースからのエンジン受信、
-     Maya (tools_step) は純正 tools_step (pip + llama.cpp ソース。エンジンビルドは ②)、
-     packaging 系は従来どおり -e ".[extras]"。cmake / engine は実在チェック込みの verify で締める */
+     tools_step 系 (Maya = 純正 tools_step: pip + llama.cpp ソース / Strata = 純正
+     pip_install) は純正のパッケージ導入 → import + stamp 確認。エンジンビルド / 受信は
+     どちらも ② のモデル構成の中。packaging 系は従来どおり -e ".[extras]" */
   const tail = sp.tools_step
-    ? "純正 tools_step (pip + llama.cpp ソース) → import + 導入確認"
+    ? `${sp.tools_label || "純正 tools_step"} → import + 導入確認`
     : (sp.requirements
       ? `${tl} -r ${sp.requirements}`
         + (sp.cmake ? " → cmake configure + build (bin) → import + エンジン確認" : "")
-        + (sp.engine_fetch ? " → エンジン受信 (公式リリース) → import + エンジン確認" : "")
       : `${tl} -e ".[${sp.extras}]"`);
   $("#ins-preview").textContent = !sp ? "" : (!sp.cloned
     ? `git clone --depth 1 ${ref ? "-b " + ref + " " : ""}${sp.repo} ${sp.module_path} → .venv 作成 → ${tail}`

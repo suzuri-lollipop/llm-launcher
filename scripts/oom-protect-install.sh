@@ -225,6 +225,10 @@ MemoryHigh=${MEM_HIGH}
 MemoryMax=${MEM_MAX}
 # systemd-oomd にこの unit を kill 候補から外してもらう (モデル本体は別 cgroup)
 ManagedOOMPreference=avoid
+# Strata エンジンの PLE テーブル (Q2_0 で 26.8 GiB / NVFP4 で 51 GiB) は RLIMIT_MEMLOCK
+# が 0 だと RAM にロックできず「not locked」で動く (デコード最大 ~6% 低速。純正ログ
+# #4671 の案内どおり systemd サービスでは LimitMEMLOCK=infinity が正)。
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target

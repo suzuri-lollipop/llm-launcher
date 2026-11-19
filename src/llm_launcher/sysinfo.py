@@ -17,8 +17,10 @@ from typing import Any
 
 GPU_TTL = 4.0            # nvidia-smi 実行コストがあるので短めキャッシュ
 GPU_TIMEOUT = 8.0
+# uuid: エンジンが報告する GPU (CUDA ordinal は CUDA_VISIBLE_DEVICES でずれ得る) と
+# このカードを突き合わせるキー。FreeToken の /v1/meminfo は GPU UUID を名乗る。
 GPU_QUERY = ("index,name,utilization.gpu,memory.used,memory.total,"
-             "temperature.gpu,power.draw,power.limit,compute_cap")
+             "temperature.gpu,power.draw,power.limit,compute_cap,uuid")
 
 
 def _read(path: str) -> str:
@@ -77,11 +79,13 @@ def _parse_gpu_csv(out: str) -> list[dict[str, Any]]:
         # compute_cap (8.9 等) は fp8 対応判定などに使う。古い nvidia-smi / 非対応値
         # ("[N/A]") では None — 呼び出し側は「不明」として安全側に倒す。
         cc = num(8) if len(p) > 8 else None
+        uuid = p[9].strip() if len(p) > 9 else ""
         gpus.append({
             "index": p[0], "name": p[1], "util": num(2),
             "mem_used_mib": num(3), "mem_total_mib": num(4),
             "temp": num(5), "power": num(6), "power_limit": num(7),
             "compute_cap": cc,
+            "uuid": uuid or None,
         })
     return gpus
 

@@ -166,6 +166,55 @@ function renderHomeMeters(){
   }
   el.innerHTML = html || `<span class="muted">計測項目なし</span>`;
 }
+/* ---------------- dashboard: GPU VRAM 割り当て (FreeToken /v1/meminfo 中継) ----------------
+   Maya の GPU マップと同じ「カードに何が載っているか」: 重み / KV / SWA / MoE / GDN /
+   予備 / 残余 / 空き(推定) を確保量で積み上げ、凡例に GB を出す。エンジンの CUDA
+   ordinal は CUDA_VISIBLE_DEVICES でずれ得るので、nvidia-smi のカードとは UUID 優先
+   (無ければ index) で突き合わせる。1 枚を複数セッションが共有すればセッション毎の棒。 */
+const VRAM_PARTS = [
+  {k:"weights", label:"重み", c:"#5f6368"},
+  {k:"kv", label:"KV", c:"#188038"},
+  {k:"swa", label:"SWA", c:"#1a73e8"},
+  {k:"moe", label:"MoE", c:"#b06000"},
+  {k:"mamba", label:"GDN", c:"#8430ce"},
+  {k:"overhead", label:"予備", c:"#9aa0a6"},
+  {k:"residual", label:"残余", c:"#bdc1c6"},
+  {k:"free", label:"空き(推定)", c:"#f1f3f4"},
+];
+function vramRowsForGpu(g){
+  const out = [];
+  for (const [sid, doc] of Object.entries(S.vram || {})){
+    if (!doc || !Array.isArray(doc.gpus)) continue;
+    for (const row of doc.gpus){
+      const hit = (g.uuid && row.uuid) ? g.uuid === row.uuid
+        : (row.index != null && String(row.index) === String(g.index));
+      if (hit) out.push({sid, doc, row});
+    }
+  }
+  return out;
+}
+function vramAllocHtml(g){
+  const hits = vramRowsForGpu(g);
+  if (!hits.length) return "";
+  return hits.map(({sid, doc, row}) => {
+    const sess = sessionById(sid);
+    const label = sess ? sess.profile_name : (doc.model || sid);
+    const total = row.total_bytes || 0;
+    const parts = row.parts || {};
+    const segs = VRAM_PARTS.map(p => ({...p, b: parts[p.k] || 0})).filter(p => p.b > 0);
+    const bar = total > 0
+      ? `<div class="mbar" style="display:flex;height:10px;background:var(--line)">${segs.map(p =>
+          `<i style="width:${(100*p.b/total).toFixed(2)}%;background:${p.c};border-radius:0;transition:none" title="${p.label} ${fmtGB(p.b)}"></i>`).join("")}</div>`
+      : "";
+    const chips = segs.map(p =>
+      `<span style="display:inline-flex;align-items:center;gap:4px"><i style="width:8px;height:8px;border-radius:2px;background:${p.c};${p.k==="free"?"border:1px solid var(--line);":""}display:inline-block"></i>${p.label} <b>${fmtGB(p.b)}</b></span>`).join("");
+    return `<div style="margin-top:8px;border-top:1px dashed var(--line);padding-top:6px">
+      <div class="m-hd"><b>VRAM 割り当て</b><span class="r ellip" style="max-width:62%" title="${esc(label)}">${esc(label)}</span></div>
+      ${bar}
+      <div class="row muted" style="gap:8px;flex-wrap:wrap;margin-top:5px;font-size:11px">${chips}</div>
+    </div>`;
+  }).join("");
+}
 function renderHomeGpus(){
   const el = $("#home-gpus"); const s = S.sys;
   if (s === undefined){ el.innerHTML = `<span class="muted"><span class="spin"></span> GPU 検出中…</span>`; return; }
@@ -184,7 +233,7 @@ function renderHomeGpus(){
       <div class="row muted" style="gap:10px;margin-top:6px;font-size:11.5px">
         <span><svg class=ic aria-hidden=true><use href=#i-thermo /></svg> ${g.temp??'-'}°C</span>
         <span><svg class=ic aria-hidden=true><use href=#i-bolt /></svg> ${g.power??'-'}${g.power_limit?'/'+g.power_limit:''}W</span>
-      </div></div>`;
+      </div>${vramAllocHtml(g)}</div>`;
   }).join("") + `</div>`;
 }
 function renderHomeLive(){
@@ -241,8 +290,9 @@ function tickHomeClock(){ fmtClock(); if(!clockInterval) clockInterval=setInterv
    basalt の Speed カード: /metrics の history を 60 秒分の折れ線にし、
    --parallel のスロットを 1 本ずつ色 / 太さで重ね、右端に現在値を置く。
    ここではブラウザ側で 1 秒ごとに取得したサンプルを 60 点溜める。
-   Strata / Basalt / llama.cpp (--slots) はスロット毎の tok/s を描く。
-   内訳の無い Maya / vLLM / SGLang / FreeToken は全スロット合算だけを描く。 */
+   Strata / Basalt / FreeToken (新エンジン) / llama.cpp (--slots) はスロット毎の
+   tok/s を描く。内訳の無い Maya / vLLM / SGLang / FreeToken 旧エンジンは
+   全スロット合算だけを描く。 */
 const PAR_HIST = 60;
 const PAR_STEPS = [10, 20, 30, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500,
                    600, 750, 800, 1000, 1200, 1500, 2000, 2500, 3000, 4000, 5000,
@@ -490,7 +540,7 @@ function renderHomeParallel(){
     el.innerHTML = `<div class="par-empty">
       デコード速度 (/metrics / /v1/stats) を公開するサーバーが稼働していません。<br>
       グラフを描くには、起動タブからサーバーを起動してください。<br>
-      <span class="muted">スロット毎の内訳は Strata / Basalt / llama.cpp (--slots)。SGLang は --enable-metrics、llama.cpp の合算は --metrics が必要です。</span>
+      <span class="muted">スロット毎の内訳は Strata / Basalt / FreeToken / llama.cpp (--slots)。SGLang は --enable-metrics、llama.cpp の合算は --metrics が必要です。</span>
     </div>`;
     return;
   }

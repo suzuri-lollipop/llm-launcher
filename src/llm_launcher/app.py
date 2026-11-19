@@ -520,6 +520,9 @@ def create_app(root: Path) -> FastAPI:
             # check_cwd (Strata 用): serve のようなリポジトリ直下パッケージは、submodule を cwd にして
             # 実 import しないと判定できない。find_spec だと GUI .venv でもパス検索だけで成功し、
             # 依存 (numpy/jinja2/...) を持つ module/<name>/.venv を選ばないため実 import にする。
+            # Strata 0.2.16+ は serve が terminal/ 配下 → setup_dir を cwd にする。
+            check_dir = (strata_setup.setup_dir(module_dir)
+                         if backend_id in ("strata", "strata-fork") else module_dir)
             snippet = ("import importlib,sys;importlib.import_module(sys.argv[1])"
                        if b.get("check_cwd") else
                        "import importlib.util,sys;"
@@ -532,7 +535,7 @@ def create_app(root: Path) -> FastAPI:
                     proc = await asyncio.wait_for(
                         asyncio.create_subprocess_exec(
                             py, "-c", snippet, b["check_module"],
-                            cwd=str(module_dir) if b.get("check_cwd") else None,
+                            cwd=str(check_dir) if b.get("check_cwd") else None,
                             stdout=asyncio.subprocess.DEVNULL,
                             stderr=asyncio.subprocess.DEVNULL,
                         ),
@@ -596,6 +599,25 @@ def create_app(root: Path) -> FastAPI:
     @app.on_event("startup")
     async def _startup() -> None:
         migrate_profiles(profiles_store)
+        # Strata 0.2.16 レイアウト移行 (setup.py / serve / engine / config が terminal/ へ):
+        # 専用コピー / installer config 内の旧絶対パスとプロファイルの values.config を
+        # 新 location へ書き換える (旧パスが消えて新パスが在るものだけ。起動毎に冪等)。
+        try:
+            n_cfg = n_prof = 0
+            for mod in (root / "module/strata", root / "module/fork/strata",
+                        root / "module/fork/Strata"):
+                if mod.is_dir():
+                    c, p = strata_setup.migrate_terminal_layout(root, mod, profiles_store.load())
+                    n_cfg += c
+                    n_prof += p
+            if n_prof:
+                profiles_store.save()
+            if n_cfg or n_prof:
+                print(f"strata: 0.2.16 レイアウト移行 — config {n_cfg} 件 / "
+                      f"プロファイル {n_prof} 件のパスを terminal/ へ書き換えました")
+        except Exception as e:  # noqa: BLE001 — 移行失敗で起動を止めない (ログに正直に)
+            print(f"strata: レイアウト移行に失敗 (起動は続行): {type(e).__name__}: {e}",
+                  file=sys.stderr)
         bench.on_startup()
         # キャリブレーションは 10-40 分の fire-and-forget ジョブ。launcher が OOM kill / restart されると
         # task は死ぬがファイル上の status は "running" のまま残るので、起動時に "lost" へ回復する。
@@ -1585,7 +1607,8 @@ def create_app(root: Path) -> FastAPI:
             mod = root / INSTALL_SPECS[bid]["module_path"]
             out = dict(await asyncio.to_thread(setup_mod.load_options, mod))
             out["configs"] = await asyncio.to_thread(setup_mod.installed_configs, mod)
-            out["venv_ready"] = (mod / ".venv" / "bin" / "python").is_file()
+            venv_base = strata_setup.setup_dir(mod) if bid == "strata" else mod
+            out["venv_ready"] = (venv_base / ".venv" / "bin" / "python").is_file()
             return out
 
         return {"installable": specs, "installed": installed,
@@ -1807,7 +1830,9 @@ def create_app(root: Path) -> FastAPI:
         """ダッシュボードのデコード速度グラフ用: 稼働中サーバーの /metrics を中継する。
 
         Strata / Maya / Basalt 系は JSON /metrics、vLLM / SGLang / llama.cpp は
-        Prometheus /metrics (+ llama.cpp は /slots)、FreeToken 系は /v1/stats。
+        Prometheus /metrics (+ llama.cpp は /slots)。FreeToken 系は新しいエンジンが
+        basalt 形の JSON /metrics (+ /slots 行) を出すので同じ経路に合流し、live の
+        無い旧エンジンは /v1/stats の合算にフォールバックする。
         ブラウザから直接叩くと CORS や API キーで失敗するため、起動中のポートへ
         launcher 同一オリジンでプロキシし、グラフに必要な値だけを正規化して返す。
         """
@@ -1825,28 +1850,51 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, "このバックエンドはデコード速度グラフに対応していません")
         key = api_key_from_argv(s.get("argv") or [])
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        if backend not in ("strata", "strata-fork", "maya", "basalt"):
-            return await _parallel_other(sid, s, backend, port, headers)
 
         def _fetch() -> dict[str, Any]:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/metrics", headers=headers)
             with urllib.request.urlopen(req, timeout=2.0) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
 
-        try:
-            data = await asyncio.to_thread(_fetch)
-        except urllib.error.HTTPError as e:
-            raise HTTPException(e.code, f"サーバーの /metrics が HTTP {e.code} を返しました")
-        except urllib.error.URLError as e:
-            raise HTTPException(502, f"サーバーの /metrics に接続できません: {e.reason}")
-        except OSError as e:
-            raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
-        except ValueError as e:
-            raise HTTPException(502, f"サーバーの /metrics を JSON として読み取れません: {e}")
-        except Exception as e:                                  # noqa: BLE001 — 内訳は補助情報なので常に 502
-            raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
-        if not isinstance(data, dict):
-            raise HTTPException(502, "サーバーの /metrics が JSON オブジェクトではありません")
+        async def _metrics_doc(*, optional: bool) -> dict[str, Any] | None:
+            """optional=True は FreeToken の形式確認: 読めなければ None (フォールバック側が
+            本当のエラーを出す)。Strata 系は従来どおり失敗をそのまま 502 で返す。"""
+            try:
+                data = await asyncio.to_thread(_fetch)
+            except urllib.error.HTTPError as e:
+                if optional:
+                    return None
+                raise HTTPException(e.code, f"サーバーの /metrics が HTTP {e.code} を返しました")
+            except urllib.error.URLError as e:
+                if optional:
+                    return None
+                raise HTTPException(502, f"サーバーの /metrics に接続できません: {e.reason}")
+            except OSError as e:
+                if optional:
+                    return None
+                raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
+            except ValueError as e:
+                if optional:
+                    return None
+                raise HTTPException(502, f"サーバーの /metrics を JSON として読み取れません: {e}")
+            except Exception as e:                                  # noqa: BLE001 — 内訳は補助情報なので常に 502
+                if optional:
+                    return None
+                raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
+            if not isinstance(data, dict):
+                if optional:
+                    return None
+                raise HTTPException(502, "サーバーの /metrics が JSON オブジェクトではありません")
+            return data
+
+        if backend in ("freetoken", "freetoken-fork"):
+            data = await _metrics_doc(optional=True)
+            if data is None or not isinstance(data.get("live"), dict):
+                return await _parallel_other(sid, s, backend, port, headers)
+        elif backend in ("strata", "strata-fork", "maya", "basalt"):
+            data = await _metrics_doc(optional=False)
+        else:
+            return await _parallel_other(sid, s, backend, port, headers)
 
         live = data.get("live") if isinstance(data, dict) else None
         live = live if isinstance(live, dict) else {}
@@ -1983,6 +2031,52 @@ def create_app(root: Path) -> FastAPI:
             },
             "history": {"tok_s": history_tok, "slot_tok_s": slot_hist},
             "slots": slots,
+        }
+
+    @app.get("/api/sessions/{sid}/meminfo")
+    async def session_meminfo(sid: str) -> dict[str, Any]:
+        """ダッシュボードの GPU 欄用: FreeToken エンジンの VRAM 割り当て内訳を中継する。
+
+        Maya の GPU マップと同じ「カードに何が載っているか」(重み / KV / SWA / MoE / GDN /
+        予備 / 残余 / 空き) を GPU ごとに描くための正規化済み行を返す。エンジンの
+        /v1/meminfo は TP ランク合算のビューなので、ここで GPU 単位の parts に分解する。
+        nvidia-smi のカードとの突き合わせはフロントが UUID (fallback: index) で行う。
+        """
+        s = manager.sessions.get(sid)
+        if not s:
+            raise HTTPException(404, "セッションが見つかりません")
+        if not s.get("ready"):
+            raise HTTPException(503, "サーバーは起動中です")
+        port = s.get("port")
+        if not port:
+            raise HTTPException(400, "このセッションはポートを解決できていません")
+        backend = s.get("backend")
+        if backend not in ("freetoken", "freetoken-fork"):
+            raise HTTPException(400, "このバックエンドは VRAM 割り当てレポートに対応していません")
+        key = api_key_from_argv(s.get("argv") or [])
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+
+        def _fetch() -> dict[str, Any]:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/meminfo", headers=headers)
+            with urllib.request.urlopen(req, timeout=2.0) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+
+        try:
+            data = await asyncio.to_thread(_fetch)
+        except urllib.error.HTTPError as e:
+            raise HTTPException(e.code, f"サーバーの /v1/meminfo が HTTP {e.code} を返しました")
+        except (urllib.error.URLError, OSError) as e:
+            raise HTTPException(502, f"サーバーの /v1/meminfo を読み取れません: {e}")
+        except ValueError as e:
+            raise HTTPException(502, f"サーバーの /v1/meminfo を JSON として読み取れません: {e}")
+        if not isinstance(data, dict):
+            raise HTTPException(502, "サーバーの /v1/meminfo が JSON オブジェクトではありません")
+        return {
+            "sid": sid,
+            "backend": backend,
+            "backend_name": s.get("backend_name"),
+            "fetched_at": time.time(),
+            **pm.normalize_meminfo(data),
         }
 
     # ----------------------------------------------------------- backends
@@ -2528,15 +2622,16 @@ def create_app(root: Path) -> FastAPI:
                  "module_path": spec["module_path"], "extras": spec["extras"],
                  # requirements 系 (pyproject の無いリポジトリ) / cmake ビルド有無は
                  # セットアップタブのプレビュー文言組み立てに使う (Basalt 対応)。
-                 # engine_fetch = Strata の既製エンジン受信 step (strata_engine.py)。
-                 # tools_step = Maya の純正 tools_step (pip + llama.cpp ソース) step
-                 # (maya_tools.py)。エンジンビルドは ② のモデル構成の中。
+                 # tools_step = 純正のパッケージ導入 step を薄い driver から呼ぶ
+                 # (Maya: tools_step = pip + llama.cpp ソース / Strata: pip_install)。
+                 # エンジンビルド / 受信はどちらも ② のモデル構成の中。tools_label は
+                 # UI の手順名 (ジョブ実体と揃える)。
                  # tool = このバックエンドで実際に走る install ツール表示: venv_pip spec
                  # (Strata / Maya) は uv が在っても pip を使うので、UI の手順名をジョブ実体と揃える
                  "requirements": spec.get("requirements", ""),
                  "cmake": bool(spec.get("cmake")),
-                 "engine_fetch": bool(spec.get("engine_fetch")),
                  "tools_step": bool(spec.get("tools_step")),
+                 "tools_label": spec.get("tools_label", ""),
                  "tool": "pip" if spec.get("venv_pip") else install_tool(),
                  "model_data": (str(fork_model_root(root, BACKENDS[bid]))
                                 if BACKENDS[bid].get("model_data") else ""),
@@ -2568,7 +2663,8 @@ def create_app(root: Path) -> FastAPI:
         # 表の読み出しは subprocess (初回 ~1s) — イベントループを止めない
         out = dict(await asyncio.to_thread(strata_setup.load_options, mod))
         out["configs"] = await asyncio.to_thread(strata_setup.installed_configs, mod)
-        out["venv_ready"] = (mod / ".venv" / "bin" / "python").is_file()
+        # 0.2.16+ は .venv が terminal/ 配下 (setup_dir が解決)
+        out["venv_ready"] = (strata_setup.setup_dir(mod) / ".venv" / "bin" / "python").is_file()
         return out
 
     @app.post("/api/installs/strata-model", status_code=201)

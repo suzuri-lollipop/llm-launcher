@@ -28,12 +28,13 @@ from pathlib import Path
 
 import pytest
 
-from llm_launcher import backends, calibrate, rbac
+from llm_launcher import backends, calibrate, rbac, strata_setup
 from llm_launcher.store import JsonStore
 
 ROOT = Path(__file__).resolve().parents[1]
 MAYA_PY = ROOT / "module" / "maya" / "maya.py"
-STRATA_PY = ROOT / "module" / "strata" / "strata.py"
+# 0.2.16+ は strata.py が terminal/ 配下 (setup_dir が解決。旧 clone は直下)
+STRATA_PY = strata_setup.setup_dir(ROOT / "module" / "strata") / "strata.py"
 MAYA_DS4_CFG = ROOT / "module" / "maya" / "maya-ds4.json"
 
 pytestmark = pytest.mark.skipif(
@@ -176,7 +177,7 @@ def test_maya_cli_really_has_calibrate_no_start_and_config():
 
 
 def test_strata_cli_really_has_calibration_actions():
-    py = MAYA_PY.parent.parent / "strata" / ".venv" / "bin" / "python"
+    py = STRATA_PY.parent / ".venv" / "bin" / "python"
     out = _run([str(py), str(STRATA_PY), "engine", "calibrate", "--help"],
                STRATA_PY.parent)
     assert out.returncode == 0, out.stderr

@@ -124,6 +124,8 @@ def required_cap(method: str, path: str) -> str | None:
             return "logs"
         if p.endswith("/parallel"):
             return "dashboard"         # ホームのデコード速度グラフ (ホスト詳細と同じ開示範囲)
+        if p.endswith("/meminfo"):
+            return "dashboard"         # ホーム GPU 欄の VRAM 割り当て内訳 (同じ開示範囲)
         if m == "DELETE":
             return "history"          # 履歴レコードの削除
         return CORE                    # 起動 / 停止 / 再起動
