@@ -1,21 +1,22 @@
 """Strata セットアップタブ (📦) / セットアップ画面 ② 統合の回帰テスト。
 
 Strata の純正 setup.sh / setup.py は対話インストーラだが、機械部分とモデル構成の
-両方を UI から引ける:
-  ① clone (submodule 取得済みならスキップ) → .venv → pip install -r requirements.txt
-     → engine step (薄い driver strata_engine.py が純正 get_prebuilt() で既製エンジンを受信)
-     → verify (import serve.server + engine/strata 実行可)。
+両方を UI から引ける (Maya と同じ手法):
+  ① clone (submodule 取得済みならスキップ) → .venv → tools step (薄い driver
+     strata_tools.py が純正 pip_install(runtime_packages()) でパッケージ導入)
+     → verify (import serve.server + stamp .venv/.strata-pip.json 実在)。
+     エンジンは ① ではやらない — ② の純正セットアップが engine_step で行う。
   ② モデル構成: 純正 setup.py を --family/--model/--context/--vision + --yes + --no-start
      の非対話で走らせる単一 step ジョブ。表 (family/model/context) は submodule が単一の源
      (strata_setup が subprocess で読み、選択肢をホワイトリスト検証するだけ)。
 見張る対象:
-  1. spec の形 (requirements / venv_pip / engine_fetch / engine_bin)
+  1. spec の形 (tools_step / tools_driver / venv_pip / check_files)
   2. start_install の計画 — venv_pip spec は uv が在っても pip で計画する (純正 pip_install
      が .venv の -m pip を前提にするため。表示 tool と argv のズレも許さない)
-  3. engine step が strata_engine.py を submodule cwd で plan に入ること、
-     precheck / verify が engine/strata の実在も要求すること
+  3. tools step が strata_tools.py を setup_dir cwd で plan に入ること、
+     precheck / verify が導入の stamp を要求すること
   4. driver の入口ガード (cwd 違い / setup.py が純正でない) は正直に失敗すること
-  5. /api/installs の installable が strata を engine_fetch / tool=pip で出すこと
+  5. /api/installs の installable が strata を tools_step / tool=pip で出すこと
   6. build_argv のホワイトリスト (表に無い family/model/context/vision は注入でも拒否)、
      設定 JSON 名の pure 作法 (strata-<tag+model>.json)、.venv 前条件
   7. /api/installs/strata-model の GET/POST と {jid} ルートとの衝突がないこと
@@ -38,18 +39,22 @@ from llm_launcher.store import JsonStore
 
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = INSTALL_SPECS["strata"]
-DRIVER = ROOT / "src" / "llm_launcher" / "strata_engine.py"
+DRIVER = ROOT / "src" / "llm_launcher" / "strata_tools.py"
 
 
 def test_spec_shape():
     assert SPEC["clone"] == "https://github.com/Niko1221/Strata"
     assert SPEC["module_path"] == "module/strata"
-    # 検出 (serve.server 実 import) と同じ確認を使い、エンジン実在も verify で要求する
+    # Maya と同じ手法: 検出 (serve.server 実 import) + 導入の stamp で完了判定。
+    # パッケージは純正 pip step (driver) が入れる — requirements パスは launcher が持たない。
+    # エンジンは ② の純正セットアップの仕事 (① に engine step は無い)。
     assert SPEC["check"] == "serve.server"
-    assert SPEC["requirements"] == "requirements.txt"
+    assert SPEC["requirements"] == ""
     assert SPEC["venv_pip"] is True
-    assert SPEC["engine_fetch"] is True
-    assert SPEC["engine_bin"] == "engine/strata"
+    assert SPEC["tools_step"] is True
+    assert SPEC["tools_driver"] == "strata_tools.py"
+    assert SPEC["check_files"] == [".venv/.strata-pip.json"]
+    assert not SPEC.get("engine_fetch") and not SPEC.get("engine_bin")
 
 
 def _manager(root: Path) -> InstallManager:
@@ -91,23 +96,37 @@ def test_plan_for_existing_submodule_skips_clone(monkeypatch, tmp_path: Path):
     got = _plan(monkeypatch, tmp_path)
     steps = got["steps"]
     names = [s["name"] for s in steps]
-    assert names == ["venv", "precheck", "install", "engine", "verify"]
+    # Maya と同じ: venv → precheck → tools (純正 pip step) → verify。engine step は無い
+    assert names == ["venv", "precheck", "tools", "verify"]
     # 純正 setup.py の pip_install が -m pip を前提にする = uv が在っても pip で組む
     assert got["job"]["tool"] == "pip"
     assert got["job"]["uv_path"] == ""
     venvpy = str((mod / ".venv" / "bin" / "python").resolve())
-    install = next(s for s in steps if s["name"] == "install")
-    assert install["argv"] == [venvpy, "-m", "pip", "install", "--progress-bar", "off",
-                               "-r", "requirements.txt"]
-    # engine step: 薄い driver を submodule cwd で .venv python 実行
-    eng = next(s for s in steps if s["name"] == "engine")
-    assert eng["argv"] == [venvpy, str(DRIVER)]
-    assert eng["cwd"].endswith("module/strata")
-    # precheck / verify は import だけでなくエンジン実在も要求する
+    # tools step: 薄い driver を submodule cwd で .venv python 実行
+    tools = next(s for s in steps if s["name"] == "tools")
+    assert tools["argv"] == [venvpy, str(DRIVER)]
+    assert tools["cwd"].endswith("module/strata")
+    # precheck / verify は import だけでなく導入の stamp も要求する
     for s in steps:
         if s["name"] in ("precheck", "verify"):
             assert "serve.server" in s["argv"][2]
-            assert "engine/strata" in s["argv"][2]
+            assert ".venv/.strata-pip.json" in s["argv"][2]
+
+
+def test_plan_terminal_layout_uses_terminal_cwd(monkeypatch, tmp_path: Path):
+    """0.2.16 レイアウト (terminal/setup.py): venv / tools / verify は terminal/ 基準。"""
+    mod = tmp_path / "module" / "strata"
+    (mod / "terminal" / "serve").mkdir(parents=True)
+    (mod / "terminal" / "serve" / "server.py").write_text("# clone\n", encoding="utf-8")
+    (mod / "terminal" / "setup.py").write_text("# fake\n", encoding="utf-8")
+    got = _plan(monkeypatch, tmp_path)
+    steps = got["steps"]
+    assert [s["name"] for s in steps] == ["venv", "precheck", "tools", "verify"]
+    venvpy = str((mod / "terminal" / ".venv" / "bin" / "python").resolve())
+    for s in steps:
+        if s["name"] in ("precheck", "tools", "verify"):
+            assert s["cwd"].endswith("module/strata/terminal")
+            assert s["argv"][0] == venvpy
 
 
 def test_plan_without_clone_starts_with_git_clone(monkeypatch, tmp_path: Path):
@@ -142,7 +161,7 @@ def test_freetoken_plan_still_prefers_uv(monkeypatch, tmp_path: Path):
     assert install["argv"][0] == "/usr/bin/uv" and install["argv"][1:3] == ["pip", "install"]
 
 
-# ---------------------------------------------------------------- driver (strata_engine.py)
+# ---------------------------------------------------------------- driver (strata_tools.py)
 
 def test_driver_refuses_foreign_cwd(tmp_path: Path):
     r = subprocess.run([sys.executable, str(DRIVER)], cwd=tmp_path,
@@ -158,97 +177,79 @@ def test_driver_fails_honestly_when_setup_py_is_not_stratas(tmp_path: Path):
     r = subprocess.run([sys.executable, str(DRIVER)], cwd=tmp_path,
                        capture_output=True, text=True, timeout=60)
     assert r.returncode == 1
-    assert r.stdout.startswith("strata_engine:")
+    assert r.stdout.startswith("strata_tools:")
 
 
-# driver が純正名を持つ API の面 (gpus / gpu_problem / engine_dir / arch_numbers /
-# get_prebuilt / pip_cuda_libs / CUDA13_MIN_ARCH / PREBUILT_URL / EXE) を最小で模す stub。
-# engine/BUILD.json の source と env の切替で経路を選ぶ — 純正 get_prebuilt の
-# 「source=local は黙って None (ビルド側が譲られる)」を誤読しないことをここで押さえる。
+# driver が純正名を持つ API の面 (pip_install / runtime_packages) を最小で模す stub。
+# 呼ばれた fact を stamp ファイルに残す — 純正関数経由でだけパッケージが入ること、
+# エンジンには触らないこと (② の仕事) をここで押さえる。
 STUB_SETUP = '''
-import json, os, sys
+import json, sys
 from pathlib import Path
-CUDA13_MIN_ARCH = 75
-PREBUILT_URL = "https://example.invalid/"
-EXE = "strata"
-def gpus(): return [{"index": 0, "name": "Fake PRO 4000", "arch": int(os.environ.get("STUB_GPU", "120"))}]
-def gpu_problem(g): return None
-def engine_dir(toolkit=13): return Path.cwd() / "engine"
-def arch_numbers(v): return [int(x) for x in (v or []) if str(x).isdigit()]
-def get_prebuilt(url, gpu, vision, updating=False, toolkit=13):
-    if os.environ.get("STUB_TRAP"):
-        raise SystemExit("get_prebuilt ran")
-    if os.environ.get("STUB_NONE"):
-        return None
-    e = Path("engine"); e.mkdir(exist_ok=True)
-    (e / EXE).write_bytes(b"#!/bin/sh\\n")
-    (e / "BUILD.json").write_text(json.dumps({"source": "release", "version": "0.1.57",
-                                              "archs": gpu["archs"]}))
-    return e
-def pip_cuda_libs(toolkit=13):
-    if os.environ.get("STUB_TRAP_CUDA"):
-        raise SystemExit("pip_cuda_libs ran")
-    Path("cuda_stamp").write_text("done")
+def runtime_packages():
+    return ["numpy==2.5.3", "jinja2==3.1.6"]
+def pip_install(packages, what, extra=()):
+    Path("pip_stamp").write_text(json.dumps({"packages": packages, "what": what}))
+    stamp = Path(sys.prefix) / ".strata-pip.json"
+    stamp.write_text(json.dumps(sorted(packages)))
 '''
 
 
-def _stub_repo(tmp_path: Path, build_json: dict | None) -> Path:
-    (tmp_path / "serve").mkdir()
-    (tmp_path / "serve" / "server.py").write_text("", encoding="utf-8")
-    (tmp_path / "setup.py").write_text(STUB_SETUP, encoding="utf-8")
-    if build_json is not None:
-        eng = tmp_path / "engine"
-        eng.mkdir()
-        (eng / "BUILD.json").write_text(json.dumps(build_json), encoding="utf-8")
-        (eng / "strata").write_bytes(b"#!/bin/sh\n")
+def _stub_repo(tmp_path: Path, *, terminal: bool = False) -> Path:
+    d = tmp_path / "terminal" if terminal else tmp_path
+    (d / "serve").mkdir(parents=True)
+    (d / "serve" / "server.py").write_text("", encoding="utf-8")
+    (d / "setup.py").write_text(STUB_SETUP, encoding="utf-8")
     return tmp_path
 
 
-def _run_driver(cwd: Path, env: dict[str, str]) -> subprocess.CompletedProcess:
-    e = dict(os.environ, **env)
+def _run_driver(cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
+    e = dict(os.environ, **(env or {}))
     return subprocess.run([sys.executable, str(DRIVER)], cwd=cwd, env=e,
                           capture_output=True, text=True, timeout=60)
 
 
-def test_driver_accepts_local_engine_matching_arch(tmp_path: Path):
-    """./setup.sh でビルド済みのエンジン (source=local, archs=120) は「在る」で満足 —
-    get_prebuilt はこのとき呼ばれない (純正はビルド側へ譲す設計。trap で証明)。"""
-    _stub_repo(tmp_path, {"source": "local", "version": "0.1.57", "archs": [120], "vision": "gpu"})
-    r = _run_driver(tmp_path, {"STUB_TRAP": "1", "STUB_TRAP_CUDA": "1"})
+def test_driver_calls_upstream_pip_step(tmp_path: Path):
+    """パッケージは純正 pip_install(runtime_packages()) 経由で入る (launcher は
+    requirements のパスを持たない)。エンジンは ① では触らない。"""
+    _stub_repo(tmp_path)
+    r = _run_driver(tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "ローカルビルド" in r.stdout
-    assert "受信もビルドも不要" in r.stdout
+    got = json.loads((tmp_path / "pip_stamp").read_text(encoding="utf-8"))
+    assert got["packages"] == ["numpy==2.5.3", "jinja2==3.1.6"]
+    assert "②" in r.stdout          # エンジン / モデルは ② の仕事である案内
+    assert not (tmp_path / "engine").exists()
 
 
-def test_driver_names_arch_gap_of_local_engine(tmp_path: Path):
-    """ローカルビルドのエンジンにこの GPU のコードが無いときは再ビルド導線 —
-    「受信失敗」と誤読せず、コンパイルしない立場を正直に出す。"""
-    _stub_repo(tmp_path, {"source": "local", "version": "0.1.57", "archs": [75]})
-    r = _run_driver(tmp_path, {"STUB_GPU": "120", "STUB_TRAP": "1"})
-    assert r.returncode == 1
-    assert "sm_120" in r.stdout and "setup.sh" in r.stdout
-
-
-def test_driver_fails_honestly_without_any_engine(tmp_path: Path):
-    """初回 (engine/ なし) で get_prebuilt が None (リリースに無い/不通) → rc 1 + setup.sh 案内。"""
-    _stub_repo(tmp_path, None)
-    r = _run_driver(tmp_path, {"STUB_NONE": "1"})
-    assert r.returncode == 1
-    assert "受信できませんでした" in r.stdout
-
-
-def test_driver_runs_pip_cuda_libs_only_for_release_engine(tmp_path: Path):
-    """受信経路 (release) は純正 main と同じく CUDA ホイールを入れる。local では呼ばない。"""
-    _stub_repo(tmp_path, None)
-    r = _run_driver(tmp_path, {})
+def test_driver_resolves_terminal_layout(tmp_path: Path):
+    """0.2.16: cwd がリポジトリ直下でも terminal/setup.py を見つけて実行する。"""
+    _stub_repo(tmp_path, terminal=True)
+    r = _run_driver(tmp_path)
     assert r.returncode == 0, r.stdout + r.stderr
-    assert (tmp_path / "cuda_stamp").is_file()
-    assert "エンジン:" in r.stdout
+    assert (tmp_path / "terminal" / "pip_stamp").is_file()
+
+
+def test_driver_falls_back_to_requirements_lines(tmp_path: Path):
+    """runtime_packages の無い古い版: pinned requirements.txt (requirement_lines) を使う。"""
+    d = tmp_path
+    (d / "serve").mkdir()
+    (d / "serve" / "server.py").write_text("", encoding="utf-8")
+    (d / "setup.py").write_text(
+        "from pathlib import Path\n"
+        "REQUIREMENTS = Path('requirements.txt')\n"
+        "def requirement_lines(path=None):\n"
+        "    return [l.strip() for l in REQUIREMENTS.read_text().splitlines() if l.strip()]\n"
+        "def pip_install(packages, what, extra=()):\n"
+        "    Path('pip_stamp').write_text(','.join(packages))\n", encoding="utf-8")
+    (d / "requirements.txt").write_text("numpy==2.5.3\npsutil==7.2.2\n", encoding="utf-8")
+    r = _run_driver(tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert (tmp_path / "pip_stamp").read_text(encoding="utf-8") == "numpy==2.5.3,psutil==7.2.2"
 
 
 # ---------------------------------------------------------------- API / ウィザード文言
 
-def test_installs_api_exposes_strata_with_engine_fetch(tmp_path: Path):
+def test_installs_api_exposes_strata_with_tools_step(tmp_path: Path):
     from fastapi.testclient import TestClient
 
     from llm_launcher import app as app_mod
@@ -258,8 +259,9 @@ def test_installs_api_exposes_strata_with_engine_fetch(tmp_path: Path):
     entries = client.get("/api/installs").json()["installable"]
     ent = next(e for e in entries if e["id"] == "strata")
     assert ent["name"] == "Strata"
-    assert ent["requirements"] == "requirements.txt"
-    assert ent["engine_fetch"] is True and ent["cmake"] is False
+    assert ent["requirements"] == ""
+    assert ent["tools_step"] is True and ent["cmake"] is False
+    assert ent["tools_label"]        # UI の手順名 (ジョブ実体と揃える)
     # /api/installs の tool (グローバル) にかかわらず、この entry の tool は pip
     assert ent["tool"] == "pip"
 
@@ -269,8 +271,7 @@ def test_wizard_copy_mentions_engine_and_strata_model_step():
 
     static = Path(llm_launcher.__file__).parent / "static"
     js = (static / "setup.js").read_text("utf-8")
-    assert "エンジンを受信" in js          # step chip 名 (engine)
-    assert "engine_fetch" in js            # 確認画面の手順組み立て
+    assert "tools_label" in js             # 確認画面 / step chip の手順名 (純正 pip step)
     assert "INSTALL_NOTES" in js           # 完了後の追い書き
     # ② の Strata モデル構成: 面板 / 送信先 / step 名 / 稼働設定の config 接続
     assert "モデルを準備" in js            # INS_STEPS model chip
@@ -421,9 +422,10 @@ def test_build_argv_without_submodule_tables_fails(tmp_path: Path):
 
 
 def test_build_argv_against_real_submodule():
-    """実 submodule が在る環境では、表読み出し (subprocess) と純正設定名作法が生きていること。"""
+    """実 submodule が在る環境では、表読み出し (subprocess) と純正設定名作法が生きていること。
+    0.2.16 の terminal/ レイアウトでも旧レイアウトでも同じく動く (setup_dir が解決)。"""
     mod = ROOT / "module" / "strata"
-    if not (mod / "setup.py").is_file():
+    if not (strata_setup.setup_dir(mod) / "setup.py").is_file():
         pytest.skip("module/strata が未 clone")
     opts = strata_setup.load_options(mod)
     assert opts.get("available") is True
@@ -512,6 +514,54 @@ def test_start_strata_model_plans_single_model_job(monkeypatch, tmp_path: Path):
                         "--yes", "--no-start", "--no-browser"]
     # 実行は .venv の python — setup.py が自らの pip_install で .venv を前提にするため
     assert str(mod / ".venv" / "bin" / "python") in str(argv[0])
+
+
+def test_start_strata_model_terminal_layout_cwd(monkeypatch, tmp_path: Path):
+    """0.2.16: ② のジョブは terminal/ を cwd に setup.py を実行する (venv も terminal/)。"""
+    mod = tmp_path / "module" / "strata"
+    term = mod / "terminal"
+    (term / ".venv" / "bin").mkdir(parents=True)
+    (term / ".venv" / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (term / "setup.py").write_text("# fake\n", encoding="utf-8")
+    (term / "serve").mkdir()
+    (term / "serve" / "server.py").write_text("# server\n", encoding="utf-8")
+    _seed_tables(monkeypatch, mod)
+    got: dict[str, object] = {}
+
+    async def fake(self, job, module_dir, argv):  # noqa: ANN001
+        got["cwd"] = str(module_dir)
+        got["argv"] = list(argv)
+
+    monkeypatch.setattr(InstallManager, "_run_model", fake)
+    mgr = _manager(tmp_path)
+
+    async def go() -> None:
+        mgr.start_strata_model({"family": "qwen", "model": "Q2_0", "context": 131072})
+        await asyncio.sleep(0)
+
+    asyncio.run(go())
+    assert got["cwd"].endswith("module/strata/terminal")
+    assert got["argv"][0] == str(term / ".venv" / "bin" / "python")
+    assert got["argv"][1] == "setup.py"
+
+
+def test_strata_model_api_venv_ready_terminal_layout(tmp_path: Path):
+    """venv_ready は terminal/.venv を見る (ウィザードの開始ボタンガード)。"""
+    from fastapi.testclient import TestClient
+
+    from llm_launcher import app as app_mod
+
+    mod = tmp_path / "module" / "strata"
+    term = mod / "terminal"
+    (term / ".venv" / "bin").mkdir(parents=True)
+    (term / ".venv" / "bin" / "python").write_text("#!/bin/sh\n", encoding="utf-8")
+    (term / "setup.py").write_text("# fake\n", encoding="utf-8")
+    (tmp_path / "data").mkdir(parents=True)
+    client = TestClient(app_mod.create_app(tmp_path))
+    body = client.get("/api/installs/strata-model").json()
+    assert body["venv_ready"] is True
+    body2 = client.get("/api/profiles/setup-options").json()
+    assert body2["strata"]["venv_ready"] is True
 
 
 # ---------------------------------------------------------------- API (②)

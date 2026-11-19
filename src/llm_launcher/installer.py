@@ -58,15 +58,18 @@ PROGRESS_MIN_INTERVAL = 1.0
 # UI からインストールできるバックエンド。
 # requirements / cmake / engine_bin を持つ spec は FreeToken 系と打って変わって
 # 「pip のパッケージ化が無い + ネイティブビルド込み」の形 (Basalt) に対応する。
-# strata は純正 setup.sh / setup.py が対話インストーラなので、機械部分だけを薄い driver
-# (strata_engine.py) で UI に乗せた: .venv + requirements.txt + 公式リリースからの
-# 既製エンジン受信 (engine_fetch)。モデル選択・ダウンロード・strata-<model>.json 生成は
-# セットアップ画面 ② が純正 setup.py を --yes --no-start で走らせる (start_strata_model)。
-# maya も同じ立場: 純正 maya.py は --yes / --download-model で完全非対話になるので、
-# ① は家系に依存しない機械部分 (.venv + 純正 tools_step = PY_PACKAGES + llama.cpp ソース)
-# だけを薄い driver (maya_tools.py) で UI に乗せ、エンジンビルド (家系別) + モデル選択・
-# ダウンロード・maya-<model>.json 生成は ② が純正 maya.py を非対話で走らせる
-# (start_maya_model)。手動の ./maya.sh / ./setup.sh も従来どおり使える。
+# strata / maya は純正 setup.sh / setup.py (maya.sh / maya.py) が対話インストーラなので、
+# ① は家系に依存しない機械部分だけを薄い driver で UI に乗せる (同じ手法):
+#   strata: .venv + 純正 pip_install(runtime_packages()) (strata_tools.py)。
+#           エンジン受信 / ビルド + モデル選択・ダウンロード・strata-<model>.json 生成は
+#           ② が純正 setup.py を --yes --no-start で走らせる (start_strata_model)。
+#   maya:   .venv + 純正 tools_step = PY_PACKAGES + llama.cpp ソース (maya_tools.py)。
+#           エンジンビルド (家系別) + モデル選択・ダウンロード・maya-<model>.json 生成は
+#           ② が純正 maya.py を --yes --no-start --download-model で走らせる (start_maya_model)。
+# 完了判定は serve.server の実 import + 導入の stamp (check_files)。パッケージのパスや
+# エンジンの置き場は純正が知るので、upstream のレイアウト変更 (Strata 0.2.16 の terminal/
+# 移行など) は driver の setup_dir 解決 + 純正関数で吸収する。手動の ./setup.sh / ./maya.sh
+# も従来どおり使える。
 INSTALL_SPECS: dict[str, dict[str, Any]] = {
     "freetoken-fork": {
         "clone": "https://github.com/suzuri-lollipop/FreeToken",
@@ -123,27 +126,32 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
             "note": "モデル pack のダウンロード後に model / gpu / kv を環境に合わせてください",
         },
     },
-    # Strata (https://github.com/Niko1221/Strata): サブモジュールだが .venv は無く、エンジン
-    # (engine/strata) も GPU ごとに公式リリースから受信する / コンパイルする (純正 setup.py の
-    # 対話手順)。UI 化するのは機械部分だけ: clone (submodule 取得済みならスキップ) →
-    # .venv → pip install -r requirements.txt → strata_engine.py が純正 setup.py の
-    # get_prebuilt() で既製エンジン + NVIDIA CUDA ホイールを入れる → verify
-    # (serve.server import + engine/strata 実行可)。純正 setup.py の pip_install は
-    # `.venv/bin/python -m pip` を前提にするため .venv は uv ではなく標準 venv+pip で作る
-    # (venv_pip)。GPU が古い / アーキが既製に無い場合はコンパイル領域なので setup.sh 1 回へ
-    # 正直に導線する (ジョブログに理由が出る)。
+    # Strata (https://github.com/Niko1221/Strata): Maya と同じ手法 — ① は家系に依存しない
+    # 機械部分だけ: clone (submodule 取得済みならスキップ) → .venv → tools step が薄い
+    # driver (strata_tools.py) から純正 setup.py の pip_install(runtime_packages()) を呼んで
+    # Python パッケージを入れる (stamp .venv/.strata-pip.json 管理は純正そのまま) → verify
+    # (serve.server import + stamp 実在)。**エンジンは ① ではやらない** — ② のモデル構成
+    # (純正 setup.py --yes --no-start) が engine_step で既製受信 / ローカルビルド / CUDA
+    # ホイールを純正どおり行う (Maya の家系別エンジンビルドが ② なのと同じ立場)。
+    # requirements.txt のパスやエンジンの置き場は launcher が持たない — 0.2.16 の
+    # terminal/ レイアウト移行のような upstream の内部変更は純正側が吸収する。
+    # 純正 pip_install は `.venv/bin/python -m pip` を前提にするため .venv は uv ではなく
+    # 標準 venv+pip で作る (venv_pip)。0.2.16+ は setup.py / serve / .venv が terminal/
+    # 配下 (strata_setup.setup_dir が解決。旧 clone / fork はリポジトリ直下)。
     "strata": {
         "clone": "https://github.com/Niko1221/Strata",
         "ref": "",
         "refs": [],
         "fork_name": "",
         "module_path": "module/strata",
-        "check": "serve.server",         # submodule を cwd にした実 import (検出と同じ)
-        "extras": "",                    # -e . ではなく requirements.txt 側で入れる
-        "requirements": "requirements.txt",
+        "check": "serve.server",         # submodule (setup_dir) を cwd にした実 import (検出と同じ)
+        "extras": "",
+        "requirements": "",              # パッケージは純正 pip step が入れる (requirements パスは純正が知る)
         "venv_pip": True,                # 標準 venv+pip (upstream setup.py が -m pip を使う)
-        "engine_fetch": True,            # strata_engine.py で既製エンジンを受信する step
-        "engine_bin": "engine/strata",   # precheck / verify はこれも要求する
+        "tools_step": True,              # strata_tools.py で純正 pip_install(runtime_packages())
+        "tools_driver": "strata_tools.py",
+        "tools_label": "依存パッケージを導入 (純正セットアップ経由)",
+        "check_files": [".venv/.strata-pip.json"],   # 導入の stamp (import だけだと依存未導入でも通る)
     },
     # Project Maya (https://github.com/mw00/project-maya): サブモジュール。純正 maya.sh と
     # 同じ標準 venv+pip で .venv を作り (maya.py / setup.py の pip_install が -m pip を前提)、
@@ -165,6 +173,8 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
         "requirements": "",
         "venv_pip": True,                # 標準 venv+pip (maya.sh / 純正 pip_install と同じ)
         "tools_step": True,              # maya_tools.py で純正 tools_step (pip + llama.cpp)
+        "tools_driver": "maya_tools.py",
+        "tools_label": "依存と llama.cpp ソースを導入",
         "check_files": [".venv/.strata-pip.json",
                         "third_party/llama.cpp/ggml/CMakeLists.txt"],
     },
@@ -706,6 +716,11 @@ class InstallManager:
         # root が相対パスだと argv[0] が subprocess の新 cwd 基準で解決されて 127 になる
         module_dir = (self.root / module_rel).resolve()
         module_dir.parent.mkdir(parents=True, exist_ok=True)
+        # Strata 0.2.16+: setup.py / serve / .venv / engine は terminal/ 配下。
+        # git 操作 (clone / branch) はリポジトリ直下のまま、venv / 依存 / エンジン /
+        # verify は setup_dir を cwd にする (engine_bin / requirements の相対パスは
+        # この cwd 基準でそのまま効く)。古い clone / fork は直下 = 従来どおり。
+        work_dir = strata_setup.setup_dir(module_dir) if backend_id == "strata" else module_dir
         needs_clone = not clone_exists(self.root, spec)
 
         if needs_clone and not spec["clone"]:
@@ -716,12 +731,13 @@ class InstallManager:
         venv_pip = bool(spec.get("venv_pip"))
         uv_path = "" if venv_pip else find_uv()
         tool = "uv" if uv_path else "pip"
-        venvpy = str(module_dir / ".venv" / "bin" / "python")
-        # requirements 系 spec (Basalt / Strata) は verify でもネイティブエンジンの実在を
-        # 要求する。precheck が通らない = 依存 or エンジンのどれかが欠けている、ということで
+        venvpy = str(work_dir / ".venv" / "bin" / "python")
+        # engine_bin を持つ spec (Basalt) は verify でもネイティブエンジンの実在を要求する。
+        # precheck が通らない = 依存 or エンジンのどれかが欠けている、ということで
         # install / cmake が必ず走る (pip の再実行はほぼキャッシュで素通しになる)。
-        # check_files (Maya) は導入の stamp / llama.cpp ソースのような「ファイル実在」条件。
-        # serve.server の import は依存が無くても通る (遅延 import) ので、これが実質の完了判定。
+        # check_files (Maya / Strata) は導入の stamp / llama.cpp ソースのような「ファイル実在」
+        # 条件。serve.server の import は依存が無くても通る (遅延 import) ので、これが実質の
+        # 完了判定。エンジンは Strata / Maya とも ② の純正セットアップが入れる (① では見ない)。
         engine_bin = str(spec.get("engine_bin") or "")
         conds = ([f"_os.access({engine_bin!r}, _os.X_OK)"] if engine_bin else [])
         conds += [f"_os.path.isfile({rel!r})" for rel in (spec.get("check_files") or [])]
@@ -742,14 +758,17 @@ class InstallManager:
             # clone 済みでも「選んだブランチ」に寄せる (venv / インストールより前に置く)
             steps.append({"name": "branch"})
         steps.append({"name": "venv"})
-        steps.append({"name": "precheck", "argv": verify_argv, "cwd": str(module_dir)})
+        steps.append({"name": "precheck", "argv": verify_argv, "cwd": str(work_dir)})
         if spec.get("tools_step"):
-            # Maya: pip のパッケージ化が無い (setup.py はインストーラ補助) ので -e . / -r では
-            # なく、純正 tools_step (PY_PACKAGES + llama.cpp ソース) を薄い driver から呼ぶ。
-            # エンジンビルドは家系別なので ② のモデル構成 (start_maya_model) の仕事
+            # Maya / Strata: パッケージ導入は純正のインストーラ関数を薄い driver から呼ぶ
+            # (Maya = tools_step: PY_PACKAGES + llama.cpp ソース / Strata = pip_install:
+            # pinned requirements + textual)。requirements のパスやエンジンの置き場は純正が
+            # 知る — launcher は upstream の内部レイアウト (0.2.16 の terminal/ 等) を持たない。
+            # エンジンビルド / 受信は ② のモデル構成 (純正 setup) の仕事
+            driver = str(spec.get("tools_driver") or "maya_tools.py")
             steps.append({"name": "tools",
-                          "argv": [venvpy, str(Path(__file__).parent / "maya_tools.py")],
-                          "cwd": str(module_dir)})
+                          "argv": [venvpy, str(Path(__file__).parent / driver)],
+                          "cwd": str(work_dir)})
         else:
             req = str(spec.get("requirements") or "")
             if req:
@@ -762,14 +781,7 @@ class InstallManager:
                 install_argv = [uv_path, "pip", "install", "--python", venvpy, *spec_args]
             else:
                 install_argv = [venvpy, "-m", "pip", "install", "--progress-bar", "off", *spec_args]
-            steps.append({"name": "install", "argv": install_argv, "cwd": str(module_dir)})
-        if spec.get("engine_fetch"):
-            # Strata: 純正 setup.py の get_prebuilt() を薄い driver から呼んで既製エンジンを
-            # 受信する (engine/strata + CUDA ホイール)。GPU が既製に無い環境は driver が
-            # 理由を出して失敗し、setup.sh 1 回へ導線する (ここでコンパイルはしない)
-            steps.append({"name": "engine",
-                          "argv": [venvpy, str(Path(__file__).parent / "strata_engine.py")],
-                          "cwd": str(module_dir)})
+            steps.append({"name": "install", "argv": install_argv, "cwd": str(work_dir)})
         if spec.get("cmake"):
             if not shutil.which("cmake"):
                 raise InstallError("cmake が見つかりません (Basalt のエンジンビルドに必要です。"
@@ -792,7 +804,7 @@ class InstallManager:
                           "argv": ["cmake", "--build", "build",
                                    "--parallel", str(os.cpu_count() or 4)],
                           "cwd": str(module_dir)})
-        steps.append({"name": "verify", "argv": verify_argv, "cwd": str(module_dir)})
+        steps.append({"name": "verify", "argv": verify_argv, "cwd": str(work_dir)})
 
         job = self._new_job("install", actor, backend=backend_id,
                             backend_name=BACKENDS.get(backend_id, {}).get("name", backend_id),
@@ -820,8 +832,9 @@ class InstallManager:
         spec = INSTALL_SPECS["strata"]
         self._check_free()
         module_dir = (self.root / spec["module_path"]).resolve()
-        venvpy = module_dir / ".venv" / "bin" / "python"
-        if not (module_dir / "setup.py").is_file() or not venvpy.is_file():
+        work_dir = strata_setup.setup_dir(module_dir)   # 0.2.16+: terminal/
+        venvpy = work_dir / ".venv" / "bin" / "python"
+        if not (work_dir / "setup.py").is_file() or not venvpy.is_file():
             raise InstallError("Strata の実行環境 (.venv) がまだありません。"
                                "先に ① インストールを実行してください")
         try:
@@ -838,8 +851,10 @@ class InstallManager:
                             config_name=config_name)
         job["steps"] = ["model"]
         job["started_ts"] = time.time()   # 完了時の config 新生成判定の基準時刻
+        # cwd は setup_dir (0.2.16+ は terminal/ に setup.py が在る)。config の解決も
+        # _run_model がこのディレクトリ基準で行う (installed_configs は冪等に解決)
         self._tasks[job["id"]] = asyncio.create_task(
-            self._run_model(job, module_dir, [str(venvpy), *argv]))
+            self._run_model(job, work_dir, [str(venvpy), *argv]))
         return self._public(job)
 
     def start_maya_model(self, opts: dict[str, Any],
@@ -1081,10 +1096,19 @@ class InstallManager:
         if job.get("cuda"):
             self._append_log(job, f"CUDA: {job['cuda']} (CMAKE_CUDA_COMPILER として明示)")
         switched = False   # ブランチ切替が起きたら依存を入れ直す (precheck スキップを効かせない)
+        is_strata = job.get("backend") == "strata"
+        work_dir = strata_setup.setup_dir(module_dir) if is_strata else module_dir
         try:
-            if job.get("clean") and (module_dir / ".venv").exists():
+            # 0.2.16 レイアウト移行: 旧直下 .venv を terminal/ へ移す (純正 setup.sh と
+            # 同じ一度きりの移行。パッケージの再取得なしで引き継ぐ)
+            if is_strata and work_dir != module_dir \
+                    and (module_dir / ".venv").exists() and not (work_dir / ".venv").exists():
+                await asyncio.to_thread(shutil.move, str(module_dir / ".venv"),
+                                        str(work_dir / ".venv"))
+                self._append_log(job, ".venv を terminal/ へ移しました (Strata 0.2.16 レイアウト)")
+            if job.get("clean") and (work_dir / ".venv").exists():
                 self._append_log(job, "クリーン再インストール: .venv を削除します")
-                await asyncio.to_thread(shutil.rmtree, module_dir / ".venv")
+                await asyncio.to_thread(shutil.rmtree, work_dir / ".venv")
             if job.get("clean") and spec.get("cmake") and (module_dir / "build").exists():
                 self._append_log(job, "クリーン再インストール: build/ を削除します")
                 await asyncio.to_thread(shutil.rmtree, module_dir / "build")
@@ -1094,7 +1118,19 @@ class InstallManager:
                 name = step["name"]
                 if name == "venv":
                     job["step"] = name
-                    note = await asyncio.to_thread(self._venv_ensure, job, module_dir)
+                    if is_strata:
+                        # 新規 clone はここで初めて terminal/ が現れる → 再解決して
+                        # 以降の step (precheck / install / tools / verify) を寄せる
+                        wd = strata_setup.setup_dir(module_dir)
+                        if wd != work_dir:
+                            work_dir = wd
+                            venvpy = str(work_dir / ".venv" / "bin" / "python")
+                            for s in steps:
+                                if s["name"] in ("precheck", "install", "tools", "verify"):
+                                    s["cwd"] = str(work_dir)
+                                    if s.get("argv"):
+                                        s["argv"][0] = venvpy
+                    note = await asyncio.to_thread(self._venv_ensure, job, work_dir)
                     self._append_log(job, note)
                     continue
                 if name == "branch":

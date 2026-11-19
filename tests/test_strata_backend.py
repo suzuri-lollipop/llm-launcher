@@ -14,10 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from llm_launcher import backends
+from llm_launcher import backends, strata_setup
 
 ROOT = Path(__file__).resolve().parents[1]
-SERVER_PY = ROOT / "module" / "strata" / "serve" / "server.py"
+# 0.2.16+ は serve が terminal/ 配下 (setup_dir が解決。旧 clone は直下)
+SERVER_PY = strata_setup.setup_dir(ROOT / "module" / "strata") / "serve" / "server.py"
 
 pytestmark = pytest.mark.skipif(
     not SERVER_PY.exists(),
@@ -67,7 +68,8 @@ def test_config_side_options_default_off():
 
 
 def _argv(on: tuple[str, ...] = (), **values) -> list[str]:
-    b = backends.BACKENDS["strata"]
+    # 実起動と同じ解決 (backend_for): 0.2.16+ は terminal/serve/server.py に寄る
+    b = backends.backend_for(ROOT, "strata")
     profile = {
         "command": "",
         "values": {"config": "/models/strata-q2_0.json", "engine": "strata",
@@ -81,7 +83,7 @@ def _argv(on: tuple[str, ...] = (), **values) -> list[str]:
 
 def test_default_argv_launches_serve_server():
     argv = _argv()
-    assert argv[:2] == ["py", str(ROOT / "module" / "strata" / "serve" / "server.py")]
+    assert argv[:2] == ["py", str(SERVER_PY)]
     assert argv[argv.index("--config"):argv.index("--config") + 2] == \
         ["--config", "/models/strata-q2_0.json"]
     assert argv[argv.index("--engine") + 1] == "strata"

@@ -129,8 +129,9 @@ def test_plan_without_clone_starts_with_git_clone(monkeypatch, tmp_path: Path):
                                      str((tmp_path / "module" / "maya").resolve())]
 
 
-def test_strata_plan_still_has_install_and_engine_steps(monkeypatch, tmp_path: Path):
-    """tools_step は maya だけの特殊化: Strata は従来どおり install + engine (受信)。"""
+def test_strata_plan_uses_same_tools_step_approach_as_maya(monkeypatch, tmp_path: Path):
+    """Strata も Maya と同じ手法: 純正パッケージ導入 (tools) + stamp verify。
+    エンジン受信の engine step は ① に無い (② の純正セットアップの仕事)。"""
     mod = tmp_path / "module" / "strata"
     (mod / "serve").mkdir(parents=True)
     (mod / "serve" / "server.py").write_text("# clone\n", encoding="utf-8")
@@ -149,7 +150,9 @@ def test_strata_plan_still_has_install_and_engine_steps(monkeypatch, tmp_path: P
 
     asyncio.run(go())
     names = [s["name"] for s in got["steps"]]
-    assert names == ["venv", "precheck", "install", "engine", "verify"]
+    assert names == ["venv", "precheck", "tools", "verify"]
+    tools = next(s for s in got["steps"] if s["name"] == "tools")
+    assert tools["argv"][1].endswith("strata_tools.py")
 
 
 # ---------------------------------------------------------------- driver (maya_tools.py)
@@ -212,7 +215,7 @@ def test_installs_api_exposes_maya_with_tools_step(tmp_path: Path):
     ent = next(e for e in entries if e["id"] == "maya")
     assert ent["name"] == "Project Maya"
     assert ent["tools_step"] is True
-    assert ent["engine_fetch"] is False and ent["cmake"] is False
+    assert not ent.get("engine_fetch") and ent["cmake"] is False
     # /api/installs の tool (グローバル) にかかわらず、この entry の tool は pip
     assert ent["tool"] == "pip"
 

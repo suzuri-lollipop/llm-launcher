@@ -916,12 +916,15 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "repo": "https://github.com/Niko1221/Strata",
         "module_path": "module/strata", "kind": "python",
         "desc": "MoE エキスパートを RAM/SSD に階層化して consumer GPU で大型モデルを動かすエンジン"
-                " (OpenAI/Anthropic 互換)。初回はセットアップタブ (📦) で .venv・依存・エンジンを入れ、"
-                "モデル設定 (選択・ダウンロード・strata-<model>.json 生成) はセットアップ画面 ② が"
+                " (OpenAI/Anthropic 互換)。初回はセットアップタブ (📦) で .venv・依存パッケージを入れ"
+                " (Maya と同じく純正の pip step 経由)、エンジン受信 / ビルド・モデル設定"
+                " (選択・ダウンロード・strata-<model>.json 生成) はセットアップ画面 ② が"
                 "純正 setup.py を非対話で走らせて完結させる。手動なら module/strata で setup.sh も可。",
-        # serve/server.py は __file__ から自リポジトリを解決するので cwd 依存ではない
+        # serve/server.py は __file__ から自リポジトリを解決するので cwd 依存ではない。
+        # 0.2.16+ は terminal/serve/server.py (backend_for が実 location に解決する)
         "default_command": "{python} {root}/module/strata/serve/server.py",
-        # serve はリポジトリ直下のパッケージ (未 install) → submodule を cwd に実 import して判定
+        # serve はリポジトリ直下 (0.2.16+ は terminal/) のパッケージ (未 install) →
+        # setup_dir を cwd に実 import して判定 (app.detect)
         "check_module": "serve.server", "check_cwd": True, "health_path": "/health",
         "ready_markers": ["ready: http"],
         "default_port": "8080",
@@ -1012,17 +1015,25 @@ BACKENDS: dict[str, dict[str, Any]] = {
 def backend_for(root: Path, backend_id: str) -> dict[str, Any]:
     """BACKENDS[backend_id] の fork 版: module_path と default_command を module/fork/ 配下の
     実ディレクトリ名 (clone 既定の Strata / FreeToken 等の大文字表記も含む) に解決して返す。
-    フォーク以外、またはディレクトリが既定名と一致する場合は BACKENDS のエントリそのもの。"""
+    フォーク以外、またはディレクトリが既定名と一致する場合は BACKENDS のエントリそのもの。
+    Strata 系は 0.2.16+ の terminal/ レイアウトも解決する (serve/server.py の位置)。"""
     b = BACKENDS[backend_id]
     name = FORK_CLONE_DIRS.get(backend_id)
-    if not name:
-        return b
-    actual = fork_dir(root, name)
-    if actual is None or actual == b.get("module_path"):
-        return b
-    b = dict(b)
-    b["module_path"] = actual
-    b["default_command"] = b["default_command"].replace(f"module/fork/{name}", actual)
+    if name:
+        actual = fork_dir(root, name)
+        if actual is not None and actual != b.get("module_path"):
+            b = dict(b)
+            b["module_path"] = actual
+            b["default_command"] = b["default_command"].replace(f"module/fork/{name}", actual)
+    if backend_id in ("strata", "strata-fork"):
+        # 0.2.16: serve は terminal/ 配下。module_path はリポジトリ直下のまま
+        # (git / submodule 操作の基準)。起動コマンドだけ実 location に寄せる。
+        mod = root / b["module_path"]
+        if (mod / "terminal" / "serve" / "server.py").is_file() \
+                and "/terminal/serve/server.py" not in b["default_command"]:
+            b = dict(b)
+            b["default_command"] = b["default_command"].replace(
+                "/serve/server.py", "/terminal/serve/server.py")
     return b
 
 
@@ -1034,11 +1045,15 @@ def backend_for(root: Path, backend_id: str) -> dict[str, Any]:
 def python_candidates(root: Path, module_path: str | None = None) -> list[tuple[str, str]]:
     """{python} トークンの解決候補 (優先順)。
     1. バックエンド submodule 自身の .venv (module/<name>/.venv — uv sync の既定)
+       Strata 0.2.16+ は terminal/.venv が本体 (純正 setup.sh が旧 .venv を移す) → 先に試す
     2. GUI(llm-launcher)の .venv
     3. launcher 自身を実行中の python
     """
     out: list[tuple[str, str]] = []
     if module_path:
+        term = root / module_path / "terminal" / ".venv" / "bin" / "python"
+        if term.exists():
+            out.append((f"module venv ({module_path}/terminal)", str(term)))
         out.append((f"module venv ({module_path})", str(root / module_path / ".venv" / "bin" / "python")))
     out.append(("GUI venv", str(root / ".venv" / "bin" / "python")))
     out.append(("launcher python", sys.executable))

@@ -353,8 +353,10 @@ def gen_strata(root: Path, sub: str = "strata") -> dict[str, Any]:
     setup.py が書く strata-<model>.json の "args" 配列に入るため、ここでは
     サーバープロセス自体の起動フラグだけを正表化する。
     sub: "strata" (upstream submodule) またはフォーク clone の実パス ("fork/strata", "fork/Strata" など)。
+    0.2.16+ は serve が terminal/ 配下 (strata_setup.setup_dir が解決)。
     """
-    src = (_repo(root, sub) / "serve" / "server.py").read_text()
+    from . import strata_setup
+    src = (strata_setup.setup_dir(_repo(root, sub)) / "serve" / "server.py").read_text()
     return _argparse_table(src)
 
 
@@ -476,7 +478,8 @@ def build(root: Path, only: set[str] | None = None) -> dict[str, dict[str, Any]]
         tables["llamacpp"] = gen_llamacpp(root)
     # Strata (module/strata): submodule 取得済みなら serve/server.py の argparse から生成
     if need("strata"):
-        if (_repo(root, "strata") / "serve" / "server.py").exists():
+        from . import strata_setup
+        if (strata_setup.setup_dir(_repo(root, "strata")) / "serve" / "server.py").exists():
             tables["strata"] = gen_strata(root)
         else:
             print("strata: module/strata が未クローンのため skip", flush=True)
@@ -504,6 +507,9 @@ def build(root: Path, only: set[str] | None = None) -> dict[str, dict[str, Any]]
     # Strata (fork) (module/fork/strata): フォーク clone の serve/server.py から正表を生成。
     # (deepseek/ ツールキットと同じ clone。DeepSeek 専用バックエンドは廃止 = フォークへ合流予定のため)
     sf = _fork_dir(root, "strata") if need("strata-fork") else None
+    if sf:
+        from . import strata_setup
+        sf = strata_setup.setup_dir(sf)
     if sf and (sf / "serve" / "server.py").exists():
         tables["strata-fork"] = gen_strata(root, str(sf.relative_to(root / "module")))
     else:
