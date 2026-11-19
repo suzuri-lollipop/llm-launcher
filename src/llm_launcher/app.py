@@ -1807,7 +1807,9 @@ def create_app(root: Path) -> FastAPI:
         """ダッシュボードのデコード速度グラフ用: 稼働中サーバーの /metrics を中継する。
 
         Strata / Maya / Basalt 系は JSON /metrics、vLLM / SGLang / llama.cpp は
-        Prometheus /metrics (+ llama.cpp は /slots)、FreeToken 系は /v1/stats。
+        Prometheus /metrics (+ llama.cpp は /slots)。FreeToken 系は新しいエンジンが
+        basalt 形の JSON /metrics (+ /slots 行) を出すので同じ経路に合流し、live の
+        無い旧エンジンは /v1/stats の合算にフォールバックする。
         ブラウザから直接叩くと CORS や API キーで失敗するため、起動中のポートへ
         launcher 同一オリジンでプロキシし、グラフに必要な値だけを正規化して返す。
         """
@@ -1825,28 +1827,51 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, "このバックエンドはデコード速度グラフに対応していません")
         key = api_key_from_argv(s.get("argv") or [])
         headers = {"Authorization": f"Bearer {key}"} if key else {}
-        if backend not in ("strata", "strata-fork", "maya", "basalt"):
-            return await _parallel_other(sid, s, backend, port, headers)
 
         def _fetch() -> dict[str, Any]:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/metrics", headers=headers)
             with urllib.request.urlopen(req, timeout=2.0) as r:
                 return json.loads(r.read().decode("utf-8", "replace"))
 
-        try:
-            data = await asyncio.to_thread(_fetch)
-        except urllib.error.HTTPError as e:
-            raise HTTPException(e.code, f"サーバーの /metrics が HTTP {e.code} を返しました")
-        except urllib.error.URLError as e:
-            raise HTTPException(502, f"サーバーの /metrics に接続できません: {e.reason}")
-        except OSError as e:
-            raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
-        except ValueError as e:
-            raise HTTPException(502, f"サーバーの /metrics を JSON として読み取れません: {e}")
-        except Exception as e:                                  # noqa: BLE001 — 内訳は補助情報なので常に 502
-            raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
-        if not isinstance(data, dict):
-            raise HTTPException(502, "サーバーの /metrics が JSON オブジェクトではありません")
+        async def _metrics_doc(*, optional: bool) -> dict[str, Any] | None:
+            """optional=True は FreeToken の形式確認: 読めなければ None (フォールバック側が
+            本当のエラーを出す)。Strata 系は従来どおり失敗をそのまま 502 で返す。"""
+            try:
+                data = await asyncio.to_thread(_fetch)
+            except urllib.error.HTTPError as e:
+                if optional:
+                    return None
+                raise HTTPException(e.code, f"サーバーの /metrics が HTTP {e.code} を返しました")
+            except urllib.error.URLError as e:
+                if optional:
+                    return None
+                raise HTTPException(502, f"サーバーの /metrics に接続できません: {e.reason}")
+            except OSError as e:
+                if optional:
+                    return None
+                raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
+            except ValueError as e:
+                if optional:
+                    return None
+                raise HTTPException(502, f"サーバーの /metrics を JSON として読み取れません: {e}")
+            except Exception as e:                                  # noqa: BLE001 — 内訳は補助情報なので常に 502
+                if optional:
+                    return None
+                raise HTTPException(502, f"サーバーの /metrics を読み取れません: {e}")
+            if not isinstance(data, dict):
+                if optional:
+                    return None
+                raise HTTPException(502, "サーバーの /metrics が JSON オブジェクトではありません")
+            return data
+
+        if backend in ("freetoken", "freetoken-fork"):
+            data = await _metrics_doc(optional=True)
+            if data is None or not isinstance(data.get("live"), dict):
+                return await _parallel_other(sid, s, backend, port, headers)
+        elif backend in ("strata", "strata-fork", "maya", "basalt"):
+            data = await _metrics_doc(optional=False)
+        else:
+            return await _parallel_other(sid, s, backend, port, headers)
 
         live = data.get("live") if isinstance(data, dict) else None
         live = live if isinstance(live, dict) else {}
@@ -1983,6 +2008,52 @@ def create_app(root: Path) -> FastAPI:
             },
             "history": {"tok_s": history_tok, "slot_tok_s": slot_hist},
             "slots": slots,
+        }
+
+    @app.get("/api/sessions/{sid}/meminfo")
+    async def session_meminfo(sid: str) -> dict[str, Any]:
+        """ダッシュボードの GPU 欄用: FreeToken エンジンの VRAM 割り当て内訳を中継する。
+
+        Maya の GPU マップと同じ「カードに何が載っているか」(重み / KV / SWA / MoE / GDN /
+        予備 / 残余 / 空き) を GPU ごとに描くための正規化済み行を返す。エンジンの
+        /v1/meminfo は TP ランク合算のビューなので、ここで GPU 単位の parts に分解する。
+        nvidia-smi のカードとの突き合わせはフロントが UUID (fallback: index) で行う。
+        """
+        s = manager.sessions.get(sid)
+        if not s:
+            raise HTTPException(404, "セッションが見つかりません")
+        if not s.get("ready"):
+            raise HTTPException(503, "サーバーは起動中です")
+        port = s.get("port")
+        if not port:
+            raise HTTPException(400, "このセッションはポートを解決できていません")
+        backend = s.get("backend")
+        if backend not in ("freetoken", "freetoken-fork"):
+            raise HTTPException(400, "このバックエンドは VRAM 割り当てレポートに対応していません")
+        key = api_key_from_argv(s.get("argv") or [])
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+
+        def _fetch() -> dict[str, Any]:
+            req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/meminfo", headers=headers)
+            with urllib.request.urlopen(req, timeout=2.0) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+
+        try:
+            data = await asyncio.to_thread(_fetch)
+        except urllib.error.HTTPError as e:
+            raise HTTPException(e.code, f"サーバーの /v1/meminfo が HTTP {e.code} を返しました")
+        except (urllib.error.URLError, OSError) as e:
+            raise HTTPException(502, f"サーバーの /v1/meminfo を読み取れません: {e}")
+        except ValueError as e:
+            raise HTTPException(502, f"サーバーの /v1/meminfo を JSON として読み取れません: {e}")
+        if not isinstance(data, dict):
+            raise HTTPException(502, "サーバーの /v1/meminfo が JSON オブジェクトではありません")
+        return {
+            "sid": sid,
+            "backend": backend,
+            "backend_name": s.get("backend_name"),
+            "fetched_at": time.time(),
+            **pm.normalize_meminfo(data),
         }
 
     # ----------------------------------------------------------- backends
