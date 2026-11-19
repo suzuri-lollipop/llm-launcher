@@ -1,18 +1,22 @@
-"""デコード速度グラフの正規化: Strata 系 JSON /metrics 以外のバックエンド担当。
+"""ダッシュボード中継の正規化: デコード速度グラフと GPU VRAM 割り当て。
 
-Strata / Maya / Basalt は /metrics が JSON (live.slots / history) なので app.py が
-そのまま中継する。一方 vLLM / SGLang / llama.cpp は Prometheus テキスト、
-FreeToken 系は /v1/stats JSON で、形式も単位も違う:
+デコード速度: Strata / Maya / Basalt は /metrics が JSON (live.slots / history) なので
+app.py がそのまま中継する。FreeToken の新しいエンジンも basalt 形の JSON /metrics
+(+ /slots 行) を出すので同じ経路に合流する。一方 vLLM / SGLang / llama.cpp は
+Prometheus テキスト、FreeToken の旧エンジンは /v1/stats JSON で、形式も単位も違う:
 
   vLLM      /metrics  vllm:generation_tokens_total (counter) の差分で tok/s を出す
   SGLang    /metrics  sglang:gen_throughput (gauge, 要 --enable-metrics)
   llama.cpp /slots    スロット毎の n_decoded 差分でスロット別 tok/s を出す (要 --slots)
             /metrics  llamacpp:tokens_predicted_total (counter, 要 --metrics)
-  FreeToken /v1/stats throughput.decode_tps (5 秒スライディング窓)
+  FreeToken /v1/stats throughput.decode_tps (5 秒スライディング窓, live の無い旧エンジン)
 
 counter / n_decoded の差分は「前回のポーリング」を覚えている必要があるので、
 セッション毎の RateTracker を app.py が持って 1 秒ポーリングごとに渡す。
 サーバー再起動で counter が巻き戻ったら (dv < 0) その 1 点は None にする。
+
+VRAM 割り当て: FreeToken /v1/meminfo (TP ランク合算) を GPU 単位の parts に分解する
+(normalize_meminfo)。Maya の GPU マップと同じ積み上げ棒をダッシュボードの GPU 欄に描く。
 """
 from __future__ import annotations
 
@@ -118,8 +122,10 @@ def _live(state: str, tok_s: Any, *, running: Any = None, active: Any = None,
 
 
 def normalize_freetoken(stats: dict[str, Any]) -> dict[str, Any]:
-    """/v1/stats (StatsTracker のスライディング窓) → グラフ形式。
+    """/v1/stats (StatsTracker のスライディング窓) → グラフ形式。旧エンジン用フォールバック。
 
+    新しい FreeToken は basalt 形の /metrics (live.slots) + /slots を出すので app.py の
+    Strata 系経路がスロット内訳を描く。この経路は live の無い旧エンジン専用:
     リクエスト毎の内訳は出していない (decode_tps は全部合算) ので slots は空。
     フロントエンドは合算グラフ + 「内訳なし」注記を描く。"""
     tp = stats.get("throughput") if isinstance(stats.get("throughput"), dict) else {}
@@ -236,4 +242,58 @@ def normalize_llamacpp(slot_rows: list[Any], sums: dict[str, float],
                       running=running, active=running, queued=queued,
                       parallel=len(slots) if slots else None),
         "slots": slots,
+    }
+
+
+# ----------------------------------------------------------- GPU VRAM 割り当て
+# FreeToken /v1/meminfo (TP ランク合算) → GPU 単位の積み上げ棒 (Maya の GPU マップ形)。
+
+# 積み上げの表示順とラベル。フロントエンドはこのキー順で色を割り当てる。
+MEMINFO_PARTS = ("weights", "kv", "swa", "moe", "mamba", "overhead", "residual", "free")
+
+
+def normalize_meminfo(doc: dict[str, Any]) -> dict[str, Any]:
+    """/v1/meminfo の ranks (1 ランク = 1 GPU) を GPU 単位の parts 行に分解する。
+
+    parts はエンジンが確保した内訳 (重み + 各プール + 予備) + rank0 実測の残余 + 導出した
+    空き。空きは device_total − 確保合計で、実 VRAM の押し引きではなく確保ベースの推定
+    (エンジン自身の /meminfo と同じ意味づけ)。UUID / index は nvidia-smi のカードとの
+    突き合わせキー (CUDA ordinal は CUDA_VISIBLE_DEVICES でずれ得るので UUID 優先)。
+    """
+    gpus: list[dict[str, Any]] = []
+    for r in doc.get("ranks") or []:
+        if not isinstance(r, dict):
+            continue
+        pools = r.get("pools") if isinstance(r.get("pools"), dict) else {}
+
+        def _b(v: Any) -> int:
+            return int(v) if isinstance(v, (int, float)) and v > 0 else 0
+
+        parts = {
+            "weights": _b(r.get("weights_bytes")),
+            "kv": _b(pools.get("kv")),
+            "swa": _b(pools.get("swa")),
+            "moe": _b(pools.get("moe")),
+            "mamba": _b(pools.get("mamba")),
+            "overhead": _b(r.get("nonpool_overhead_bytes")),
+            "residual": _b(r.get("residual_bytes")),
+        }
+        total = _b(r.get("device_total_bytes"))
+        parts["free"] = max(0, total - sum(parts.values()))
+        ident = (r.get("gpus") or [{}])[0]
+        ident = ident if isinstance(ident, dict) else {}
+        gpus.append({
+            "rank": r.get("rank"),
+            "index": ident.get("index"),
+            "uuid": ident.get("uuid"),
+            "name": ident.get("name"),
+            "total_bytes": total,
+            "live_bytes": r.get("live_bytes"),
+            "parts": parts,
+        })
+    return {
+        "model": doc.get("model"),
+        "tp_size": doc.get("tp_size"),
+        "gpus": gpus,
+        "totals": doc.get("totals") if isinstance(doc.get("totals"), dict) else {},
     }

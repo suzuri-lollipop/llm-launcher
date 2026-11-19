@@ -105,6 +105,16 @@ def test_parse_gpu_csv_na_compute_cap_is_none():
     assert sysinfo._parse_gpu_csv(line)[0]["compute_cap"] is None
 
 
+def test_parse_gpu_csv_reads_uuid_for_engine_join():
+    # UUID はエンジンが報告する GPU (CUDA ordinal は CUDA_VISIBLE_DEVICES でずれ得る)
+    # とこのカードを突き合わせるキー (GPU 欄の VRAM 割り当て表示)。
+    line = "0, NVIDIA RTX 5090, 3 %, 1024, 32607, 45, 120.5, 575.0, 12.0, GPU-abc123"
+    assert sysinfo._parse_gpu_csv(line)[0]["uuid"] == "GPU-abc123"
+    # uuid 列の無い古い nvidia-smi / クエリでも壊れない — 不明は None (index 突き合わせに落とす)
+    line8 = "0, NVIDIA A100, 0 %, 0, 81920, 30, 60.0, 400.0"
+    assert sysinfo._parse_gpu_csv(line8)[0]["uuid"] is None
+
+
 def test_system_api_passes_compute_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from fastapi.testclient import TestClient
 

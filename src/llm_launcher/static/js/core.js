@@ -6,6 +6,7 @@
 const S = {
   state: null, tab: "home", filter: "all",
   sys: undefined,          // /api/system 結果 (undefined=未取得 null=失敗  object=OK)
+  vram: {},                // sid -> FreeToken /v1/meminfo 中継 (GPU 欄の割り当て内訳)
   editing: null,           // ドラフト: {name,backend,values,on,extra_args,env,cwd,command,custom_only,note}
   hf: undefined,           // HF Hub キャッシュスキャン結果 (遅延取得)
   hdr: {host:"", ip:""},   // 右上アカウントチップの吹き出しに出すホスト情報 (refresh() が更新)
@@ -132,8 +133,23 @@ async function refresh(silent = true) {
 async function refreshSystem() {
   try { S.sys = await api("/api/system"); }
   catch { S.sys = null; }
+  await refreshVram();
   if (S.tab === "home") renderHome();
   if (S.tab === "backends") renderOomCard();
+}
+/* GPU 欄の VRAM 割り当て内訳: 稼働中の FreeToken 系セッションだけ /v1/meminfo 中継を引く。
+   Maya の GPU マップと同じ「カードに何が載っているか」をエンジンからもらう。取得失敗は
+   前回の値を保つ (一時エラーで内訳を消さない)。セッションが無ければ空にしておく。 */
+async function refreshVram() {
+  const servers = (S.state?.sessions || []).filter(s =>
+    isLive(s) && s.ready && (s.backend === "freetoken" || s.backend === "freetoken-fork"));
+  if (!servers.length) { S.vram = {}; return; }
+  const next = {};
+  await Promise.all(servers.map(async s => {
+    try { next[s.id] = await api(`/api/sessions/${encodeURIComponent(s.id)}/meminfo`); }
+    catch { next[s.id] = S.vram[s.id] || null; }
+  }));
+  S.vram = next;
 }
 function startTimers() {
   clearInterval(refreshTimer); clearInterval(logTimer); clearInterval(sysTimer); clearInterval(benchTimer);
@@ -233,6 +249,8 @@ function applyRoute() {
   syncDialog(r);
   renderAll();
   if (tab === "users" && !r.kind) { loadUsers(); loadRoles(); }
+  // GPU 欄の割り当て内訳はホーム表示中だけポーリングする (タブ復帰時に即取得)。
+  if (tab === "home" && changed) refreshVram().then(() => { if (S.tab === "home") renderHome(); });
 }
 function syncDialog(r) {
   const cur = _openDialog;

@@ -90,8 +90,8 @@ async function api(path, opts = {}) {
 /* ---------------------------------------------------------------- 状態 */
 const INS_STEPS = { clone: "リポジトリを取得", branch: "ブランチ切替", venv: "実行環境を作成",
                     precheck: "インストール内容を確認", cmake: "エンジンを設定",
-                    "cmake-build": "エンジンをビルド", engine: "エンジンを受信",
-                    tools: "依存と llama.cpp ソースを導入",
+                    "cmake-build": "エンジンをビルド",
+                    tools: "依存パッケージを導入 (純正セットアップ経由)",
                     model: "モデルを準備", verify: "動作確認" };
 const CAL_STEPS = { prepare: "調整の準備", auto: "最適構成を自動で探す", lookup: "キャッシュを引く",
                     sweep: "実際に測る", create: "プロファイルを更新", adjust: "調整を反映",
@@ -175,6 +175,7 @@ const toolLabelFor = t => (t || W.installs.tool) === "pip" ? "pip install" : "uv
 const toolLabel = sp => toolLabelFor((sp || spec() || {}).tool);
 const stepLabel = (name, kind) => kind === "install"
   ? (name === "install" ? toolLabelFor((W.job || {}).tool)
+     : name === "tools" ? ((spec() || {}).tools_label || INS_STEPS.tools)
      : name === "branch" && isTagRef((W.job || {}).backend, (W.job || {}).ref)
        ? "バージョン切替" : (INS_STEPS[name] || name))
   : (CAL_STEPS[name] || name);
@@ -463,9 +464,8 @@ function renderReview() {
     ["ソフト", `${esc(sp.name)} <span class="mono">${esc(sp.module_path)}</span>`],
     ["バージョン", W.ref ? esc(refLabel(sp, W.ref)) : "既定"],
     ["実行内容", `1. リポジトリを取得<br>2. 実行環境を作成<br>`
-      + (sp.tools_step ? "3. 依存と llama.cpp ソースを導入" : "3. 依存パッケージを導入")
-      + (sp.cmake ? "<br>4. ネイティブエンジンをビルド" : "")
-      + (sp.engine_fetch ? "<br>4. ネイティブエンジンを受信" : "")],
+      + (sp.tools_step ? `3. ${sp.tools_label || "依存パッケージを導入 (純正セットアップ経由)"}` : "3. 依存パッケージを導入")
+      + (sp.cmake ? "<br>4. ネイティブエンジンをビルド" : "")],
     ["この後の予定", doing],
   ];
   if (sp.tools_step) rows.push(["エンジンビルド",
@@ -473,10 +473,9 @@ function renderReview() {
   $("#rv-rows").innerHTML = rows.map(([k, v]) =>
     `<div class="row-item"><div class="k">${k}</div><div class="v">${v}</div></div>`).join("");
   $("#rv-preview").textContent = `git clone → .venv → `
-    + (sp.tools_step ? "純正 tools_step — pip + llama.cpp ソース"
+    + (sp.tools_step ? (sp.tools_label || "純正セットアップ経由で依存パッケージを導入")
        : (sp.requirements ? `${toolLabel(sp)} -r ${sp.requirements}` : `${toolLabel(sp)} -e ".[${sp.extras || "accel"}]"`))
-    + (sp.cmake ? " → cmake configure + build" : "")
-    + (sp.engine_fetch ? " → エンジン受信 — 公式リリース" : "");
+    + (sp.cmake ? " → cmake configure + build" : "");
   $("#rv-start").disabled = false;
   $("#rv-start").textContent = "インストール";
   go("s-review");

@@ -68,6 +68,7 @@ from typing import Any
 
 from . import bench
 from . import maya_setup
+from . import strata_setup
 from .backends import (BACKENDS, backend_for, launch_json_path, load_launch_json,
                        replace_arg)
 from .oom import MemoryGuardError, apply_score, meminfo
@@ -302,8 +303,9 @@ def maya_config_path(root: Path, profile: dict[str, Any]) -> str:
 
 
 def strata_config_path(root: Path, profile: dict[str, Any]) -> str:
-    """Strata のキャリブレーション対象 config (プロファイルの --config 必須・実在必須)。"""
-    return _resolve_config(root, root / "module" / "strata", profile)
+    """Strata のキャリブレーション対象 config (プロファイルの --config 必須・実在必須)。
+    相対 config 名の基底は setup_dir (0.2.16+ は terminal/ に config が在る)。"""
+    return _resolve_config(root, strata_setup.setup_dir(root / "module" / "strata"), profile)
 
 
 # ----------------------------------------------------------------- コマンド
@@ -376,7 +378,7 @@ def build_strata_commands(root: Path, profile: dict[str, Any], python: str,
                     サーバーを止めた状態でだけ実行するので付けてよい (ユーザーの明示操作 1 クリック = この宣言)。
     --output json:  機械可読 ({"schema_version":1,"ok":...}) で結果を受け取る。"""
     cfg = strata_config_path(root, profile)
-    script = str(root / "module" / "strata" / "strata.py")
+    script = str(strata_setup.setup_dir(root / "module" / "strata") / "strata.py")
     return {
         "create": [python, script, "profile", "create", profile_name,
                    "--from-config", cfg, "--output", "json"],
@@ -608,6 +610,9 @@ class CalibrationManager:
         module_dir = self.root / backend["module_path"]
         if not module_dir.is_dir():
             raise CalibrateError(f"{backend['module_path']} がありません (submodule を init してください)")
+        if kind == "strata":
+            # 0.2.16+: strata.py / serve / .venv は terminal/ 配下 (calibrate の cwd)
+            module_dir = strata_setup.setup_dir(module_dir)
 
         python = self.manager.resolve_python(backend_id)
         report_dir = self.root / "data" / "calibrations"
