@@ -124,6 +124,8 @@ def required_cap(method: str, path: str) -> str | None:
             return "logs"
         if p.endswith("/parallel"):
             return "dashboard"         # ホームのデコード速度グラフ (ホスト詳細と同じ開示範囲)
+        if p.endswith("/parallel/daily") or p.endswith("/parallel/daily/reset"):
+            return "dashboard"         # 平均アクティブ数 (1 日窓) の閲覧と窓リセット
         if p.endswith("/meminfo"):
             return "dashboard"         # ホーム GPU 欄の VRAM 割り当て内訳 (同じ開示範囲)
         if m == "DELETE":
@@ -131,6 +133,8 @@ def required_cap(method: str, path: str) -> str | None:
         return CORE                    # 起動 / 停止 / 再起動
     if p in ("/api/system", "/api/oom"):
         return "dashboard" if m == "GET" else "oom.edit"
+    if p == "/api/parallel/daily/settings":
+        return "dashboard"             # 平均アクティブ数のリセット時刻 (ダッシュボード表示設定)
     if p == "/api/profiles/setup-options":
         # プロファイル作成ウィザード (/setup?flow=profile) の読み取り専用選択肢。
         # インストール権限は不要 (プロファイル編集と同じ開示範囲)。ジョブ履歴 / ログは含まない

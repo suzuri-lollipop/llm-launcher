@@ -22,7 +22,7 @@ VIEWS.home = `
       <div id="home-gpus"></div>
     </div>
     <div class="card" style="margin-top:12px">
-      <div class="card-h">デコード速度 <span class="muted" style="font-weight:400;letter-spacing:0;margin-left:4px">全スロット合算 · 直近 60 秒 · スロット毎のグラフは下表</span></div>
+      <div class="card-h">デコード速度 <span class="muted" style="font-weight:400;letter-spacing:0;margin-left:4px">全スロット合算 · 直近 60 秒 · 下表: スロット内訳 / 1 日平均アクティブ数</span></div>
       <div class="par-tools">
         <label class="par-lab" for="home-par-select">サーバー</label>
         <select id="home-par-select" class="par-sel" onchange="parChoose(this.value)" aria-label="デコード速度を表示するサーバー"></select>
@@ -303,7 +303,8 @@ const PAR_SERVERS = new Set(["strata", "strata-fork", "maya", "basalt",
 function parInit(){
   if (!S.homePar) {
     S.homePar = { sid: "", samples: [], latest: null, error: "",
-                  busy: false, sig: "", timer: null, slotLast: {} };
+                  busy: false, sig: "", timer: null, slotLast: {},
+                  daily: { data: null, error: "", busy: false, last: 0 } };
     setTimeout(parPoll, 0);
     S.homePar.timer = setInterval(parPoll, 1000);
     // 非表示タブの 1 秒タイマーはブラウザに 1 分/回へ絞られる (Chrome/Firefox の
@@ -326,8 +327,10 @@ function parChoose(sid){
   p.latest = null;
   p.error = "";
   p.slotLast = {};
+  p.daily = { data: null, error: "", busy: false, last: 0 };
   renderHomeParallel();
   parPoll(true);
+  parDailyPoll(true);
 }
 async function parPoll(force){
   const p = parInit();
@@ -370,6 +373,8 @@ async function parPoll(force){
   } finally {
     p.busy = false;
   }
+  // 1 日窓の平均アクティブ数は変化が緩いので 30 秒毎でよい (選択切替時は即時)。
+  if (force || Date.now() / 1000 - p.daily.last >= PAR_DAILY_EVERY) parDailyPoll();
   renderHomeParallel();
 }
 function parSample(d){
@@ -573,15 +578,15 @@ function renderHomeParallel(){
   if (parNum(live.waiting) > 0) bits.push(`待ち ${parInt(live.waiting)}`);
   cntEl.textContent = bits.join(" · ");
   const nowTok = parNum(live.tok_s);
-  // 平均アクティブ数: グラフと同じ直近 60 秒窓のサンプル (1 秒毎) のうち、
-  // アクティブ数が取れた点の算術平均。タブ復帰直後などは点が少ないので
-  // ツールチップにサンプル数を出す (黙って窓いっぱいの平均と誤認させない)。
-  const actVals = [];
-  p.samples.forEach(x => { const a = parNum(x.active); if (a != null) actVals.push(a); });
-  const actAvg = actVals.length ? actVals.reduce((a, b) => a + b, 0) / actVals.length : null;
-  const actNow = parNum(live.active);
-  const actHtml = actAvg != null
-    ? `<span class="par-act" title="直近 60 秒のアクティブ (処理中) リクエスト本数の平均 · ${actVals.length} 点のサンプル${actNow != null ? ` · 現在 ${parInt(actNow)} 本` : ""}">平均アクティブ <b>${parF1(actAvg)}</b><span class="par-unit">本</span></span>`
+  // 1日平均アクティブ数: リセット時刻起点の窓平均 (launcher が 1 分バケットで
+  // 蓄積)。瞬間値ではなく 1 日の平均をここに出す。詳細グラフは下の 1 日セクション。
+  // ピーク (1 分平均の最大) も平均の隣に添える。
+  const daily = p.daily && p.daily.data;
+  const dAvg = daily ? parNum(daily.avg) : null;
+  const dPeak = daily ? parNum(daily.peak) : null;
+  const peakTip = dPeak != null ? ` · ピーク ${parF1(dPeak)} 本 (${parDailyWhen(daily.peak_at)})` : "";
+  const actHtml = dAvg != null
+    ? `<span class="par-act" title="${parDailyWhen(daily.window_start)} からのアクティブ (処理中) リクエスト本数の平均 · リセット時刻 ${esc(daily.reset_time || "")} · 観測 ${parInt(daily.minutes)} 分${peakTip}${parNum(live.active) != null ? ` · 現在 ${parInt(live.active)} 本` : ""}">1日平均 <b>${parF1(dAvg)}</b><span class="par-unit">本</span>${dPeak != null ? `・ピーク <b>${parF1(dPeak)}</b><span class="par-unit">本</span>` : ""}</span>`
     : "";
   rateEl.innerHTML = (nowTok != null
     ? `<b>${parF1(nowTok)}</b><span class="par-unit">tok/s</span><span class="par-sub">全スロット合算</span>`
@@ -614,6 +619,112 @@ function renderHomeParallel(){
   </div>`;
   el.innerHTML = `<div class="par-chart-wrap">${meta}${chart}
     <div class="par-axis"><span>60 秒前</span><span>30 秒</span><span>現在</span></div>
-  </div>${errNote}${parSlotTable(latest, slotSeries, p)}`;
+  </div>${errNote}${parSlotTable(latest, slotSeries, p)}${parDailySection(p)}`;
+}
+
+/* ---------------- dashboard: 平均アクティブ数 (1 日窓) ----------------
+   リセット時刻 (既定 00:00、変更可) を起点に launcher が 1 分バケットで
+   蓄積したアクティブ (処理中) リクエスト本数を描く。破線は窓全体の平均
+   (=「1日平均」)。手動リセットは今この時点から新しい窓を開始する。 */
+const PAR_DAILY_EVERY = 30;      // 秒。変化が緩いので 1 秒毎には取得しない
+function parDailyWhen(ts){
+  if (typeof ts !== "number" || !Number.isFinite(ts)) return "-";
+  return new Date(ts * 1000).toLocaleString("ja-JP",
+    {month:"numeric", day:"numeric", hour:"2-digit", minute:"2-digit"});
+}
+async function parDailyPoll(force){
+  const p = parInit();
+  if (!p.sid || p.daily.busy) return;
+  if (!force && Date.now() / 1000 - p.daily.last < PAR_DAILY_EVERY) return;
+  p.daily.busy = true;
+  const sid = p.sid;
+  try {
+    const data = await api(`/api/sessions/${encodeURIComponent(sid)}/parallel/daily`);
+    if (p.sid !== sid) return;             // 選択が切り替わったら古い結果は捨てる
+    p.daily.data = data;
+    p.daily.error = "";
+  } catch (e) {
+    if (p.sid !== sid) return;
+    p.daily.error = (e.status === 404 || e.status === 405)
+      ? "平均アクティブ数の取得用 API が見つかりません。llm-launcher を再起動すると有効になります。"
+      : (e.message || String(e));
+  } finally {
+    p.daily.busy = false;
+    if (p.sid === sid) p.daily.last = Date.now() / 1000;
+  }
+  renderHomeParallel();
+}
+async function parDailyResetTime(v){
+  if (!/^\d{2}:\d{2}$/.test(v || "")) return;
+  try {
+    await api("/api/parallel/daily/settings", {method: "PUT", body: {reset_time: v}});
+    toast(`平均アクティブ数のリセット時刻を ${v} にしました`);
+  } catch (e) { toast(e.message || String(e)); }
+  parDailyPoll(true);
+}
+async function parDailyReset(){
+  const p = parInit();
+  if (!p.sid) return;
+  if (!confirm("平均アクティブ数の 1 日窓をリセットしますか?\n窓の開始からの蓄積を捨て、今この時点から新しい窓を開始します。")) return;
+  try {
+    await api(`/api/sessions/${encodeURIComponent(p.sid)}/parallel/daily/reset`, {method: "POST"});
+    toast("1 日窓をリセットしました");
+  } catch (e) { toast(e.message || String(e)); }
+  parDailyPoll(true);
+}
+function parDailyChart(d){
+  const W = 1000, H = 160, top = 12, bottom = 10;
+  const t0 = d.window_start, t1 = Math.max(d.now, t0 + 60);
+  const rows = d.buckets || [];
+  const yMax = Math.max(1, Math.ceil(Math.max(1, ...rows.map(r => r[1])) * 1.15));
+  const x = t => Math.min(Math.max((t - t0) / (t1 - t0), 0), 1) * W;
+  const y = v => H - bottom - Math.min(Math.max(v, 0) / yMax, 1) * (H - top - bottom);
+  let out = "";
+  [0, 0.25, 0.5, 0.75, 1].forEach(f => {
+    const py = H - bottom - f * (H - top - bottom);
+    out += `<line x1="0" y1="${py.toFixed(1)}" x2="${W}" y2="${py.toFixed(1)}" stroke="var(--line)" stroke-width="1" stroke-dasharray="2 5" vector-effect="non-scaling-stroke"/>`;
+  });
+  // 1 分バケット (その分の平均) の折れ線。バケット中央に点を置く。
+  const pts = rows.map(r => `${x(r[0] + 30).toFixed(1)},${y(r[1]).toFixed(1)}`);
+  if (pts.length) out += `<polyline points="${pts.join(" ")}" fill="none" stroke="var(--acc)" stroke-width="1.6" stroke-linejoin="round" stroke-linecap="round" vector-effect="non-scaling-stroke"/>`;
+  // 1日平均 (窓全体の平均) の破線
+  const avg = parNum(d.avg);
+  let lab = "";
+  if (avg != null) {
+    const py = y(avg);
+    out += `<line x1="0" y1="${py.toFixed(1)}" x2="${W}" y2="${py.toFixed(1)}" stroke="var(--warn)" stroke-width="1.4" stroke-dasharray="6 4" vector-effect="non-scaling-stroke"/>`;
+    lab = `<span class="par-cl" style="top:${(py / H * 100).toFixed(1)}%;color:var(--warn)">1日平均 ${parF1(avg)}</span>`;
+  }
+  // ピーク (1 分平均の最大) の点 + 数値ラベル (yMax が 15% の余白を持つので
+  // ラベルは常に点の上に収まる)。
+  const peak = parNum(d.peak);
+  if (peak != null && rows.length) {
+    const pr = rows.find(r => r[0] === d.peak_at) || rows.reduce((a, b) => (b[1] > a[1] ? b : a));
+    const px = x(pr[0] + 30), py = y(pr[1]);
+    out += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="2.6" fill="var(--err)" vector-effect="non-scaling-stroke"/>`;
+    const lx = Math.min(Math.max(px / W * 100, 8), 78);   // 右端の平均ラベルと重ねない
+    lab += `<span class="par-cl-peak" style="left:${lx.toFixed(1)}%;top:${(py / H * 100).toFixed(1)}%">ピーク ${parF1(peak)}</span>`;
+  }
+  const hm = ts => new Date(ts * 1000).toLocaleTimeString("ja-JP", {hour:"2-digit", minute:"2-digit"});
+  return `<div class="par-chart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="リセット時刻からのアクティブ数と 1 日平均・ピーク">${out}</svg>${lab}</div>
+  <div class="par-axis"><span>${parDailyWhen(t0)}</span><span>${hm((t0 + t1) / 2)}</span><span>${hm(t1)} (現在)</span></div>`;
+}
+function parDailySection(p){
+  const d = p.daily && p.daily.data;
+  const rt = d && d.reset_time ? d.reset_time : "00:00";
+  const head = `<div class="par-daily-h">
+    <b>アクティブ数 ・ 1日</b>
+    <span class="muted">${d ? `開始 ${parDailyWhen(d.window_start)} ・ 観測 ${parInt(d.minutes)} 分${parNum(d.peak) != null ? ` ・ ピーク ${parF1(d.peak)} 本 (${parDailyWhen(d.peak_at)})` : ""} ・ リセット毎日 ${esc(rt)}` : "1 分バケットで蓄積中…"}</span>
+    <span class="grow"></span>
+    <label class="par-lab" for="home-par-reset-time">リセット時刻</label>
+    <input type="time" id="home-par-reset-time" class="par-time" value="${esc(rt)}" onchange="parDailyResetTime(this.value)" aria-label="平均アクティブ数のリセット時刻">
+    <button class="ghost" style="min-height:28px;padding:4px 10px;font-size:12px" title="窓の開始からの蓄積を捨て、今この時点から新しい窓を開始" onclick="parDailyReset()">今すぐリセット</button>
+  </div>`;
+  let body;
+  if (p.daily && p.daily.error) body = `<div class="par-note err">${esc(p.daily.error)}</div>`;
+  else if (!d) body = `<div class="par-chart-empty par-daily-empty"><span class="spin"></span> 1 日データを読み込み中…</div>`;
+  else if (!(d.buckets || []).length) body = `<div class="par-note">まだアクティブ数のサンプルがありません。サーバー稼働中は launcher が数秒毎に蓄積します (1 分バケット)。平均は観測できた分の平均です。</div>`;
+  else body = parDailyChart(d);
+  return `<div class="par-daily">${head}${body}</div>`;
 }
 
