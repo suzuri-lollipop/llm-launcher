@@ -15,6 +15,10 @@ counter / n_decoded の差分は「前回のポーリング」を覚えている
 セッション毎の RateTracker を app.py が持って 1 秒ポーリングごとに渡す。
 サーバー再起動で counter が巻き戻ったら (dv < 0) その 1 点は None にする。
 
+アクティブ数 (処理中リクエスト本数) の履歴も RateTracker.active_history に
+ポーリング毎に覚える: サーバー側の 60 秒履歴は tok/s だけでアクティブ数を
+持たないため、ダッシュボードの「平均アクティブ数」は launcher 側で窓平均する。
+
 VRAM 割り当て: FreeToken /v1/meminfo (TP ランク合算) を GPU 単位の parts に分解する
 (normalize_meminfo)。Maya の GPU マップと同じ積み上げ棒をダッシュボードの GPU 欄に描く。
 """
@@ -76,6 +80,8 @@ class RateTracker:
         self._counters: dict[str, tuple[float, float]] = {}
         self._slots: dict[Any, tuple[float, int]] = {}
         self.history: deque[float | None] = deque(maxlen=60)
+        # アクティブ数 (処理中リクエスト本数) の 1 秒サンプル履歴。平均アクティブ数用。
+        self.active_history: deque[float | None] = deque(maxlen=60)
         # /v1/models や /props の初回取得結果 (model / max_context)。毎秒叩かない。
         self.model_info: dict[str, Any] | None = None
 
@@ -106,6 +112,9 @@ class RateTracker:
 
     def push_history(self, tok_s: float | None) -> None:
         self.history.append(tok_s)
+
+    def push_active(self, active: float | None) -> None:
+        self.active_history.append(active)
 
 
 def _live(state: str, tok_s: Any, *, running: Any = None, active: Any = None,

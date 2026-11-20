@@ -274,6 +274,11 @@ button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
 .par-rate b{font-size:22px;font-weight:800;color:var(--acc);font-variant-numeric:tabular-nums;line-height:1}
 .par-unit{font-size:12px;font-weight:700;color:var(--text)}
 .par-sub{font-size:11.5px;color:var(--sub)}
+/* 平均アクティブ数: デコード速度 (右端の大きな tok/s) の隣に小さく添える */
+.par-act{display:inline-flex;align-items:baseline;gap:4px;margin-left:10px;padding-left:10px;
+  border-left:1px solid var(--line);font-size:11.5px;color:var(--sub);white-space:nowrap}
+.par-rate .par-act b{font-size:15px;font-weight:700;color:var(--text);line-height:1}
+.par-rate .par-act .par-unit{font-size:11px;color:var(--sub)}
 .par-chart-wrap{margin-top:10px;min-width:0}
 .par-meta{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--sub);min-width:0;margin:2px 0 4px}
 .par-meta span:nth-child(2){margin-left:auto;white-space:nowrap}
@@ -375,7 +380,7 @@ button .ic{margin-right:1px}
 @media(max-width:560px){
   .par-tools{gap:6px}
   .par-sel{flex:1 1 180px;max-width:none}
-  .par-rate{width:100%;justify-content:flex-end;margin-left:0}
+  .par-rate{width:100%;justify-content:flex-end;margin-left:0;flex-wrap:wrap;row-gap:2px}
   .par-chart svg{height:140px}
   .par-chart-empty{min-height:140px}
   .par-srow{grid-template-columns:84px 56px minmax(0,1fr)}
