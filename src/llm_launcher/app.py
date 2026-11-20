@@ -1714,7 +1714,8 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(404, "セッションが見つかりません")
 
     # デコード速度グラフの差分計算状態 (vLLM / SGLang / llama.cpp / FreeToken 用)。
-    # Strata 系 JSON /metrics はサーバー自身が履歴を持つので状態不要。
+    # Strata 系 JSON /metrics は tok/s 履歴をサーバー自身が持つが、アクティブ数の
+    # 履歴はサーバー側に出ないので全バックエンド共通で launcher 側が覚える。
     par_trackers: dict[str, pm.RateTracker] = {}
 
     def _par_model_info(tracker: pm.RateTracker, get: Any, kind: str) -> dict[str, Any]:
@@ -1749,9 +1750,6 @@ def create_app(root: Path) -> FastAPI:
     async def _parallel_other(sid: str, s: dict[str, Any], backend: str,
                               port: int, headers: dict[str, str]) -> dict[str, Any]:
         """Strata 系以外 (Prometheus /metrics ・ /v1/stats ・ /slots) の中継。"""
-        for k in list(par_trackers):
-            if k not in manager.sessions:
-                del par_trackers[k]
         tracker = par_trackers.get(sid)
         if tracker is None:
             tracker = par_trackers[sid] = pm.RateTracker()
@@ -1814,6 +1812,7 @@ def create_app(root: Path) -> FastAPI:
             frag["server"]["model"] = info.get("model") or ""
             frag["server"]["max_context"] = info.get("max_context")
         tracker.push_history(frag["live"]["tok_s"])
+        tracker.push_active(frag["live"]["active"])
         return {
             "sid": sid,
             "backend": backend,
@@ -1821,7 +1820,8 @@ def create_app(root: Path) -> FastAPI:
             "fetched_at": time.time(),
             "server": frag["server"],
             "live": frag["live"],
-            "history": {"tok_s": list(tracker.history), "slot_tok_s": []},
+            "history": {"tok_s": list(tracker.history), "slot_tok_s": [],
+                        "active": list(tracker.active_history)},
             "slots": frag["slots"],
         }
 
@@ -1850,6 +1850,14 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(400, "このバックエンドはデコード速度グラフに対応していません")
         key = api_key_from_argv(s.get("argv") or [])
         headers = {"Authorization": f"Bearer {key}"} if key else {}
+        # アクティブ数履歴は全バックエンド共通で launcher が覚える (サーバー側の
+        # 60 秒履歴は tok/s だけ)。終了済みセッションの tracker はここで掃除する。
+        for k in list(par_trackers):
+            if k not in manager.sessions:
+                del par_trackers[k]
+        tracker = par_trackers.get(sid)
+        if tracker is None:
+            tracker = par_trackers[sid] = pm.RateTracker()
 
         def _fetch() -> dict[str, Any]:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/metrics", headers=headers)
@@ -2003,6 +2011,15 @@ def create_app(root: Path) -> FastAPI:
         queued = live.get("queued")
         if not isinstance(queued, (int, float)):
             queued = queue_depth
+        # アクティブ数: Strata 系は live.active、basalt 形は live.slots.active に
+        # あるので running と同じフォールバックで解決する (行が引けていれば稼働
+        # スロット数で代用)。平均アクティブ数の窓平均用にポーリング毎に覚える。
+        active = live.get("active")
+        if not isinstance(active, (int, float)):
+            active = running
+        if not isinstance(active, (int, float)) and slots:
+            active = sum(1 for sl in slots if sl["state"] != "idle")
+        tracker.push_active(active if isinstance(active, (int, float)) else None)
         fetched_at = data.get("time") if isinstance(data, dict) else None
         if not isinstance(fetched_at, (int, float)):
             fetched_at = time.time()
@@ -2022,14 +2039,15 @@ def create_app(root: Path) -> FastAPI:
                 "prefill_tok_s_mean": live.get("prefill_tok_s_mean"),
                 "parallel": parallel,
                 "running": running,
-                "active": live.get("active"),
+                "active": active,
                 "writing": live.get("writing"),
                 "waiting": live.get("waiting"),
                 "admitting": live.get("admitting"),
                 "outside_slots": live.get("outside_slots"),
                 "queued": queued,
             },
-            "history": {"tok_s": history_tok, "slot_tok_s": slot_hist},
+            "history": {"tok_s": history_tok, "slot_tok_s": slot_hist,
+                        "active": list(tracker.active_history)},
             "slots": slots,
         }
 

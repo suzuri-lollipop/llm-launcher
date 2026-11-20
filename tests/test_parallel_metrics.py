@@ -108,6 +108,11 @@ def test_parallel_slot_metrics_proxy(tmp_path: Path, monkeypatch):
     assert body["live"]["active"] == 2
     assert body["slots"][1]["slot"] == 1 and body["slots"][1]["tok_s"] == 21.2
     assert len(body["history"]["tok_s"]) == 60 and body["history"]["tok_s"][0] == 40.0
+    # アクティブ数履歴: サーバーの 60 秒履歴は tok/s だけなので launcher が
+    # ポーリング毎に覚えた点だけが並ぶ (平均アクティブ数の窓平均用)。
+    assert body["history"]["active"] == [2]
+    status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_mock/parallel"))
+    assert status == 200 and body["history"]["active"] == [2, 2]
 
     status, _ = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_stale/parallel"))
     assert status == 503
@@ -156,6 +161,8 @@ def test_parallel_solo_request_takes_a_slot(tmp_path: Path, monkeypatch):
     assert slot1["state"] == "idle"
     # 待機行も basalt と同じく 0.0 (グラフが途切れない)
     assert slot1["tok_s"] == 0.0 and slot1["held_tokens"] == 312
+    # live.active が無い Strata 単独経路: running (=1) から解決して履歴に覚える
+    assert body["live"]["active"] == 1 and body["history"]["active"] == [1]
 
 
 def test_parallel_basalt_metrics_format(tmp_path: Path, monkeypatch):
@@ -196,6 +203,8 @@ def test_parallel_basalt_metrics_format(tmp_path: Path, monkeypatch):
     status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_bas/parallel"))
     assert status == 200
     assert body["live"]["parallel"] == 4 and body["live"]["running"] == 1
+    # basalt 形は live.active がトップレベルに無い: live.slots.active から解決
+    assert body["live"]["active"] == 1 and body["history"]["active"] == [1]
     s0 = body["slots"][0]
     assert s0["state"] == "decoding" and s0["tok_s"] == 41.2
     assert s0["accept"] == 50 and s0["n_ctx"] == 262144
@@ -204,9 +213,54 @@ def test_parallel_basalt_metrics_format(tmp_path: Path, monkeypatch):
     assert len(hist) == 4 and len(hist[0]) == 60 and hist[0][-1] == 41.2
 
 
+def test_parallel_active_history_window(tmp_path: Path, monkeypatch):
+    """アクティブ数履歴はポーリング毎に変わり、直近 60 点だけ残る。サーバーの
+    tok/s 履歴が 60 点満杯でも、アクティブ履歴は launcher の初回ポーリングから
+    始まる (フロントは右端を揃え、取れた点だけで平均する)。"""
+    _run_session(tmp_path, "strata", "Strata", sid="s_act")
+    state = {"active": 1}
+    metrics = {
+        "engine": {"model_label": "m", "max_context": 8192},
+        "live": {"state": "generating", "tok_s": 30.0, "parallel": 4},
+        "history": {"tok_s": [30.0] * 60},
+        "time": 1793940000.0,
+    }
+
+    def fake_urlopen(req, timeout=2.0):
+        doc = {**metrics, "live": {**metrics["live"], "active": state["active"]}}
+        return FakeResponse(json.dumps(doc).encode("utf-8"))
+
+    import llm_launcher.app as app_mod
+    monkeypatch.setattr(app_mod.urllib.request, "urlopen", fake_urlopen)
+    app = create_app(tmp_path)
+    for n in (1, 3, 2):
+        state["active"] = n
+        status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_act/parallel"))
+        assert status == 200
+        assert body["live"]["active"] == n
+    assert body["history"]["active"] == [1, 3, 2]
+    for _ in range(58):
+        status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_act/parallel"))
+        assert status == 200
+    # 61 点 → 先頭 (1) が落ちて 60 点窓。以降は 2 が 59 点並ぶ
+    assert len(body["history"]["active"]) == 60
+    assert body["history"]["active"][-3:] == [2, 2, 2] and body["history"]["active"][0] == 3
+
+
+def test_rate_tracker_active_history_cap():
+    """RateTracker.active_history: 60 点の窓。None (未取得) もそのまま覚える。"""
+    from llm_launcher.parallel_metrics import RateTracker
+    tr = RateTracker()
+    for i in range(65):
+        tr.push_active(i % 4)
+    assert len(tr.active_history) == 60
+    assert list(tr.active_history)[-1] == 64 % 4
+    tr.push_active(None)
+    assert list(tr.active_history)[-1] is None
+
+
 # ---------------------------------------------------------------- 他バックエンド
 # vLLM / SGLang (Prometheus) ・ llama.cpp (/slots + Prometheus) ・ FreeToken (/v1/stats)
-
 def _run_session(tmp_path: Path, backend: str, backend_name: str, sid: str = "s_new") -> None:
     data = tmp_path / "data"
     data.mkdir(parents=True, exist_ok=True)
@@ -472,6 +526,8 @@ def test_parallel_vllm_prometheus_counter_rate(tmp_path: Path, monkeypatch):
     assert body["live"]["tok_s"] == 42.0
     assert body["live"]["prefill_tok_s_mean"] == 100.0
     assert body["history"]["tok_s"] == [None, 42.0]
+    # アクティブ数 (num_requests_running) もポーリング毎に履歴へ積まれる
+    assert body["history"]["active"] == [2.0, 2.0]
 
 
 def test_parallel_sglang_gauge(tmp_path: Path, monkeypatch):
