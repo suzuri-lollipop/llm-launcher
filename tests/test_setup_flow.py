@@ -164,17 +164,17 @@ def test_start_model_job_ignores_the_install_job():
 def test_cal_step_asks_single_or_multi_for_freetoken():
     """FreeToken 系の ⑤ はダッシュボードの「キャリブレーション」タブと同じ
     校正対象の問い (single / multi) を出す。これが無いとウィザードは常に
-    single (auto) で走り、multi (並行 prefill 腕比較) はダッシュボードから
-    しか実行できなかった (2026-11-17 報告: fork のセットアップの調整に
+    single (auto) で走り、multi (全並列数の合算 tok/s 優先) はダッシュボード
+    からしか実行できなかった (2026-11-17 報告: fork のセットアップの調整に
     シングル / マルチの問いが無い)。"""
     assert 'id="ca-mode-group"' in HTML and 'id="ca-mode"' in HTML
     # 選択肢はダッシュボードの #cal-mode と同じ文言・同じ値 (auto / multi)
     for opt in ('<option value="auto" selected>single: 単一ストリーム (投機モード自動選定)</option>',
-                '<option value="multi">multi: 並行 prefill (piped/mixed 腕比較)</option>'):
+                '<option value="multi">multi: 並列推論 (全並列数の合算 tok/s 優先)</option>'):
         assert opt in HTML, opt
     dash = (STATIC / "js" / "views" / "calibrate.js").read_text("utf-8")
     assert '<option value="auto">single: 単一ストリーム (投機モード自動選定)</option>' in dash
-    assert '<option value="multi">multi: 並行 prefill (piped/mixed 腕比較)</option>' in dash
+    assert '<option value="multi">multi: 並列推論 (全並列数の合算 tok/s 優先)</option>' in dash
     cal = _block("async function renderCal()", '$("#ca-go").addEventListener')
     assert 'const calIsFt = () => W.backend === "freetoken" || W.backend === "freetoken-fork";' in cal
     # 「今すぐ実行する」選択中だけ出す (スキップ時は隠す)

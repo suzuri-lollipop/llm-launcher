@@ -1300,10 +1300,14 @@ def _multi_doc(job_id, label="piped"):
            "FREETOKEN_ADMIT_MAX_WAIT_S": "30"}
     doc = {"schema_version": 1, "backend": "freetoken-multi",
            "multi_enabled": label != "none",
-           "arms": [{"label": "none", "stall_worst": 3.8, "out_tps": 51.0, "valid": True},
-                    {"label": "piped", "stall_worst": 0.1, "out_tps": 45.0, "valid": True}],
+           "arms": [{"label": "none", "stall_worst": 3.8, "out_tps": 51.0,
+                     "regime_tps": 165.0, "valid": True},
+                    {"label": "piped", "stall_worst": 0.1, "out_tps": 45.0,
+                     "regime_tps": 190.0, "valid": True}],
            "chosen": {"label": label, "env": env, "gain_stall_s": 3.7,
-                      "note": "worst stall 3.80s -> 0.10s, tps 51.0 -> 45.0"}}
+                      "regime_tps": 190.0, "base_regime_tps": 165.0, "gain_tps_pct": 15.2,
+                      "note": "concurrent tok/s 165.0 -> 190.0 (+15.2%), "
+                              "stall 3.80s -> 0.10s"}}
     return f"freetoken-multi-{tag}.json", doc, env
 
 
@@ -1355,7 +1359,9 @@ def test_freetoken_multi_job_writes_full_knob_set(tmp_path):
     assert job["status"] == "done", job.get("error")
     rep = job["report"]
     assert rep["backend"] == "freetoken-multi" and rep["applied"] is True
-    assert "worst stall" in rep["latency"]
+    # improvement_pct は全並列 tok/s スコアの利得 (stall 由来の値ではない)
+    assert rep["improvement_pct"] == 15.2
+    assert "concurrent tok/s" in rep["latency"]
     saved = json.loads((tmp_path / "profiles.json").read_text())[0]["env"]
     assert saved["FREETOKEN_PIPED_PREFILL"] == "1"
     assert saved["FREETOKEN_MIXED_PREFILL_TOKENS"] == "0"   # 明示的 0 で全集合

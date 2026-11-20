@@ -16,7 +16,7 @@ VIEWS.calibrate = `
         <span class="muted" style="font-size:12.5px">校正対象</span>
         <select id="cal-mode" class="grow" style="min-width:220px" onchange="calPersist()">
           <option value="auto">single: 単一ストリーム (投機モード自動選定)</option>
-          <option value="multi">multi: 並行 prefill (piped/mixed 腕比較)</option>
+          <option value="multi">multi: 並列推論 (全並列数の合算 tok/s 優先)</option>
         </select>
       </div>
       <label class="switch" style="margin-top:6px"><input type="checkbox" id="cal-restart"><span class="track"></span><span class="lab" style="font-size:12.5px">調整後にサーバーを起動し直す (完了後に自動起動)</span></label>
@@ -111,7 +111,7 @@ async function calRun(pid, restart, opts) {
   const warn = (live ? "稼働中のサーバーを停止して GPU を独占します。\n" : "") +
                `${b?.name || p.backend}: この PC 向け調整を実行します (${t}, PC はその間占有されます)。\n` +
                (p.backend === "strata" ? "設定は backup + smoke test 付きで適用されます。\n" : "") +
-               (isMulti ? "none / mixed / piped / piped+short-first の 4 腕を並行ワークロードで実測し、勝者の並行ノブ一式 (不要なら明示的 0) を起動構成へ書き戻します。\n"
+               (isMulti ? "none / mixed / piped / piped+short-first の 4 腕をプロファイルの全並列数 (decode / 短時間差到着の 2 プローブ) で実測し、合算 tok/s が最も高い腕を選びます (stall は悪化ガード)。勝者の並行ノブ一式 (不要なら明示的 0) を起動構成へ書き戻します。\n"
                         : isFt ? "none / mtp(+chain) / lookup の自動選定 + 内部ノブの A/B まで全部実測し、勝者の --speculative と env を起動構成へ自動記載します。\n" : "") +
                "続行しますか?";
   if (!(opts && opts.auto) && !confirm(warn)) return false;
@@ -244,8 +244,8 @@ function calPreview(p) {
   if (p.backend === "strata" || p.backend === "strata-fork")
     return "strata.py engine calibrate --profile <保存profile> --measure --exclusive --out <report.json> → --review-result → --apply-result";
   return "single: MTP / lookup を実測 (auto 選定) → 勝者の --speculative と env を書き戻し / "
-       + "multi: none・mixed・piped・piped+short-first を並行ワークロードで実測 → "
-       + "勝者の並行ノブ一式 (不要なら明示的 0) を起動構成 (profile / 起動 JSON) へ書き戻し";
+       + "multi: none・mixed・piped・piped+short-first を全並列数の 2 プローブで実測 → "
+       + "合算 tok/s 優先で選定 (stall は悪化ガード) → 勝者の並行ノブ一式 (不要なら明示的 0) を起動構成 (profile / 起動 JSON) へ書き戻し";
 }
 function renderCalibrate() {
   calInit();
