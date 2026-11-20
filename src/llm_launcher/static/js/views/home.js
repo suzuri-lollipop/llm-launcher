@@ -580,10 +580,13 @@ function renderHomeParallel(){
   const nowTok = parNum(live.tok_s);
   // 1日平均アクティブ数: リセット時刻起点の窓平均 (launcher が 1 分バケットで
   // 蓄積)。瞬間値ではなく 1 日の平均をここに出す。詳細グラフは下の 1 日セクション。
+  // ピーク (1 分平均の最大) も平均の隣に添える。
   const daily = p.daily && p.daily.data;
   const dAvg = daily ? parNum(daily.avg) : null;
+  const dPeak = daily ? parNum(daily.peak) : null;
+  const peakTip = dPeak != null ? ` · ピーク ${parF1(dPeak)} 本 (${parDailyWhen(daily.peak_at)})` : "";
   const actHtml = dAvg != null
-    ? `<span class="par-act" title="${parDailyWhen(daily.window_start)} からのアクティブ (処理中) リクエスト本数の平均 · リセット時刻 ${esc(daily.reset_time || "")} · 観測 ${parInt(daily.minutes)} 分${parNum(live.active) != null ? ` · 現在 ${parInt(live.active)} 本` : ""}">1日平均 <b>${parF1(dAvg)}</b><span class="par-unit">本</span></span>`
+    ? `<span class="par-act" title="${parDailyWhen(daily.window_start)} からのアクティブ (処理中) リクエスト本数の平均 · リセット時刻 ${esc(daily.reset_time || "")} · 観測 ${parInt(daily.minutes)} 分${peakTip}${parNum(live.active) != null ? ` · 現在 ${parInt(live.active)} 本` : ""}">1日平均 <b>${parF1(dAvg)}</b><span class="par-unit">本</span>${dPeak != null ? `・ピーク <b>${parF1(dPeak)}</b><span class="par-unit">本</span>` : ""}</span>`
     : "";
   rateEl.innerHTML = (nowTok != null
     ? `<b>${parF1(nowTok)}</b><span class="par-unit">tok/s</span><span class="par-sub">全スロット合算</span>`
@@ -692,8 +695,18 @@ function parDailyChart(d){
     out += `<line x1="0" y1="${py.toFixed(1)}" x2="${W}" y2="${py.toFixed(1)}" stroke="var(--warn)" stroke-width="1.4" stroke-dasharray="6 4" vector-effect="non-scaling-stroke"/>`;
     lab = `<span class="par-cl" style="top:${(py / H * 100).toFixed(1)}%;color:var(--warn)">1日平均 ${parF1(avg)}</span>`;
   }
+  // ピーク (1 分平均の最大) の点 + 数値ラベル (yMax が 15% の余白を持つので
+  // ラベルは常に点の上に収まる)。
+  const peak = parNum(d.peak);
+  if (peak != null && rows.length) {
+    const pr = rows.find(r => r[0] === d.peak_at) || rows.reduce((a, b) => (b[1] > a[1] ? b : a));
+    const px = x(pr[0] + 30), py = y(pr[1]);
+    out += `<circle cx="${px.toFixed(1)}" cy="${py.toFixed(1)}" r="2.6" fill="var(--err)" vector-effect="non-scaling-stroke"/>`;
+    const lx = Math.min(Math.max(px / W * 100, 8), 78);   // 右端の平均ラベルと重ねない
+    lab += `<span class="par-cl-peak" style="left:${lx.toFixed(1)}%;top:${(py / H * 100).toFixed(1)}%">ピーク ${parF1(peak)}</span>`;
+  }
   const hm = ts => new Date(ts * 1000).toLocaleTimeString("ja-JP", {hour:"2-digit", minute:"2-digit"});
-  return `<div class="par-chart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="リセット時刻からのアクティブ数と 1 日平均">${out}</svg>${lab}</div>
+  return `<div class="par-chart"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="リセット時刻からのアクティブ数と 1 日平均・ピーク">${out}</svg>${lab}</div>
   <div class="par-axis"><span>${parDailyWhen(t0)}</span><span>${hm((t0 + t1) / 2)}</span><span>${hm(t1)} (現在)</span></div>`;
 }
 function parDailySection(p){
@@ -701,7 +714,7 @@ function parDailySection(p){
   const rt = d && d.reset_time ? d.reset_time : "00:00";
   const head = `<div class="par-daily-h">
     <b>アクティブ数 ・ 1日</b>
-    <span class="muted">${d ? `開始 ${parDailyWhen(d.window_start)} ・ 観測 ${parInt(d.minutes)} 分 ・ リセット毎日 ${esc(rt)}` : "1 分バケットで蓄積中…"}</span>
+    <span class="muted">${d ? `開始 ${parDailyWhen(d.window_start)} ・ 観測 ${parInt(d.minutes)} 分${parNum(d.peak) != null ? ` ・ ピーク ${parF1(d.peak)} 本 (${parDailyWhen(d.peak_at)})` : ""} ・ リセット毎日 ${esc(rt)}` : "1 分バケットで蓄積中…"}</span>
     <span class="grow"></span>
     <label class="par-lab" for="home-par-reset-time">リセット時刻</label>
     <input type="time" id="home-par-reset-time" class="par-time" value="${esc(rt)}" onchange="parDailyResetTime(this.value)" aria-label="平均アクティブ数のリセット時刻">

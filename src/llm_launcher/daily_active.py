@@ -110,7 +110,8 @@ class DailyActiveStore:
 
     def snapshot(self, pid: str, now_ts: float,
                  reset_time: str = DEFAULT_RESET_TIME) -> dict[str, Any]:
-        """窓の開始 / 1日平均 / 観測分数 / サンプル数 / 1 分バケット列。
+        """窓の開始 / 1日平均 / ピーク (1 分平均の最大) とその時刻 / 観測分数 /
+        サンプル数 / 1 分バケット列。
 
         バケットは [分頭の UNIX 秒, その分の平均, サンプル数] の時刻順。
         平均は「観測できた分の平均」の平均 (サンプルの無い分は含めない)。"""
@@ -121,9 +122,14 @@ class DailyActiveStore:
                 rows.append((int(k) * BUCKET_S, b[0] / b[1], int(b[1])))
         rows.sort()
         avg = sum(r[1] for r in rows) / len(rows) if rows else None
+        # ピーク = 1 分平均の最大 (グラフの粒度と揃える)。同値は最早の分。
+        peak = max((r[1] for r in rows), default=None)
+        peak_at = next((r[0] for r in rows if r[1] == peak), None)
         return {
             "window_start": e["window_start"],
             "avg": avg,
+            "peak": round(peak, 3) if peak is not None else None,
+            "peak_at": peak_at,
             "minutes": len(rows),
             "samples": sum(r[2] for r in rows),
             "buckets": [[t, round(a, 3), n] for t, a, n in rows],

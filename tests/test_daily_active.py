@@ -61,6 +61,7 @@ def test_minute_buckets_and_daily_average(tmp_path: Path):
     assert snap["window_start"] == at(0, 0)
     assert snap["minutes"] == 2 and snap["samples"] == 3
     assert snap["avg"] == 3.0        # (2 + 4) / 2 — 分単位の時間加重
+    assert snap["peak"] == 4.0 and snap["peak_at"] == int((t + 65) // 60) * 60
     assert snap["buckets"][0][0] == int(t // 60) * 60
     assert snap["buckets"][0][1] == 2.0 and snap["buckets"][0][2] == 2
     # 数値以外 / bool / 空プロファイルは無視
@@ -68,6 +69,16 @@ def test_minute_buckets_and_daily_average(tmp_path: Path):
     st.add("p1", t + 80, True)
     st.add("", t + 80, 5)
     assert st.snapshot("p1", t + 90)["samples"] == 3
+
+
+def test_peak_tie_takes_earliest_minute(tmp_path: Path):
+    """ピークが同値のときは最早の分を peak_at にする。"""
+    st = da.DailyActiveStore(tmp_path / "daily.json")
+    t = at(10, 0)
+    st.add("p1", t + 5, 4)
+    st.add("p1", t + 65, 4)
+    snap = st.snapshot("p1", t + 70)
+    assert snap["peak"] == 4.0 and snap["peak_at"] == int(t // 60) * 60
 
 
 def test_window_rolls_at_reset_time_and_drops_old_buckets(tmp_path: Path):
@@ -170,6 +181,7 @@ def test_daily_endpoint_feed_reset_and_settings(tmp_path: Path, monkeypatch):
     assert status == 200
     assert body["reset_time"] == "00:00" and body["window_start"] == at(0, 0)
     assert body["avg"] is None and body["buckets"] == []
+    assert body["peak"] is None and body["peak_at"] is None
 
     # 中継ポーリングが蓄積も進める (1 分バケット)
     state["active"] = 2
@@ -182,11 +194,13 @@ def test_daily_endpoint_feed_reset_and_settings(tmp_path: Path, monkeypatch):
     status, body = asyncio.run(asgi_call(app, "GET", "/api/sessions/s_new/parallel/daily"))
     assert status == 200
     assert body["minutes"] == 1 and body["samples"] == 2 and body["avg"] == 3.0
+    assert body["peak"] == 3.0 and body["peak_at"] == int(at(10, 30) // 60) * 60
 
     # 手動リセット: 今この時点から新しい窓
     status, body = asyncio.run(asgi_call(app, "POST", "/api/sessions/s_new/parallel/daily/reset"))
     assert status == 200
     assert body["window_start"] == clock[0] and body["buckets"] == [] and body["avg"] is None
+    assert body["peak"] is None and body["peak_at"] is None
 
     # リセット時刻の設定: 保存 / 検証 / 窓の進め直し
     status, body = asyncio.run(asgi_call(app, "GET", "/api/parallel/daily/settings"))

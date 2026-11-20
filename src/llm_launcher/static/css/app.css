@@ -322,6 +322,9 @@ button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
 /* 折れ線終端のラベル (basalt の "All" / "s1") */
 .par-cl{position:absolute;right:6px;transform:translateY(-50%);font-size:10.5px;font-weight:700;pointer-events:none;
   font-variant-numeric:tabular-nums;background:color-mix(in srgb,var(--bg2) 78%,transparent);border-radius:3px;padding:0 3px}
+/* 1 日グラフのピーク地点ラベル (点の上に置く) */
+.par-cl-peak{position:absolute;transform:translate(-50%,-140%);font-size:10.5px;font-weight:700;pointer-events:none;
+  font-variant-numeric:tabular-nums;background:color-mix(in srgb,var(--bg2) 78%,transparent);border-radius:3px;padding:0 3px;color:var(--err)}
 .par-empty{margin-top:10px;padding:18px 14px;border:1.5px dashed var(--line);border-radius:var(--r2);
   text-align:center;color:var(--sub);font-size:13px;line-height:1.55}
 /* ---------------- playground ---------------- */
