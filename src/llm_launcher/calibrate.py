@@ -645,8 +645,9 @@ class CalibrationManager:
             except ValueError as e:
                 raise CalibrateError(str(e))
             if cal_mode == "multi":
-                # 並行 prefill (piped/mixed/short-first) の腕比較: fork 同梱の
-                # calibrate_multi を CLI 実行し、勝者のノブ一式を起動構成へ書き戻す。
+                # 並列推論の腕比較 (piped/mixed/short-first + spec + MoE): fork 同梱の
+                # calibrate_multi を CLI 実行。プロファイルの全並列数で測った合算
+                # tok/s 優先で勝者を選び、ノブ一式を起動構成へ書き戻す。
                 job_mode = "cli-multi"
                 steps = [self._ft_multi_step(job_id, profile, module_dir, report_dir, python)]
             elif cal_mode == "auto":
@@ -1013,8 +1014,9 @@ class CalibrationManager:
         """fork 同梱 calibrate_multi の出力 JSON を適用する。
 
         勝者の env はノブ全集合 (明示的 0 を含む): 「併発なしが最善」の結論も
-        起動構成に正直に書き、実験中に残った ON 値を消す。判定規則 (stall 利得 /
-        スループット下限 / 腕有効性) はツール側の契約で、launcher は規則を足さない。"""
+        起動構成に正直に書き、実験中に残った ON 値を消す。判定規則 (プロファイルの
+        全並列数で測った decode / interleave プローブの合算 tok/s 利得 / stall 悪化
+        ガード / 腕有効性) はツール側の契約で、launcher は規則を足さない。"""
         doc = self._ft_multi_doc(job)
         chosen = doc.get("chosen") or {}
         winner = {str(k): str(v) for k, v in (chosen.get("env") or {}).items()}
@@ -1055,18 +1057,21 @@ class CalibrationManager:
             else:
                 self._append_log(job, "MoE 勝者があるが起動 JSON が無い (レガシープロファイル): argv は未適用")
         arms = doc.get("arms") or []
+        # regime_tps = 全並列数プローブの合算 tok/s (選択スコア)。古いレポートには
+        # 無いので staggered wall の out_tps で代用表示する
         best_line = "; ".join(
-            f"{a.get('label')}: stall {a.get('stall_worst', 0):.2f}s "
-            f"tps {a.get('out_tps', 0):.1f}" for a in arms if a.get("valid", True))
+            f"{a.get('label')}: tps {a.get('regime_tps', a.get('out_tps', 0)):.1f} "
+            f"stall {a.get('stall_worst', 0):.2f}s" for a in arms if a.get("valid", True))
         return {
             "tuned": True, "backend": "freetoken-multi", "applied": applied,
             "settings": winner if applied else {},
             "moe": moe.get("strategy") if moe.get("applied") else None,
-            "improvement_pct": round(float(chosen.get("gain_stall_s") or 0.0) * 10, 1),
+            "improvement_pct": round(float(chosen.get("gain_tps_pct") or 0.0), 1),
             "latency": (f"chosen={chosen.get('label')} "
+                        f"tps={chosen.get('regime_tps', chosen.get('out_tps', 0)):.1f} "
                         f"stall {chosen.get('stall_worst', 0):.2f}s "
                         f"moe={moe.get('strategy') if moe.get('applied') else '-'} "
-                        f"ttft={chosen.get('note', '')[:80]} | {best_line}")[:400],
+                        f"{chosen.get('note', '')[:80]} | {best_line}")[:400],
         }
 
     def _ft_base_env(self, profile: dict[str, Any]) -> dict[str, str]:

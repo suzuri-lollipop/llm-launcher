@@ -2359,7 +2359,7 @@ async function renderCal() {
        セットアップの調整にシングル / マルチの問いが無かった) */
     if (calIsFt()) setInfo("#ca-mode-info",
       "single: MTP / lookup を単一ストリームで実測 (自動選定) し、勝者の --speculative と env を起動構成へ書き戻します。\n"
-      + "multi: none / mixed / piped / piped+short-first を並行ワークロードで実測し、勝者の並行ノブ一式 (不要なら明示的 0) を起動構成へ書き戻します。\n"
+      + "multi: none / mixed / piped / piped+short-first をプロファイルの全並列数 (decode / 短時間差到着の 2 プローブ) で実測し、合算 tok/s が最も高い腕を選びます (stall は悪化ガード)。勝者の並行ノブ一式 (不要なら明示的 0) を起動構成へ書き戻します。\n"
       + "校正対象はダッシュボードの「キャリブレーション」から実行するときにも選べます。");
     if (!canCal) $("#ca-sub").textContent = "調整はキャリブレーション権限のあるアカウントで実行できます。ダッシュボードの「キャリブレーション」から後で実行できます。";
     else if (calRunning) $("#ca-sub").textContent = "別のキャリブレーションが実行中です。完了後に開始できます。";
@@ -2388,7 +2388,7 @@ function syncCalTime() {
     ? "multi は目安 15〜25 分かかります (4 腕 × エンジン再起動)"
     : "FreeToken は目安 3〜4 時間かかります (全部測りの 1 発)";
   $("#ca-mode-hint").textContent = multi
-    ? "none / mixed / piped / piped+short-first を並行ワークロードで実測し、勝者の並行ノブ一式を書き戻します"
+    ? "none / mixed / piped / piped+short-first を全並列数の 2 プローブで実測し、合算 tok/s 優先で選定 (stall は悪化ガード) して勝者の並行ノブ一式を書き戻します"
     : "none / MTP / lookup から自動選定し、勝者の --speculative と env を書き戻します";
 }
 function syncCalSel() {

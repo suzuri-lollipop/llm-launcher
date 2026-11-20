@@ -2683,7 +2683,8 @@ def create_app(root: Path) -> FastAPI:
         if mode in ("auto", "multi", "single") and not is_ft:
             raise HTTPException(400, f"{mode} は FreeToken 系プロファイル専用です")
         # FreeToken の既定は「全部測りの 1 発」(校正は 1 回だけ行う運用想定のため)。
-        # single = 単一ストリーム側 (投機モード自動選定) / multi = 並行 prefill の腕比較。
+        # single = 単一ストリーム側 (投機モード自動選定) / multi = 並列推論
+        # (プロファイルの全並列数で測った合算 tok/s 優先の腕比較)。
         cal_mode = ({"single": "auto"}.get(mode) or mode) or ("auto" if is_ft else "current")
         try:
             job = await calibrate.start(profile, bid, restart_after=body.restart_after,
