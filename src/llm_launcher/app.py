@@ -40,6 +40,7 @@ from .models import (ModelError, build_inventory, delete_entry, hf_hub_cache_dir
 from . import maya_setup
 from . import oom
 from . import parallel_metrics as pm
+from . import daily_active as da
 from . import strata_setup
 from . import rbac
 from . import sysinfo
@@ -350,6 +351,11 @@ class SimpleSettingsBody(BaseModel):
     contact: str = ""
 
 
+class DailySettingsBody(BaseModel):
+    """平均アクティブ数 (1 日窓) のリセット時刻 (ローカル HH:MM)。"""
+    reset_time: str = ""
+
+
 class SimpleStartBody(BaseModel):
     profile_id: str = Field(min_length=1, max_length=64)
 
@@ -478,6 +484,7 @@ def create_app(root: Path) -> FastAPI:
     bench_store = JsonStore(data_dir / "bench.json", [])
     users_store = JsonStore(data_dir / "users.json", [])
     sessions_store = JsonStore(data_dir / "sessions.json", [])
+    daily_active_store = da.DailyActiveStore(data_dir / "parallel_daily.json")
     manager = ProcessManager(root, runs_store, profiles_store, settings_store)
     bench = BenchManager(bench_store, profiles_store, manager)
     bench_profiles = BenchProfiles(JsonStore(data_dir / "bench_profiles.json", []))
@@ -631,9 +638,19 @@ def create_app(root: Path) -> FastAPI:
             print(f"install recovery: {len(lost_i)} 件の中断ジョブを lost にしました "
                   f"({', '.join(lost_i[:4])})", file=sys.stderr)
         await manager.start_tick()
+        # 平均アクティブ数 (1 日窓) の背景サンプリング。ダッシュボードの開閉に
+        # 依存せず数秒毎に蓄積し、30 秒間隔でファイルへ落とす。
+        daily_active_store.load()
+        app.state.daily_task = asyncio.create_task(_daily_loop())
 
     @app.on_event("shutdown")
     async def _shutdown() -> None:
+        t = getattr(app.state, "daily_task", None)
+        if t is not None:
+            t.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await t
+        daily_active_store.save()
         await bench.shutdown()
         await manager.shutdown(kill=False)
 
@@ -1825,8 +1842,7 @@ def create_app(root: Path) -> FastAPI:
             "slots": frag["slots"],
         }
 
-    @app.get("/api/sessions/{sid}/parallel")
-    async def session_parallel(sid: str) -> dict[str, Any]:
+    async def _parallel_doc(sid: str) -> dict[str, Any]:
         """ダッシュボードのデコード速度グラフ用: 稼働中サーバーの /metrics を中継する。
 
         Strata / Maya / Basalt 系は JSON /metrics、vLLM / SGLang / llama.cpp は
@@ -1835,6 +1851,7 @@ def create_app(root: Path) -> FastAPI:
         無い旧エンジンは /v1/stats の合算にフォールバックする。
         ブラウザから直接叩くと CORS や API キーで失敗するため、起動中のポートへ
         launcher 同一オリジンでプロキシし、グラフに必要な値だけを正規化して返す。
+        平均アクティブ数の背景サンプリングもこの正規化を再利用する。
         """
         s = manager.sessions.get(sid)
         if not s:
@@ -1845,8 +1862,7 @@ def create_app(root: Path) -> FastAPI:
         if not port:
             raise HTTPException(400, "このセッションはポートを解決できていません")
         backend = s.get("backend")
-        if backend not in ("strata", "strata-fork", "maya", "basalt",
-                           "vllm", "sglang", "llamacpp", "freetoken", "freetoken-fork"):
+        if backend not in pm.PAR_BACKENDS:
             raise HTTPException(400, "このバックエンドはデコード速度グラフに対応していません")
         key = api_key_from_argv(s.get("argv") or [])
         headers = {"Authorization": f"Bearer {key}"} if key else {}
@@ -2050,6 +2066,107 @@ def create_app(root: Path) -> FastAPI:
                         "active": list(tracker.active_history)},
             "slots": slots,
         }
+
+    def _daily_reset_time() -> str:
+        """平均アクティブ数 (1 日窓) のリセット時刻 (settings.json、既定 00:00)。"""
+        raw = (settings_store.load() or {}).get("parallel_daily")
+        rt = raw.get("reset_time") if isinstance(raw, dict) else None
+        return rt if da.valid_reset_time(rt) else da.DEFAULT_RESET_TIME
+
+    def _daily_feed(sid: str, doc: dict[str, Any]) -> None:
+        """中継で取れたアクティブ数を 1 日窓の蓄積へ渡す (ポーリング毎)。"""
+        a = (doc.get("live") or {}).get("active")
+        if isinstance(a, (int, float)) and not isinstance(a, bool):
+            s = manager.sessions.get(sid) or {}
+            daily_active_store.add(s.get("profile_id") or "", time.time(), a,
+                                   _daily_reset_time())
+
+    @app.get("/api/sessions/{sid}/parallel")
+    async def session_parallel(sid: str) -> dict[str, Any]:
+        """デコード速度グラフの中継。ついでに平均アクティブ数の蓄積も 1 点進める。"""
+        doc = await _parallel_doc(sid)
+        _daily_feed(sid, doc)
+        return doc
+
+    async def _daily_sample_once() -> None:
+        """平均アクティブ数の背景サンプリング: ダッシュボードを閉じていても
+        稼働中サーバーを数秒毎にポーリングし、1 分バケットへ蓄積する。"""
+        rt = _daily_reset_time()
+        ts = time.time()
+        for s in list(manager.sessions.values()):
+            if s.get("status") != "running" or not s.get("ready"):
+                continue
+            if s.get("backend") not in pm.PAR_BACKENDS:
+                continue
+            try:
+                doc = await _parallel_doc(s["id"])
+            except Exception:                                   # noqa: BLE001 — 個別失敗でループを止めない
+                continue
+            a = (doc.get("live") or {}).get("active")
+            if isinstance(a, (int, float)) and not isinstance(a, bool):
+                daily_active_store.add(s.get("profile_id") or "", ts, a, rt)
+
+    async def _daily_loop() -> None:
+        while True:
+            try:
+                await _daily_sample_once()
+                daily_active_store.prune(p.get("id") for p in profiles_store.load())
+                daily_active_store.save_if_dirty()
+            except Exception:                                   # noqa: BLE001 — 蓄積は補助情報
+                pass
+            await asyncio.sleep(5.0)
+
+    def _daily_session(sid: str) -> dict[str, Any]:
+        s = manager.sessions.get(sid)
+        if not s:
+            raise HTTPException(404, "セッションが見つかりません")
+        if s.get("backend") not in pm.PAR_BACKENDS:
+            raise HTTPException(400, "このバックエンドはデコード速度グラフに対応していません")
+        return s
+
+    @app.get("/api/sessions/{sid}/parallel/daily")
+    async def session_parallel_daily(sid: str) -> dict[str, Any]:
+        """平均アクティブ数 (1 日窓): リセット時刻起点の 1 分バケットと窓平均。
+
+        窓はプロファイル鍵 (サーバー再起動を跨ぐ)。平均は観測できた分の平均の
+        平均で、サンプルの無い分 (停止中) は含めない。"""
+        s = _daily_session(sid)
+        rt = _daily_reset_time()
+        now_ts = time.time()
+        snap = daily_active_store.snapshot(s.get("profile_id") or "", now_ts, rt)
+        return {"sid": sid, "profile_id": s.get("profile_id"),
+                "reset_time": rt, "now": now_ts, **snap}
+
+    @app.post("/api/sessions/{sid}/parallel/daily/reset")
+    async def session_parallel_daily_reset(sid: str) -> dict[str, Any]:
+        """1 日窓の手動リセット: 今この時点から新しい窓を開始する。"""
+        s = _daily_session(sid)
+        now_ts = time.time()
+        daily_active_store.reset(s.get("profile_id") or "", now_ts)
+        rt = _daily_reset_time()
+        snap = daily_active_store.snapshot(s.get("profile_id") or "", now_ts, rt)
+        return {"sid": sid, "profile_id": s.get("profile_id"),
+                "reset_time": rt, "now": now_ts, **snap}
+
+    @app.get("/api/parallel/daily/settings")
+    async def get_daily_settings() -> dict[str, Any]:
+        return {"reset_time": _daily_reset_time()}
+
+    @app.put("/api/parallel/daily/settings")
+    async def put_daily_settings(body: DailySettingsBody) -> dict[str, Any]:
+        """リセット時刻 (HH:MM) の保存。窓の進め直しは次の取得 / 蓄積時に行う。"""
+        rt = (body.reset_time or "").strip()
+        if not da.valid_reset_time(rt):
+            raise HTTPException(400, "リセット時刻は HH:MM 形式 (00:00–23:59) で指定してください")
+
+        def _mut(settings: dict) -> dict:
+            settings["parallel_daily"] = {**(settings.get("parallel_daily") or {}),
+                                          "reset_time": rt}
+            return settings
+
+        await asyncio.to_thread(settings_store.mutate, _mut)
+        daily_active_store.save()
+        return {"reset_time": rt}
 
     @app.get("/api/sessions/{sid}/meminfo")
     async def session_meminfo(sid: str) -> dict[str, Any]:

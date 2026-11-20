@@ -33,6 +33,11 @@ _PROM_LINE = re.compile(
     r"^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+([^\s]+)")
 _PROM_LABEL = re.compile(r'([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"')
 
+# デコード速度グラフ中継 (と平均アクティブ数のサンプリング) が対応するバックエンド。
+# フロントエンドの PAR_SERVERS (home.js) はこの一覧と揃える。
+PAR_BACKENDS = ("strata", "strata-fork", "maya", "basalt",
+                "vllm", "sglang", "llamacpp", "freetoken", "freetoken-fork")
+
 
 def parse_prometheus(text: str) -> tuple[dict[str, float], dict[str, str]]:
     """Prometheus テキストを (メトリクス名ごとの合計, 代表ラベル) にする。

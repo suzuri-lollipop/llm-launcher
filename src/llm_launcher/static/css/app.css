@@ -279,6 +279,15 @@ button.tile.err .t-v{color:var(--err)} button.tile.acc .t-v{color:var(--acc)}
   border-left:1px solid var(--line);font-size:11.5px;color:var(--sub);white-space:nowrap}
 .par-rate .par-act b{font-size:15px;font-weight:700;color:var(--text);line-height:1}
 .par-rate .par-act .par-unit{font-size:11px;color:var(--sub)}
+/* 平均アクティブ数 (1 日窓): リセット時刻起点の 1 分バケットグラフ + 平均破線 */
+.par-daily{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}
+.par-daily-h{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;min-width:0}
+.par-daily-h b{font-size:12.5px;white-space:nowrap}
+.par-daily-h .muted{font-size:11.5px}
+.par-time{width:auto;min-height:28px;padding:2px 6px;font-size:12px;margin:0}
+.par-daily .par-chart{margin-top:8px}
+.par-daily .par-chart svg{height:140px}
+.par-daily-empty{min-height:120px}
 .par-chart-wrap{margin-top:10px;min-width:0}
 .par-meta{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;font-size:11.5px;color:var(--sub);min-width:0;margin:2px 0 4px}
 .par-meta span:nth-child(2){margin-left:auto;white-space:nowrap}
