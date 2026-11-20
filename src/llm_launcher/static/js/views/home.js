@@ -389,11 +389,16 @@ function parHistorySamples(d){
   const hist = (d && d.history) || {};
   const raw = Array.isArray(hist.tok_s) ? hist.tok_s : [];
   const slotH = Array.isArray(hist.slot_tok_s) ? hist.slot_tok_s : [];
-  const n = raw.length || slotH.reduce((m, a) => Math.max(m, (a || []).length), 0);
+  // アクティブ数履歴は launcher がポーリング毎に覚えたもの (tok/s 履歴より
+  // 短いことがある)。各系列とも右端 (現在) を揃えて添字を引き直す。
+  const actH = Array.isArray(hist.active) ? hist.active : [];
+  const n = Math.max(raw.length, actH.length,
+                     slotH.reduce((m, a) => Math.max(m, (a || []).length), 0));
   if (!n) return [];
   const now = typeof d.fetched_at === "number" ? d.fetched_at : Date.now() / 1000;
   return Array.from({ length: n }, (_, i) => {
     const v = raw.length ? raw[raw.length - n + i] : null;
+    const av = actH.length ? actH[actH.length - n + i] : null;
     return {
       t: now - (n - i),
       total: typeof v === "number" && Number.isFinite(v) ? v : null,
@@ -401,7 +406,7 @@ function parHistorySamples(d){
         const sv = a && a[a.length - n + i];
         return { slot: k, tok_s: typeof sv === "number" && Number.isFinite(sv) ? sv : null };
       }).filter(x => x.tok_s != null),
-      active: null,
+      active: typeof av === "number" && Number.isFinite(av) ? av : null,
     };
   });
 }
@@ -568,9 +573,19 @@ function renderHomeParallel(){
   if (parNum(live.waiting) > 0) bits.push(`待ち ${parInt(live.waiting)}`);
   cntEl.textContent = bits.join(" · ");
   const nowTok = parNum(live.tok_s);
-  rateEl.innerHTML = nowTok != null
+  // 平均アクティブ数: グラフと同じ直近 60 秒窓のサンプル (1 秒毎) のうち、
+  // アクティブ数が取れた点の算術平均。タブ復帰直後などは点が少ないので
+  // ツールチップにサンプル数を出す (黙って窓いっぱいの平均と誤認させない)。
+  const actVals = [];
+  p.samples.forEach(x => { const a = parNum(x.active); if (a != null) actVals.push(a); });
+  const actAvg = actVals.length ? actVals.reduce((a, b) => a + b, 0) / actVals.length : null;
+  const actNow = parNum(live.active);
+  const actHtml = actAvg != null
+    ? `<span class="par-act" title="直近 60 秒のアクティブ (処理中) リクエスト本数の平均 · ${actVals.length} 点のサンプル${actNow != null ? ` · 現在 ${parInt(actNow)} 本` : ""}">平均アクティブ <b>${parF1(actAvg)}</b><span class="par-unit">本</span></span>`
+    : "";
+  rateEl.innerHTML = (nowTok != null
     ? `<b>${parF1(nowTok)}</b><span class="par-unit">tok/s</span><span class="par-sub">全スロット合算</span>`
-    : `<span class="par-sub">-</span>`;
+    : `<span class="par-sub">-</span>`) + actHtml;
   if (!latest && !p.error) {
     el.innerHTML = `<span class="muted"><span class="spin"></span> サーバーの /metrics を待っています…</span>`;
     return;
