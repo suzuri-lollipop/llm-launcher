@@ -119,8 +119,8 @@ def test_pre_job_config_questions_built_from_table():
     # (tableCtxPick = ctx 未選択) は ③ で聞く (2026-11-17 の選択不能修正)
     assert "if (W.preJob && mdTableBackend() && !W.tableCtxPick) delete cfg.ctx;" in fn
     assert "if (W.preJob && mdTableBackend() && W.tableCtxPick && cfg.ctx && W.tableReq) {" in fn
-    # Qwen は --parallel 非対応 (2 以上で起動が check_parallel で失敗する)
-    assert 'if (W.cfgArgs.family === "qwen") delete cfg.par;' in fn
+    # Qwen / Hy4-Flash は --parallel 非対応 (2 以上で起動が check_parallel で失敗する)
+    assert 'if (W.cfgArgs.family === "qwen" || W.cfgArgs.family === "hy4") delete cfg.par;' in fn
     # 保存 / 推奨 / 補足は描画済みの定義を使う (GLM の GPU 回答を --tp と誤記しない)
     assert "W.cfgRendered = cfg;" in fn
     assert JS.count("W.cfgRendered || RUNCFG[W.backend] || {}") >= 4

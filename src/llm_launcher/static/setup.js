@@ -560,8 +560,8 @@ async function pollTick() {
 const INSTALL_NOTES = {
   strata: "家系・サイズ・コンテキスト長を選ぶと、Strata 本体のセットアップ手順がダウンロードと"
     + "起動設定の作成までこの画面のまま走りきります。シェルの準備はありません。",
-  maya: "家系は GLM / DeepSeek / MiniMax / Qwen から選びます。Maya 本体のセットアップ手順が"
-    + "エンジンビルド・ダウンロード・起動設定の作成までこの画面のまま走りきります。シェルの準備はありません。",
+  maya: "家系は GLM-5.3-Flash / GLM-5.3 (744B) / DeepSeek / MiniMax / Qwen / Hy4-Flash から選びます。"
+    + "Maya 本体のセットアップ手順がエンジンビルド・ダウンロード・起動設定の作成までこの画面のまま走りきります。シェルの準備はありません。",
 };
 async function finishJob() {
   const r = W.job || {};
@@ -730,8 +730,9 @@ function mdStFillSizes() {
                    .sort((a, b) => (ms[b].ram_gb || 0) - (ms[a].ram_gb || 0));
     rec = fit[0] || ids[0] || "";
   }
-  // ダウンロード択の一覧は「まだ無いモデル」から選ぶ — 済み / 未公開のものはグレー表示 (選択不可)
-  const avail = m => !mdStFull(m) && ms[m].published !== false;
+  // ダウンロード択の一覧は「まだ無いモデル」から選ぶ — 済み / 未公開 / この PC に
+  // 収まらない (Hy4-Flash の hy4_fit: fits=false) ものはグレー表示 (選択不可)
+  const avail = m => !mdStFull(m) && ms[m].published !== false && ms[m].fits !== false;
   if (!ids.includes(W.mdStModel) || !avail(W.mdStModel)) {
     W.mdStModel = (rec && avail(rec) ? rec : "") || ids.find(avail) || rec || "";
   }
@@ -744,13 +745,15 @@ function mdStFillSizes() {
     }
     if (!mdStFull(m) && d.download_gb) bits.push(`DL ${isMaya ? Math.round(d.download_gb) : d.download_gb} GB`);
     const unpub = d.published === false;
+    const nofit = d.fits === false;
     const notes = [];
     if (mdStFull(m)) notes.push("ダウンロード済み" + (((d.have || {}).gb) ? " " + d.have.gb + " GB" : ""));
     if (unpub) notes.push("未公開");
+    if (nofit) notes.push("この PC の VRAM では起動できません");
     notes.push(...bits);
     if (m === rec && avail(m)) notes.push("推奨");
     const label = (d.label || m) + (notes.length ? " — " + notes.join(" · ") : "");
-    return `<option value="${esc(m)}"${m === W.mdStModel ? " selected" : ""}${mdStFull(m) || unpub ? " disabled" : ""}>`
+    return `<option value="${esc(m)}"${m === W.mdStModel ? " selected" : ""}${mdStFull(m) || unpub || nofit ? " disabled" : ""}>`
       + `${esc(label)}</option>`;
   }).join("") || '<option value="">サイズ一覧が空です</option>';
   // vision は対応パックだけ選択を出して既定 ON。非対応は送信しない
@@ -768,10 +771,14 @@ function mdStRecCtx() {
 function mdStFillCtx() {
   const st = mdT();
   const fam = (st.families || {})[W.mdStFam] || {};
+  const d = mdStModels()[W.mdStModel] || {};
   const maxc = Number(fam.max_context) || 524288;
-  // コンテキスト一覧は家系が持つ (Maya: GLM・DS4・MM3 1M / Qwen 256K、
-  // Strata: Flash-Next・DS4.1 1M / Qwen3.6 256K が上限。owner 方針: 対応する全てで 1M まで)
-  const src = (fam.contexts || []).length ? fam.contexts : (st.contexts || []);
+  // コンテキスト一覧はモデル別 (Maya: Hy4-Flash = hy4_fit / GLM-5.3 (744B) =
+  // g53_contexts の「この PC に収まる分」) が在ればそれ、無ければ家系が持つ
+  // (Maya: GLM・DS4・MM3 1M / Qwen 256K、Strata: Flash-Next・DS4.1 1M / Qwen3.6 256K
+  // が上限。owner 方針: 対応する全てで 1M まで)
+  const src = (d.contexts || []).length ? d.contexts
+            : ((fam.contexts || []).length ? fam.contexts : (st.contexts || []));
   const cs = (src.length ? src : [8192, 32768, 65536, 131072, 204800, 262144])
     .filter(c => c <= maxc);
   // 既定は純正の推奨 (own_path_context / ram_ctx / recommended_context 系)。家族・サイズを変えたら推奨へ戻る
@@ -806,16 +813,23 @@ function mdStHint() {
   if (isMaya) {
     if (d.memory_gb) info.push(`VRAM+RAM 約${Math.round(d.memory_gb)} GB で全体を保持します。足りない分は SSD から読みます`);
     if (d.published === false) info.push("この量子化はまだ公開されていません。公開まで選べません");
+    if (d.fits === false) warn.push(d.fit_error || "この PC の VRAM では起動できません (より小さいサイズを選んでください)");
     if (d.gated) {
       warn.push("ゲートリポジトリです。Hugging Face のトークンが必要です");
       info.push("トークンは HF_TOKEN 環境変数か hf auth login で設定できます");
     }
     if (st.available && fam.engine_ready === false)
       info.push("エンジンはこの設定の中でこの PC 向けにコンパイルします。初回は 10〜30 分かかります");
-    if (st.available && W.mdStFam !== "glm")
+    if (st.available && W.mdStFam === "hy4")
+      info.push("MTP ブロック / DFly2 drafter の速度計測 (どちらが速いかの A/B) はセットアップでは行わず、⑤ の調整に集約します。ファイル自体は VRAM に収まるなら download されます。スキップすると drafter なしで起動します");
+    else if (st.available && W.mdStFam !== "glm")
       info.push("DSpark / MTP drafter の速度計測はセットアップでは行わず、⑤ の調整に集約します。スキップすると drafter なしで起動します");
     if (st.available && W.mdStFam === "minimax")
       info.push("MiniMax は純正仕様どおり、短い prefill 計測だけセットアップに含まれます。数分・エンジン起動 1 回です");
+    if (W.mdStFam === "hy4" && (d.streamed_contexts || []).includes(Number(W.mdStCtx)))
+      info.push("このコンテキストは KV streaming で動かします: attention キャッシュの古い行は RAM に置き (純正 hy4_fit の計算)、VRAM には最新分だけを残します。回答は同じで、長文の読み書きが数%遅くなります");
+    if (d.g53)
+      info.push("GLM-5.3 (744B) はテキスト専用です (画像入力なし)。KV キャッシュはエンジン固有の形式で、コンテキスト一覧はこの PC の VRAM に収まる分だけを表示します");
   } else if (d.ram_gb) {
     info.push(`RAM ${d.ram_gb} GB 推奨`);
   }
@@ -1051,7 +1065,7 @@ async function renderModelTable(backend) {
   setInfo("#md-info", profileFlow()
     ? "重み検証済みのモデルから選びます。コンテキスト長は次の稼働設定で選びます。起動設定が無い場合は純正セットアップが設定だけ作成します。再ダウンロードはありません。"
     : (isMaya
-      ? "家系は GLM / DeepSeek / MiniMax / Qwen から選びます。Maya 本体のセットアップ手順がこのまま走り、エンジンビルド・ダウンロード・起動設定の作成まで完了します。ダウンロード済みのモデルは「ダウンロード済みのモデルを使う」から再取得なしで選べます。"
+      ? "家系は GLM-5.3-Flash / GLM-5.3 (744B) / DeepSeek / MiniMax / Qwen / Hy4-Flash から選びます。Maya 本体のセットアップ手順がこのまま走り、エンジンビルド・ダウンロード・起動設定の作成まで完了します。ダウンロード済みのモデルは「ダウンロード済みのモデルを使う」から再取得なしで選べます。"
       : "Strata 本体のセットアップ手順がこのまま走り、ダウンロードから起動設定の作成まで完了します。ダウンロード済みのモデルは「ダウンロード済みのモデルを使う」から再取得なしで選べます。"));
   mdSync();
 }
@@ -1760,40 +1774,52 @@ async function renderConfig() {
   if (W.preJob && mdTableBackend() && W.tableReq) {
     const st = mdT();
     const fam = (st.families || {})[W.tableReq.family] || {};
+    const md = (fam.models || {})[W.tableReq.model] || {};
     const isMaya = W.backend === "maya";
     const usable = ((st.pc || {}).gpus || []).filter(g => g.usable).map(g => g.index);
+    /* Maya の家系別ノブ (サーバーの _maya_config_info と同じ見立て):
+       GLM / Qwen = --kv (GLM-5.3 (744B) は KV 固定なので対象外)、
+       DeepSeek / MiniMax EXL3 / Hy4-Flash = --tp。Hy4 の --tp は auto 導出 (tp_auto) */
     W.cfgArgs = { gpus: usable, gpu_multi: fam.multi_gpu !== false,
                   family: isMaya ? W.tableReq.family : undefined,
-                  kv_ok: isMaya ? (W.tableReq.family === "glm" || W.tableReq.family === "qwen") : true,
-                  tp_ok: isMaya && (W.tableReq.family === "deepseek"
-                                    || (W.tableReq.family === "minimax" && W.tableReq.model === "exl3")) };
+                  kv_ok: isMaya ? ((W.tableReq.family === "glm" && !md.g53)
+                                   || W.tableReq.family === "qwen") : true,
+                  tp_ok: isMaya && (W.tableReq.family === "deepseek" || W.tableReq.family === "hy4"
+                                    || (W.tableReq.family === "minimax" && W.tableReq.model === "exl3")),
+                  tp_auto: isMaya && W.tableReq.family === "hy4" };
     // コンテキスト未選択 (済みモデル採用) は ② が控えた推奨を現在値としてプリフィル
     if (W.tableCtxPick) W.cfgArgs["--max-context"] = String(W.tableReq.context || "");
   } else if (Object.values(cfg).some(s => s && s.config)) {
     try {
       const r = (await api(`/api/profiles/${p.id}/config-args`)) || {};
       W.cfgArgs = { ...(r.args || {}), gpu: r.gpu, gpus: r.gpus, gpu_multi: r.gpu_multi,
-                    family: r.family, kv_ok: r.kv_ok, tp_ok: r.tp_ok,
+                    family: r.family, kv_ok: r.kv_ok, tp_ok: r.tp_ok, tp_auto: r.tp_auto,
                     source_config: r.source_config || "" };
     } catch { /* 読めなければ未設定扱い (推奨プリチェック) */ }
   }
   /* Maya: 家系別の質問出し分け (エンジン実装が単一の源)。
      GLM / Qwen / MiniMax GGUF = --kv + GPU の使い方 (config の gpu = layer split。--tp は無い)。
      DeepSeek / MiniMax EXL3 = GPU の使い方 + --tp (導出)。--kv は無い (KV はエンジン固有)。
-     Qwen は --parallel 非対応 (1 リクエストずつ) — 並列数の質問自体を出さない
+     Hy4-Flash = GPU の使い方 + --tp auto (エンジンが最大の同一 GPU グループで tensor
+     parallel。3 枚以上は CPU レーン併用)。KV はエンジン固有 (--kv auto/q8) で編集させない。
+     Qwen / Hy4-Flash は --parallel 非対応 (1 リクエストずつ) — 並列数の質問自体を出さない
      (2 以上を保存すると起動が check_parallel で失敗するため)。 */
   if (W.backend === "maya" && W.cfgArgs.family) {
     if (W.cfgArgs.kv_ok === false) delete cfg.kv;
-    if (W.cfgArgs.family === "qwen") delete cfg.par;
+    if (W.cfgArgs.family === "qwen" || W.cfgArgs.family === "hy4") delete cfg.par;
     /* GPU の使い方は全家系で聞く (純正 choose_gpus と同じ立場)。DS4 / MM3-EXL3 は
        カード選択から --tp を純正同款 min(2, 枚数) で導出する — --tp だけ聞いて
        config の gpu を放置すると「tp=1 なのに 2 枚 layer split」で起動 / 計測される
-       (2026-11-16 実害: gpu:[0,1] + --tp 1)。保存は cf-go の tpFromGpus が担う */
+       (2026-11-16 実害: gpu:[0,1] + --tp 1)。Hy4-Flash は auto を導出 (枚数を焼くと
+       最大の同一 GPU グループを狭めてしまう)。保存は cf-go の tpFromGpus が担う */
     cfg.tp = { key: "gpu_split", flag: "gpu", config: true, label: "GPU の使い方", short: "GPU",
-               hint: W.cfgArgs.tp_ok
-                 ? "使うカードを選びます。Tensor Parallel は枚数から自動で決まります。純正と同じく最大 2 です。調整が実測で詰めます"
-                 : "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます",
-               opts: [], cur: v => v, tpFromGpus: W.cfgArgs.tp_ok === true };
+               hint: W.cfgArgs.tp_auto
+                 ? "使うカードを選びます。選んだ全カードで Tensor Parallel を構成します (--tp N。エキスパートが VRAM に収まらない分は CPU レーンで計算)。layer split (--tp auto) は Blackwell + PCIe 環境で GPU 間コピーがデータを壊すため使いません"
+                 : (W.cfgArgs.tp_ok
+                   ? "使うカードを選びます。Tensor Parallel は枚数から自動で決まります。純正と同じく最大 2 です。調整が実測で詰めます"
+                   : "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます"),
+               opts: [], cur: v => v, tpFromGpus: W.cfgArgs.tp_ok === true,
+               tpAuto: W.cfgArgs.tp_auto === true };
   }
   /* 設定先行フロー: コンテキスト長を ② の面板で選んだ経路はセットアップが
      config に書くので ③ で二重に聞かない。済みモデル採用 (config 無し) は
@@ -1803,13 +1829,16 @@ async function renderConfig() {
   if (W.preJob && mdTableBackend() && !W.tableCtxPick) delete cfg.ctx;
   let ctxCs = null;   // ③ で ctx を聞く経路の家系ホワイトリスト (保存値の検証用)
   if (W.preJob && mdTableBackend() && W.tableCtxPick && cfg.ctx && W.tableReq) {
-    /* 選択肢は ② の面板と同じ家系ホワイトリスト (表の contexts / max_context)。
+    /* 選択肢は ② の面板と同じホワイトリスト (モデル別 contexts = Hy4-Flash /
+       GLM-5.3 (744B)、無ければ家系 contexts / max_context)。
        一覧外の値はセットアップジョブ (build_argv) が拒否するので出さない。
        既定 = 純正の推奨 (rec_context — ② が tableReq に控えた値) */
     const st = mdT();
     const fam = (st.families || {})[W.tableReq.family] || {};
+    const md = (fam.models || {})[W.tableReq.model] || {};
     const maxc = Number(fam.max_context) || 524288;
-    const src = (fam.contexts || []).length ? fam.contexts : (st.contexts || []);
+    const src = (md.contexts || []).length ? md.contexts
+              : ((fam.contexts || []).length ? fam.contexts : (st.contexts || []));
     const cs = (src.length ? src : [8192, 32768, 65536, 131072, 204800, 262144])
       .filter(c => Number(c) <= maxc);
     if (cs.length) {
@@ -1824,7 +1853,7 @@ async function renderConfig() {
     const opts = [["auto", "まかせる", ""]];
     cards.forEach(i => opts.push([String(i), `GPU ${i} のみ`, ""]));
     if (cards.length >= 2 && W.cfgArgs.gpu_multi !== false)
-      opts.push([cards.join(","), `全カード共有 ${cards.join(",")} — layer split`, ""]);
+      opts.push([cards.join(","), `全カード共有 ${cards.join(",")} — ${cfg.tp.tpAuto ? "tensor parallel" : "layer split"}`, ""]);
     cfg.tp = { ...cfg.tp, opts };
   }
   // basalt の GPU の使い方: 選択肢は /api/system の検出結果から (2 枚以上のときだけ質問)
@@ -2001,13 +2030,16 @@ $("#cf-go").addEventListener("click", async () => {
     if (on) on[sec.key] = true;
     if (sec.config && sec.flag) updates[sec.flag] = vals[sec.key];
     /* Maya DS4 / MM3-EXL3: --tp は GPU 選択から導出 (純正 maya.py と同じ min(2, 枚数))。
-       auto = 現状のカード構成 (config の gpu、無ければ全 usable) を維持する */
+       auto = 現状のカード構成 (config の gpu、無ければ全 usable) を維持する。
+       Hy4-Flash (tpAuto): 選択カード全部の --tp N (tensor parallel) を書く。auto を書くと
+       2 枚で layer split になり、その GPU 間 P2P 活性コピーが Blackwell + PCIe PHB 環境で
+       データを壊す (2026-11-21 実測: layer split 乱码 / --tp 2 正常。TP は host 経由 sum) */
     if (sec.tpFromGpus) {
       const g = String(vals[sec.key] || "auto").trim();
       const cur = String(W.cfgArgs.gpu || "auto").trim();
       const base = g !== "auto" ? g : (cur !== "auto" ? cur : (W.cfgArgs.gpus || []).join(","));
       const n = Math.max(1, base.split(",").filter(x => x.trim() !== "").length);
-      vals.tp = String(Math.min(2, n));
+      vals.tp = sec.tpAuto ? String(n) : String(Math.min(2, n));
       if (on) on.tp = true;
       updates["--tp"] = vals.tp;
     }
@@ -2212,8 +2244,8 @@ async function startModelJob() {
       const g = String(W.setupGpus || "").trim();
       if (g && g !== "auto") body.gpus = g;          // layer split 回答 (GLM / Qwen / MM3 GGUF / Strata)
       // Maya の並列数はセットアップに渡す (config の --parallel になり、DS4 / MM3 の
-      // 推奨コンテキスト計算にも使われる)。Qwen は --parallel 非対応なので送らない
-      if (isMaya && W.setupParallel > 0 && W.tableReq.family !== "qwen")
+      // 推奨コンテキスト計算にも使われる)。Qwen / Hy4-Flash は --parallel 非対応なので送らない
+      if (isMaya && W.setupParallel > 0 && W.tableReq.family !== "qwen" && W.tableReq.family !== "hy4")
         body.parallel = W.setupParallel;
       job = await api(ep, { method: "POST", body });
       W.kind = "install";
@@ -2344,15 +2376,17 @@ async function renderCal() {
     }
     $("#ca-time").textContent = (profs.find(p => (p.backend || "").includes("freetoken"))
       ? "FreeToken は目安 3〜4 時間かかります"
-      : W.backend === "maya" ? "Maya: GLM 約 10〜15 分 / DeepSeek 約 35〜70 分"
+      : W.backend === "maya" ? "Maya: GLM 約 10〜15 分 / DeepSeek 約 35〜70 分 / Hy4-Flash は drafter A/B で数分〜"
       : "目安 10〜30 分");
     /* Maya: drafter の速度計測もここに含まれる (セットアップでは計測しない)。
        スキップすると drafter なしで起動する — 正直に予告する (ⓘ に畳む) */
     const cn = String(((W.calPick || {}).values || {}).config || "").split("/").pop();
     let caInfo = "調整はキャリブレーションとも呼ばれ、この PC 向けの性能調整です。実行中は GPU を独占します。"
       + "\nスキップしてもダッシュボードの「キャリブレーション」からいつでも実行できます。";
-    if (W.backend === "maya" && /^maya-(ds4|mm3|minimax|cyber-frost|qwen)/.test(cn))
+    if (W.backend === "maya" && /^maya-(ds4|deepseek|mm3|minimax|cyber-frost|qwen)/.test(cn))
       caInfo += "\nDSpark / MTP drafter の速度計測もここで行います。スキップすると drafter なしで起動します。後からダッシュボードのキャリブレーションで実行できます。";
+    if (W.backend === "maya" && /^maya-hy4/.test(cn))
+      caInfo += "\nHy4-Flash: MTP ブロックと DFly2 drafter のどちらが速いかの A/B 計測 (両方が pack に入る構成) と、2-bit サイズの CPU レーン 4-bit コピー計測をここで行います。スキップすると drafter なしで起動します。エンジン本体の調整は不要です (起動ごとにこの PC へ合わせます)。";
     setInfo("#ca-info", caInfo);
     /* FreeToken 系: 校正対象 (single / multi) の説明 — ダッシュボードの
        「キャリブレーション」タブと同じ問いをウィザードでも出す (2026-11-17 報告:

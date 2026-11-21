@@ -418,6 +418,10 @@ def _literal(s: Any) -> Any:
 def _choices(node: ast.AST, defaults: dict, consts: dict | None = None) -> list[str]:
     consts = consts or {}
     result: list[str] = []
+    if isinstance(node, ast.Tuple):
+        # choices=("measure", "on", "off", ...) のタプル形 (Maya v1.1.70 の --drafting 等)
+        return [e.value for e in node.elts
+                if isinstance(e, ast.Constant) and isinstance(e.value, str)]
     if isinstance(node, ast.List):
         for e in node.elts:
             if isinstance(e, ast.Constant) and isinstance(e.value, str):
