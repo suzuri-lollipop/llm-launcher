@@ -256,12 +256,12 @@ class MayaModelBody(BaseModel):
     設定先行フローでは ③ の回答 (GPU / 並列数) もここに載る: gpus はエンジンビルド /
     速度計測の対象カードを、parallel は config の --parallel (DS4 / MM3 の推奨
     コンテキスト計算にも効く) をセットアップ時点で決める。"""
-    family: str = Field(min_length=1, max_length=64)     # glm|deepseek|minimax|qwen
+    family: str = Field(min_length=1, max_length=64)     # glm|deepseek|minimax|qwen|hy4
     model: str = Field(min_length=1, max_length=128)     # 家系別の quant キー (表のキーそのもの)
     context: int = 32768
     vision: str = ""      # "" = 純正既定 (ON), "off" = --no-vision (対応モデルだけ)
     gpus: str = ""        # "" / "auto" = 純正既定 (usable 全部), "0" = 単一, "0,1"|"all" = 分割
-    parallel: int | None = Field(default=None, ge=1, le=8)   # Qwen は非対応 (build_argv が拒否)
+    parallel: int | None = Field(default=None, ge=1, le=8)   # Qwen / Hy4-Flash は非対応 (build_argv が拒否)
 
 
 class ModelDownloadBody(BaseModel):
@@ -1436,33 +1436,32 @@ def create_app(root: Path) -> FastAPI:
 
     def _maya_config_family(doc: dict[str, Any]) -> str:
         """maya-<model>.json の家系 (maya_quants.family_of と同じ見立て):
-        installer.family → exe 名 → args の順で判定する。"""
-        inst = doc.get("installer") or {}
-        if inst.get("family") in ("glm", "deepseek", "minimax", "qwen"):
-            return str(inst["family"])
-        exe = Path(str(doc.get("exe", ""))).name
-        args = doc.get("args") or []
-        if exe.startswith("maya-mm3"):
-            return "minimax"
-        if "--ple-gguf" in args[:-1]:
-            return "qwen"
-        if "--pack" in args[:-1] or exe.startswith(("maya-ds4", "strata-ds4")):
-            return "deepseek"
-        return "glm"
+        installer.family → exe 名 → args の順で判定する (maya_setup と単一の実装)。"""
+        return maya_setup.config_family(doc)
 
     def _maya_config_info(doc: dict[str, Any]) -> dict[str, Any]:
         """Maya の家系別編集可否 (③ の質問出し分け用)。エンジン実装が単一の源:
         GLM / Qwen (maya エンジン) は --kv を持ち --tp は無い (複数 GPU は config の
         gpu = layer split)。DeepSeek / MiniMax EXL3 (maya-ds4 / maya-mm3) は --tp を持ち
-        --kv は無い (KV はエンジン固有)。MiniMax の GGUF は layer split (gpu)。"""
+        --kv は無い (KV はエンジン固有)。MiniMax の GGUF は layer split (gpu)。
+        Hy4-Flash (maya-hy4) は --tp auto|N を持つ。tp_auto は「選択カード全部で
+        tensor parallel を構成する --tp N を導出」の意味 (DS4 の min(2, N) ではない)。
+        auto を書かない理由: 2 枚での auto 既定は layer split だが、その GPU 間活性コピー
+        (cudaMemcpyPeerAsync の P2P DMA) が Blackwell + PCIe PHB 環境でデータを壊す
+        (2026-11-21 実測: 単一 GPU / --tp 2 は正常、layer split は乱码)。TP の all-reduce は
+        host pinned memory 経由 (16 host threads) なのでこの環境でも正しい。
+        KV はエンジン固有 (--kv auto/q8)。
+        GLM-5.3 (744B, glm-dsa) は家系 glm だが KV が INT8 latent 固定なので --kv 編集不可。"""
         fam = _maya_config_family(doc)
         inst = doc.get("installer") or {}
-        tp_ok = fam == "deepseek" or (fam == "minimax" and (inst.get("mm3_quant") or "exl3") == "exl3")
+        tp_ok = fam in ("deepseek", "hy4") or \
+            (fam == "minimax" and (inst.get("mm3_quant") or "exl3") == "exl3")
+        kv_ok = fam in ("glm", "qwen") and not maya_setup.config_is_g53(doc)
         g = doc.get("gpu")
         cur = ",".join(str(x) for x in g) if isinstance(g, list) else (str(g) if g is not None else "auto")
         opts = maya_setup.load_options(root / "module" / "maya")
         usable = [int(x["index"]) for x in ((opts.get("pc") or {}).get("gpus") or []) if x.get("usable")]
-        return {"family": fam, "kv_ok": fam in ("glm", "qwen"), "tp_ok": tp_ok,
+        return {"family": fam, "kv_ok": kv_ok, "tp_ok": tp_ok, "tp_auto": fam == "hy4",
                 "gpu": cur, "gpus": usable, "gpu_multi": True}
 
     def _config_gpu_count(doc: dict[str, Any], usable: list[int]) -> int:
@@ -1545,7 +1544,11 @@ def create_app(root: Path) -> FastAPI:
                 if is_maya and not maya_info["kv_ok"]:
                     raise HTTPException(400, "このモデルは KV 形式の変更に対応していません (エンジン固有の形式です)")
             elif flag == "--tp":
-                if not sval.isdigit() or not 1 <= int(sval) <= 16:
+                # Hy4-Flash の --tp は auto|N (auto = 最大の同一 GPU グループで tensor
+                # parallel、純正エンジン既定)。他は 1-16 の数値
+                if is_maya and maya_info.get("tp_auto") and sval == "auto":
+                    pass
+                elif not sval.isdigit() or not 1 <= int(sval) <= 16:
                     raise HTTPException(400, f"TP 数が範囲外です: {sval}")
                 if is_maya and not maya_info["tp_ok"]:
                     raise HTTPException(400, "このモデルは GPU 分割を GPU の使い方 (layer split) で設定します")
@@ -1576,16 +1579,20 @@ def create_app(root: Path) -> FastAPI:
                 doc["gpus_asked"] = True      # 人が選んだ = 起動時に純正が再び聞かない
             if is_maya and maya_info["tp_ok"] and "--tp" not in updates:
                 # 純正 maya.py と同じ: --tp は選んだカード枚数から導出 (min(2, 枚数))。
-                # カード選択と矛盾する --tp を残さない (tp=1 + gpu 2 枚 = 2 枚 layer split)
-                tp = str(min(2, len(sel)))
+                # カード選択と矛盾する --tp を残さない (tp=1 + gpu 2 枚 = 2 枚 layer split)。
+                # Hy4-Flash は選択カード全部の --tp N (tensor parallel)。auto を書くと
+                # 2 枚で layer split になり、その P2P 活性コピーが Blackwell + PCIe PHB で
+                # データを壊す (2026-11-21 実測)。TP は host 経由 sum で正しい
+                tp = str(len(sel)) if maya_info.get("tp_auto") else str(min(2, len(sel)))
                 doc["args"] = replace_arg(doc["args"], "--tp", tp)
                 if isinstance(doc.get("args_written"), list):
                     doc["args_written"] = replace_arg(doc["args_written"], "--tp", tp)
             changed = True
         for flag, sval in clean.items():
-            if flag == "--tp" and is_maya:
+            if flag == "--tp" and is_maya and sval.isdigit():
                 # gpu 書き戻し後のカード数に対して検証する (このループは gpu ブロックの後)。
-                # gpu 未設定 = CUDA_VISIBLE_DEVICES を絞らない = 全 usable が見える
+                # gpu 未設定 = CUDA_VISIBLE_DEVICES を絞らない = 全 usable が見える。
+                # auto (Hy4-Flash) はエンジンがカード数から選ぶので検証しない
                 cards = _config_gpu_count(doc, maya_info["gpus"])
                 if int(sval) > cards:
                     raise HTTPException(400, f"TP 数がカード数を超えています: --tp {sval} (使える GPU: {cards} 枚)")

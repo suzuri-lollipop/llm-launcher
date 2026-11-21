@@ -488,6 +488,139 @@ def test_verify_maya_speed_rejects_skipped_record(tmp_path):
     assert why == "" and rec["kept"] == "none"
 
 
+# ---------------------------------------------------------------- Hy4-Flash (v1.1.68+)
+
+def _hy4_cfg(tmp_path: Path, quant: str, inst_extra: dict | None = None,
+             gpu: list | None = None) -> Path:
+    """hy4 の config (installer 記録は純正 write_config_hy4 の形)。"""
+    p = tmp_path / f"maya-hy4-flash-{quant}.json"
+    p.write_text(json.dumps({
+        "exe": "/x/maya-hy4", "args": ["--pack", "/p", "--max-context", "32768"],
+        "gpu": gpu if gpu is not None else [0],
+        "installer": {"family": "hy4", "hy4_quant": quant, "layout": "standard",
+                      **(inst_extra or {})}}), encoding="utf-8")
+    return p
+
+
+def test_maya_speed_wanted_hy4(tmp_path):
+    """Hy4-Flash の speed step 要否 (純正 speed_calibration の hy4 分岐と同じ):
+    MTP ブロック + DFly2 の両方が pack に入る 1 GPU 構成は A/B 計測、
+    2-bit サイズ (maya-xs / maya-s) は q4x (CPU レーン 4-bit コピー) 計測、
+    maya-m / maya-l の単一 drafter 構成と Tencent Q4_K_M は対象外。"""
+    both = {"draft_choice": "auto", "draft_block": True, "dfly2": True}
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "maya-xs", both))) is True
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "maya-l", both))) is True
+    # 2 枚以上では DFly2 が動かない (純正 hy4_both_drafters は 1 GPU 限定) → A/B 対象外。
+    # maya-l は q4x 対象でもないので False
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "maya-l", both, gpu=[0, 1]))) is False
+    # 単一 drafter 構成 (draft_choice "only"): 2-bit サイズだけ q4x 計測
+    only = {"draft_choice": "only", "draft_block": True}
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "maya-xs", only))) is True
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "maya-s", only))) is True
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "maya-m", only))) is False
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "maya-l", only))) is False
+    # Tencent Q4_K_M は計測対象なし (純正: no speed calibration yet)
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "q4_k_m", both))) is False
+    # setup --drafting off でもファイルは pack に入る (draft_block/dfly2 は pack 基準)
+    off = {"draft_choice": "auto", "draft_block": True, "dfly2": True, "drafting": "off"}
+    assert calibrate.maya_speed_wanted(str(_hy4_cfg(tmp_path, "maya-xs", off))) is True
+
+
+def test_verify_maya_speed_hy4_q4x(tmp_path):
+    """Hy4-Flash の q4x 計測記録 (installer.q4x_calibration): on/off/n/a は成功
+    (n/a = この PC に判定対象なし = 純正の正常終了)、unmeasured は失敗。
+    MTP vs DFly2 の A/B 記録 (speed_calibration) も従来どおり成功。"""
+    cfg = _hy4_cfg(tmp_path, "maya-xs", {"draft_choice": "only", "draft_block": True})
+    for result in ("on", "off", "n/a"):
+        cfg.write_text(json.dumps({
+            "exe": "/x/maya-hy4", "args": ["--pack", "/p"],
+            "installer": {"family": "hy4", "hy4_quant": "maya-xs",
+                          "q4x_calibration": {"date": "2026-11-20", "result": result}}}),
+            encoding="utf-8")
+        why, rec = calibrate._verify_maya_speed({"logs": []}, str(cfg))
+        assert why == "" and rec["result"] == result, result
+    cfg.write_text(json.dumps({
+        "exe": "/x/maya-hy4", "args": ["--pack", "/p"],
+        "installer": {"family": "hy4", "hy4_quant": "maya-xs",
+                      "q4x_calibration": {"date": "2026-11-20", "result": "unmeasured"}}}),
+        encoding="utf-8")
+    why, rec = calibrate._verify_maya_speed({"logs": []}, str(cfg))
+    assert why and rec == {}
+    # A/B 計測 (speed_calibration_hy4) の記録
+    cfg.write_text(json.dumps({
+        "exe": "/x/maya-hy4", "args": ["--pack", "/p", "--mtp"],
+        "installer": {"family": "hy4", "hy4_quant": "maya-xs",
+                      "speed_calibration": {"date": "2026-11-20", "kept": "dfly2",
+                                            "mtp_tok_s": 30, "dfly2_tok_s": 38}}}),
+        encoding="utf-8")
+    why, rec = calibrate._verify_maya_speed({"logs": []}, str(cfg))
+    assert why == "" and rec["kept"] == "dfly2"
+
+
+def _fake_maya_hy4_speed(tmp_path: Path, cfg: Path) -> Path:
+    """hy4 用の偽 maya.sh: --speed-calibration で installer.speed_calibration を書く。
+    --calibrate は「何も調整しない」(純正 calibrate_config の hy4 分岐: 記録なしで True)。"""
+    mod = tmp_path / "module" / "maya"
+    mod.mkdir(parents=True, exist_ok=True)
+    helper = mod / "_fake_hy4_cal.py"
+    helper.write_text(
+        "import json, sys\n"
+        "p = sys.argv[1]\n"
+        "d = json.load(open(p))\n"
+        "d.setdefault('installer', {})['speed_calibration'] = {\n"
+        "    'date': '2026-11-20 00:00', 'kept': 'dfly2', 'mtp_tok_s': 30, 'dfly2_tok_s': 38}\n"
+        "json.dump(d, open(p, 'w'))\n", encoding="utf-8")
+    body = (
+        'if echo "$@" | grep -q -- --speed-calibration; then\n'
+        f'  python3 "{helper}" "{cfg}"\n'
+        '  echo "speed calibration: 38.0 tokens/s with DFly2 against 30.0 with the MTP block"\n'
+        'else\n'
+        '  echo "Hy4-Flash: nothing to tune - its engine sizes its CPU lane and its expert pool'
+        ' by this PC at every start"\n'
+        'fi\n')
+    (mod / "maya.sh").write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    (mod / "maya.sh").chmod(0o755)
+    return mod / "maya.sh"
+
+
+def test_maya_hy4_job_skips_noop_calibrate(tmp_path, monkeypatch):
+    """Hy4-Flash の ⑤: --calibrate は no-op (installer.calibration を書かない) なので
+    step に積まない。両 drafter が pack に入る構成は speed (A/B) の 1 step だけ。"""
+    cfg = _hy4_cfg(tmp_path, "maya-xs", {"draft_choice": "auto", "draft_block": True, "dfly2": True})
+    _fake_maya_hy4_speed(tmp_path, cfg)
+    _huge_mem(monkeypatch)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    prof = {"id": "p_h", "name": "hy4", "backend": "maya", "values": {"config": str(cfg)}}
+
+    async def go():
+        job = await mgr.start(prof, "maya")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.05)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert job["steps"] == ["speed"]          # calibrate step は無い
+    inst = json.loads(cfg.read_text())["installer"]
+    assert inst["speed_calibration"]["kept"] == "dfly2"
+
+
+def test_maya_hy4_job_without_target_fails_honestly(tmp_path, monkeypatch):
+    """調整対象の無い hy4 構成 (Q4_K_M: 計測なし + --calibrate も no-op) は
+    「調整対象がありません」で正直に拒否する (no-op を成功と偽らない)。
+    config 不在と同じくジョブ作成前の事前検査エラー。"""
+    cfg = _hy4_cfg(tmp_path, "q4_k_m")
+    _fake_maya_hy4_speed(tmp_path, cfg)
+    _huge_mem(monkeypatch)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    prof = {"id": "p_h", "name": "hy4", "backend": "maya", "values": {"config": str(cfg)}}
+
+    async def go():
+        with pytest.raises(calibrate.CalibrateError, match="調整対象がありません"):
+            await mgr.start(prof, "maya")
+    asyncio.run(go())
+    assert mgr.active_id is None      # 排他は解放されている
+
+
 def test_strata_job_runs_create_measure_review_apply_and_reports_settings(tmp_path):
     _fake_strata(tmp_path)
     mgr = _mgr(tmp_path, tmp_path, _FakeManager())
