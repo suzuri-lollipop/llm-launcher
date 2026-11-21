@@ -153,5 +153,5 @@ def test_wizard_download_list_greys_downloaded_models():
     # 開始ボタンはグレー選択を弾く (表パネル / 汎用一覧の両方)
     assert "!!(sizeOpt && sizeOpt.disabled)" in WIZARD_JS
     assert "!!(selOpt && selOpt.disabled)" in WIZARD_JS
-    # 表パネル (Strata / Maya) の既存グレーも維持
-    assert '${mdStFull(m) || unpub ? " disabled" : ""}' in WIZARD_JS
+    # 表パネル (Strata / Maya) の既存グレーも維持 (Hy4-Flash の fits=false も選択不可)
+    assert '${mdStFull(m) || unpub || nofit ? " disabled" : ""}' in WIZARD_JS

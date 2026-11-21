@@ -291,13 +291,14 @@ def test_adopt_without_config_asks_context_in_settings():
 
 
 def test_settings_ctx_question_uses_family_whitelist():
-    """③ が聞くコンテキストの選択肢は家系のホワイトリスト (② の面板と同じ表)。
-    一覧外の値はセットアップジョブの build_argv が拒否するので出さない。
-    プリフィルは ② が控えた推奨値 (rec_context)。"""
+    """③ が聞くコンテキストの選択肢はモデル別 (Hy4-Flash / GLM-5.3) か家系の
+    ホワイトリスト (② の面板と同じ表)。一覧外の値はセットアップジョブの
+    build_argv が拒否するので出さない。プリフィルは ② が控えた推奨値 (rec_context)。"""
     fn = _block("async function renderConfig()", '$("#cf-groups").addEventListener')
     assert "if (W.preJob && mdTableBackend() && !W.tableCtxPick) delete cfg.ctx;" in fn
     assert "if (W.preJob && mdTableBackend() && W.tableCtxPick && cfg.ctx && W.tableReq) {" in fn
-    assert "const src = (fam.contexts || []).length ? fam.contexts : (st.contexts || []);" in fn
+    assert "const src = (md.contexts || []).length ? md.contexts" in fn
+    assert ": ((fam.contexts || []).length ? fam.contexts : (st.contexts || []));" in fn
     assert "if (cs.length) {" in fn
     assert 'cfg.ctx = { ...cfg.ctx, opts: cs.map(c => [String(c), CF_TOK(c), ""]) };' in fn
     assert 'if (W.tableCtxPick) W.cfgArgs["--max-context"] = String(W.tableReq.context || "");' in fn

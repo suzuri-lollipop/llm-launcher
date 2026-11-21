@@ -245,14 +245,21 @@ def test_wizard_copy_mentions_maya_model_step():
 FAKE_TABLES = {
     "available": True,
     "families": {
-        "glm": {"title": "GLM-5.3-Flash", "contexts": [8192, 32768, 65536, 131072, 262144, 524288, 1048576],
+        "glm": {"title": "GLM-5.3-Flash / GLM-5.3 (744B)",
+                "contexts": [8192, 32768, 65536, 131072, 262144, 524288, 1048576],
                 "max_context": 1048576, "multi_gpu": True, "rec": "Maya-S24", "engine_ready": False,
                 "models": {"Maya-S24": {"label": "GLM-5.3 · Maya-S24", "download_gb": 94.7,
                                         "vision": True, "config": "maya-maya-s24.json",
                                         "rec_context": 32768},
                            "Maya-M": {"label": "GLM-5.3 · Maya-M", "download_gb": 116.0,
                                       "vision": True, "config": "maya-maya-m.json",
-                                      "rec_context": 32768}}},
+                                      "rec_context": 32768},
+                           "GLM-5.3-Maya-XS": {"label": "GLM-5.3 (744B) · Maya-XS",
+                                               "download_gb": 170.0, "memory_gb": 176,
+                                               "vision": False, "g53": True,
+                                               "config": "maya-glm-5.3-maya-xs.json",
+                                               "contexts": [8192, 32768, 65536, 131072],
+                                               "rec_context": 32768}}},
         "deepseek": {"title": "DeepSeek-V4.1-Flash-1017",
                      "contexts": [32768, 65536, 131072, 262144, 524288, 1048576],
                      "max_context": 1048576, "multi_gpu": True, "rec": "gguf-q8",
@@ -281,6 +288,29 @@ FAKE_TABLES = {
                                        "vision": True, "config": "maya-cyber-frost.json"},
                             "ud-iq2_xs": {"label": "Qwen-3.8-Flash-Next · unsloth UD-IQ2_XS",
                                           "vision": True, "config": "maya-qwen-ud-iq2_xs.json"}}},
+        "hy4": {"title": "Hy4-Flash",
+                "contexts": [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576],
+                "max_context": 1048576, "multi_gpu": True, "rec": "maya-xs",
+                "model_arg": "Hy4-Flash", "quant_flag": "--hy4-quant",
+                "engine_ready": False,
+                "models": {"maya-xs": {"label": "Hy4-Flash · Maya-XS (108 GB)",
+                                       "download_gb": 108.2, "memory_gb": 52.0,
+                                       "vision": True, "published": True,
+                                       "config": "maya-hy4-flash-maya-xs.json",
+                                       "contexts": [4096, 8192, 16384, 32768, 65536, 131072],
+                                       "rec_context": 32768},
+                           "maya-l": {"label": "Hy4-Flash · Maya-L (153 GB)",
+                                      "download_gb": 152.9, "memory_gb": 100.0,
+                                      "vision": True, "published": True,
+                                      "config": "maya-hy4-flash-maya-l.json",
+                                      "contexts": [], "fits": False,
+                                      "fit_error": "Hy4-Flash needs about 12.0 GB of free VRAM ..."},
+                           "q4_k_m": {"label": "Hy4-Flash · Q4_K_M (168 GB)",
+                                      "download_gb": 168.0, "memory_gb": 170.0,
+                                      "vision": True, "published": True,
+                                      "config": "maya-hy4-flash.json",
+                                      "contexts": [32768, 65536, 131072, 262144],
+                                      "rec_context": 131072}}},
     },
     "pc": {"ram_gb": 128.0, "vram_gb": 24.0, "data_dir": "/x/Maya-data", "disk_free_gb": 400.0,
            "gpus": [{"index": 0, "name": "RTX A", "vram_gb": 24.0, "usable": True},
@@ -411,7 +441,7 @@ def test_build_argv_against_real_submodule():
     opts = maya_setup.load_options(mod)
     assert opts.get("available") is True
     fams = opts.get("families") or {}
-    assert set(fams) == {"glm", "deepseek", "minimax", "qwen"}
+    assert set(fams) == {"glm", "deepseek", "minimax", "qwen", "hy4"}
     for fid, f in fams.items():
         assert f.get("models"), fid
         assert f.get("contexts"), fid
@@ -419,7 +449,9 @@ def test_build_argv_against_real_submodule():
         for m, d in f["models"].items():
             assert str(d.get("config", "")).startswith("maya-"), (fid, m)
             if "rec_context" in d:
-                assert d["rec_context"] in f["contexts"], (fid, m)
+                # モデル別 contexts (Hy4-Flash / GLM-5.3) が在ればその中、無ければ家系の中
+                ctxs = d.get("contexts") or f["contexts"]
+                assert d["rec_context"] in ctxs, (fid, m)
     # 推奨コンテキストは純正の式そのもの (UI の既定用)
     pc = opts.get("pc") or {}
     assert pc.get("ram_gb") and isinstance(pc.get("gpus"), list)
@@ -434,9 +466,45 @@ def test_build_argv_against_real_submodule():
     for a in argv[1:]:
         if a.startswith("--"):
             assert a in known, a
-    for flag in ("--ds4-quant", "--mm3-quant", "--qwen-quant", "--no-vision", "--gpu", "--gpus",
-                 "--drafting", "--parallel"):
+    for flag in ("--ds4-quant", "--mm3-quant", "--qwen-quant", "--hy4-quant", "--no-vision",
+                 "--gpu", "--gpus", "--drafting", "--parallel"):
         assert flag in known, flag
+    # Hy4-Flash (v1.1.68+): モデル別 contexts (hy4_fit) と config 名 (config_stem)
+    hy4 = fams["hy4"]
+    assert hy4.get("model_arg") and hy4.get("quant_flag") == "--hy4-quant"
+    for m, d in hy4["models"].items():
+        assert "contexts" in d, m          # hy4_fit / hy4_q4_contexts のモデル別一覧
+        if d.get("fits") is False:
+            assert d["contexts"] == [] and d.get("fit_error"), m
+    xs = hy4["models"].get("maya-xs")
+    if xs and xs.get("fits") is not False:
+        argv, cfg = maya_setup.build_argv(mod, {"family": "hy4", "model": "maya-xs",
+                                                "context": xs["rec_context"], "vision": "off"})
+        assert argv[1:5] == ["--model", hy4["model_arg"], "--hy4-quant", "maya-xs"]
+        assert argv[argv.index("--drafting") + 1] == "off"
+        assert "--no-vision" in argv
+        assert cfg == "maya-hy4-flash-maya-xs.json"
+        # モデル別 contexts の外は拒否 (家系一覧に在っても hy4_fit が弾く値)
+        outside = next((c for c in hy4["contexts"] if c not in xs["contexts"]), None)
+        if outside is not None:
+            with pytest.raises(ValueError):
+                maya_setup.build_argv(mod, {"family": "hy4", "model": "maya-xs", "context": outside})
+    # GLM-5.3 (744B, G53_MODELS): glm 家系にモデル別 contexts で同居 (テキスト専用)
+    g53 = [m for m, d in fams["glm"]["models"].items() if d.get("g53")]
+    assert g53, "G53_MODELS の一覧が出ていること"
+    for m in g53:
+        d = fams["glm"]["models"][m]
+        assert d["vision"] is False and d.get("contexts")
+        argv, cfg = maya_setup.build_argv(mod, {"family": "glm", "model": m,
+                                                "context": d["rec_context"]})
+        assert argv[1:3] == ["--model", m]
+        assert "--no-vision" not in argv    # vision 非対応モデルにフラグを付けない
+        assert cfg == f"maya-{m.lower()}.json"
+    # DeepSeek (v1.1.66+): 量子化別 config 名 (ds4_config_path)。既存 maya-ds4.json の
+    # 量子化はそれ、他は maya-deepseek-<quant>.json の own 名
+    ds4_cfgs = {m: d.get("config") for m, d in fams["deepseek"]["models"].items()}
+    assert all(str(c).startswith("maya-") for c in ds4_cfgs.values())
+    assert len(set(ds4_cfgs.values())) >= 1
 
 
 # ---------------------------------------------------------------- ② ジョブ計画 (installer)
@@ -905,3 +973,186 @@ def test_qwen_and_mm3_gguf_family_detection(client, monkeypatch):
     pid = _profile(c, "module/maya/maya-mm3.json")
     r = c.get(f"/api/profiles/{pid}/config-args").json()
     assert r["family"] == "minimax" and r["tp_ok"] is True and r["kv_ok"] is False
+
+
+# ---------------------------------------------------------------- Hy4-Flash (v1.1.68+) / GLM-5.3 (744B)
+
+def test_build_argv_hy4(monkeypatch, tmp_path: Path):
+    """Hy4-Flash: --model Hy4-Flash --hy4-quant <key>。コンテキストはモデル別
+    (hy4_fit の一覧)、--drafting off (計測は ⑤)、--parallel は拒否 (1 リクエストずつ)。
+    この PC に収まらないサイズ (fits=False) は選択不可。"""
+    mod = _fake_module(tmp_path, with_venv=True)
+    mod = _seed_tables(monkeypatch, mod)
+    argv, cfg = maya_setup.build_argv(mod, {"family": "hy4", "model": "maya-xs",
+                                            "context": 65536, "vision": "off"})
+    assert argv[1:5] == ["--model", "Hy4-Flash", "--hy4-quant", "maya-xs"]
+    assert argv[argv.index("--context") + 1] == "65536"
+    assert argv[argv.index("--drafting") + 1] == "off"
+    assert "--no-vision" in argv
+    assert argv[-4:] == ["--yes", "--no-start", "--plain", "--download-model"]
+    assert cfg == "maya-hy4-flash-maya-xs.json"
+    # Tencent Q4_K_M は config 名が maya-hy4-flash.json (纯正 config_stem)
+    argv2, cfg2 = maya_setup.build_argv(mod, {"family": "hy4", "model": "q4_k_m", "context": 131072})
+    assert argv2[argv2.index("--hy4-quant") + 1] == "q4_k_m"
+    assert "--no-vision" not in argv2     # vision "" = 純正既定
+    assert cfg2 == "maya-hy4-flash.json"
+    # モデル別 contexts の外は拒否 (家系一覧に在る 1M でも maya-xs の fit 外)
+    for bad in ({"family": "hy4", "model": "maya-xs", "context": 1048576},
+                {"family": "hy4", "model": "maya-xs", "context": 204800},
+                # fits=False (この PC の VRAM では起動できない) は context 関係なく拒否
+                {"family": "hy4", "model": "maya-l", "context": 32768},
+                # --parallel 非対応 (纯正 check_parallel が拒否)
+                {"family": "hy4", "model": "maya-xs", "context": 32768, "parallel": 2},
+                # 家系違いの quant
+                {"family": "hy4", "model": "gguf-q8", "context": 32768}):
+        with pytest.raises(ValueError):
+            maya_setup.build_argv(mod, bad)
+
+
+def test_build_argv_g53(monkeypatch, tmp_path: Path):
+    """GLM-5.3 (744B): glm 家系に同居するがコンテキストはモデル別 (g53_contexts)。
+    テキスト専用 (vision=False) なので --no-vision は付かない。"""
+    mod = _fake_module(tmp_path, with_venv=True)
+    mod = _seed_tables(monkeypatch, mod)
+    argv, cfg = maya_setup.build_argv(mod, {"family": "glm", "model": "GLM-5.3-Maya-XS",
+                                            "context": 65536, "vision": "off"})
+    assert argv[1:3] == ["--model", "GLM-5.3-Maya-XS"]
+    assert "--no-vision" not in argv      # 非対応モデルにフラグを付けない
+    assert "--drafting" not in argv       # GLM は MTP 既定で計測なし
+    assert cfg == "maya-glm-5.3-maya-xs.json"
+    # 家系一覧の 1M は G53 のモデル別一覧に無い → 拒否
+    with pytest.raises(ValueError):
+        maya_setup.build_argv(mod, {"family": "glm", "model": "GLM-5.3-Maya-XS",
+                                    "context": 1048576})
+    # GLM-5.3 は --parallel 対応 (纯正 PARALLEL_FAMILIES に glm)
+    argv2, _ = maya_setup.build_argv(mod, {"family": "glm", "model": "GLM-5.3-Maya-XS",
+                                           "context": 32768, "parallel": 2})
+    assert argv2[argv2.index("--parallel") + 1] == "2"
+
+
+def test_hy4_config_family_and_weights(tmp_path: Path):
+    """hy4 の config 判定: maya-hy4 exe / installer.family → hy4 (--pack を持つので
+    DeepSeek より先)。重み検証は pack の hy4.txt + tensors.txt (file N <path> 行)。"""
+    mod = tmp_path / "maya"
+    mod.mkdir()
+    model = tmp_path / "models" / "Hy4-Flash-Maya-XS"
+    pack = model / "maya-hy4"
+    (pack / "tokenizer").mkdir(parents=True)
+    (model / "trunk.gguf").write_bytes(b"x" * 1024)
+    (pack / "hy4.txt").write_text("model_dir .\n", encoding="utf-8")
+    (pack / "tensors.txt").write_text("file 0 trunk.gguf\nt t0 Q4_K 0 0 1024 4 4\n",
+                                      encoding="utf-8")
+    doc = {"exe": str(mod / "build" / "maya-hy4"),
+           "args": ["--pack", str(pack), "--max-context", "32768"],
+           "tokenizer": str(pack / "tokenizer"),
+           "installer": {"family": "hy4", "hy4_quant": "maya-xs", "layout": "standard"}}
+    assert maya_setup.config_family(doc) == "hy4"
+    assert maya_setup.config_quant_key(doc) == "maya-xs"
+    w = maya_setup.weights_status(doc)
+    assert w["ok"] is True and w["size_gb"] is not None
+    # installer 記録が無くても exe 名で判定 (--pack → deepseek に落ちない)
+    assert maya_setup.config_family({"exe": "/x/maya-hy4", "args": ["--pack", str(pack)]}) == "hy4"
+    # 重みが無い pack は ok=False (一覧に出る = 起動できる、の根拠)
+    (model / "trunk.gguf").unlink()
+    assert maya_setup.weights_status(doc)["ok"] is False
+    # GLM-5.3 (744B) の判定: model_name / installer.quant
+    assert maya_setup.config_is_g53({"model_name": "glm-5.3"}) is True
+    assert maya_setup.config_is_g53({"installer": {"quant": "GLM-5.3-Maya-XS"}}) is True
+    assert maya_setup.config_is_g53({"model_name": "glm-5.3-flash",
+                                     "installer": {"quant": "Maya-S24"}}) is False
+
+
+def test_merge_config_ready_hy4(tmp_path: Path):
+    """hy4 の取得済みバッジは installer.hy4_quant で突き合わせる (config 名はサイズ別)。"""
+    mod = tmp_path / "maya"
+    mod.mkdir()
+    model = tmp_path / "models" / "Hy4-Flash-Maya-XS"
+    pack = model / "maya-hy4"
+    (pack / "tokenizer").mkdir(parents=True)
+    (model / "trunk.gguf").write_bytes(b"x" * 1024)
+    (pack / "hy4.txt").write_text("model_dir .\n", encoding="utf-8")
+    (pack / "tensors.txt").write_text("file 0 trunk.gguf\n", encoding="utf-8")
+    (mod / "maya-hy4-flash-maya-xs.json").write_text(json.dumps({
+        "exe": str(mod / "build" / "maya-hy4"),
+        "args": ["--pack", str(pack), "--max-context", "32768"],
+        "tokenizer": str(pack / "tokenizer"),
+        "installer": {"family": "hy4", "hy4_quant": "maya-xs"}}), encoding="utf-8")
+    data = {"families": {"hy4": {"models": {
+        "maya-xs": {"config": "maya-hy4-flash-maya-xs.json"},
+        "maya-s": {"config": "maya-hy4-flash-maya-s.json"}}}}}
+    maya_setup._merge_config_ready(mod, data)
+    ms = data["families"]["hy4"]["models"]
+    assert ms["maya-xs"]["have"]["found"] == 1
+    assert "have" not in ms["maya-s"]     # 別サイズの config は無い = 触らない
+
+
+def test_hy4_config_asks_tp_count_not_kv(client, monkeypatch):
+    """Hy4-Flash (maya-hy4): --kv はエンジン固有 (編集不可)、--tp は auto|N。
+    GPU の使い方 (gpu) は編集でき、--tp は選択カード全部の N に導出される
+    (tensor parallel。auto を書くと 2 枚で layer split になり、その P2P 活性コピーが
+    Blackwell + PCIe PHB でデータを壊す — 2026-11-21 実測。DS4 の min(2, N) とも違う)。"""
+    c, root = client
+    _seed_maya_gpus(monkeypatch, root)
+    p = _maya_cfg(root, "maya-hy4-flash-maya-xs.json",
+                  {"exe": "/x/maya-hy4", "args": ["--pack", "/p", "--max-context", "32768"],
+                   "gpu": [0, 1],
+                   "installer": {"family": "hy4", "hy4_quant": "maya-xs"}})
+    pid = _profile(c, "module/maya/maya-hy4-flash-maya-xs.json")
+    p = _prof_cfg(c, pid)
+    r = c.get(f"/api/profiles/{pid}/config-args").json()
+    assert r["family"] == "hy4" and r["kv_ok"] is False and r["tp_ok"] is True
+    assert r["tp_auto"] is True
+    assert c.post(f"/api/profiles/{pid}/config-args",
+                  json={"updates": {"--kv": "int8"}}).status_code == 400
+    # gpu 選択 → --tp はカード数 (2) に導出される (auto ではない)
+    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0,1"}})
+    assert r.status_code == 200, r.text
+    doc = json.loads(p.read_text("utf-8"))
+    assert doc["gpu"] == [0, 1]
+    assert doc["args"][doc["args"].index("--tp") + 1] == "2"
+    # 明示の --tp auto / N (カード数以下) は受け付ける (auto は手動選択用に残す)
+    assert c.post(f"/api/profiles/{pid}/config-args",
+                  json={"updates": {"--tp": "auto"}}).status_code == 200
+    assert c.post(f"/api/profiles/{pid}/config-args",
+                  json={"updates": {"--tp": "2"}}).status_code == 200
+    # カード数を超える数値は拒否
+    assert c.post(f"/api/profiles/{pid}/config-args",
+                  json={"updates": {"--tp": "4"}}).status_code == 400
+    # 単一カード → --tp 1 に導出
+    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0"}})
+    assert r.status_code == 200, r.text
+    doc = json.loads(p.read_text("utf-8"))
+    assert doc["gpu"] == 0
+    assert doc["args"][doc["args"].index("--tp") + 1] == "1"
+
+
+def test_g53_config_kv_not_editable(client, monkeypatch):
+    """GLM-5.3 (744B): 家系は glm だが KV は INT8 latent 固定 → --kv 編集不可。
+    --tp も無い (GLM エンジン = layer split)。"""
+    c, root = client
+    _seed_maya_gpus(monkeypatch, root)
+    _maya_cfg(root, "maya-glm-5.3-maya-xs.json",
+              {"exe": "/x/maya", "args": ["--glm-pack", "/p", "--max-context", "32768"],
+               "model_name": "glm-5.3", "gpu": [0, 1],
+               "installer": {"quant": "GLM-5.3-Maya-XS"}})
+    pid = _profile(c, "module/maya/maya-glm-5.3-maya-xs.json")
+    r = c.get(f"/api/profiles/{pid}/config-args").json()
+    assert r["family"] == "glm" and r["kv_ok"] is False and r["tp_ok"] is False
+    assert c.post(f"/api/profiles/{pid}/config-args",
+                  json={"updates": {"--kv": "int8"}}).status_code == 400
+    # gpu (layer split) は編集可
+    assert c.post(f"/api/profiles/{pid}/config-args",
+                  json={"updates": {"gpu": "0"}}).status_code == 200
+
+
+def test_wizard_hy4_ui_wiring():
+    """③ の UI 配線: hy4 は並列数の質問を出さず、--tp はカード数 N 導出 (tpAuto)。
+    ② のコンテキスト一覧はモデル別 contexts を優先する。"""
+    import llm_launcher
+
+    js = (Path(llm_launcher.__file__).parent / "static" / "setup.js").read_text("utf-8")
+    assert 'W.cfgArgs.family === "qwen" || W.cfgArgs.family === "hy4") delete cfg.par' in js
+    assert 'vals.tp = sec.tpAuto ? String(n) : String(Math.min(2, n));' in js
+    assert "tp_auto: isMaya && W.tableReq.family === \"hy4\"" in js
+    assert "(d.contexts || []).length ? d.contexts" in js
+    assert 'W.tableReq.family !== "hy4"' in js     # ② ジョブへ parallel を送らない

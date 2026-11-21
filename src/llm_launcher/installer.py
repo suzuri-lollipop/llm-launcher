@@ -158,8 +158,9 @@ INSTALL_SPECS: dict[str, dict[str, Any]] = {
     # tools step が薄い driver (maya_tools.py) から純正 tools_step() を呼んで PY_PACKAGES +
     # llama.cpp ソース (pinned commit) を入れる。requirements.txt / pyproject は無い
     # (setup.py はパッケージングでなくインストーラ補助) ので -e . / -r は使わない。
-    # エンジン (build/maya / maya-ds4 / maya-mm3) は家系ごとに異なるため ① ではビルドせず、
-    # ② のモデル構成 (maya.py --yes --no-start --download-model) が純正どおりビルドする。
+    # エンジン (build/maya / maya-ds4 / maya-mm3 / maya-hy4) は家系ごとに異なるため
+    # ① ではビルドせず、② のモデル構成 (maya.py --yes --no-start --download-model) が
+    # 純正どおりビルドする。
     # precheck / verify は serve.server import + 導入の stamp (.venv/.strata-pip.json) +
     # llama.cpp ソースの実在を要求する (import だけだと依存未導入でも通ってしまう)。
     "maya": {

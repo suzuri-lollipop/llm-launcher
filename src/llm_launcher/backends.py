@@ -634,9 +634,10 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
 
 
 def build_maya() -> dict[str, Any]:
-    """Project Maya (https://github.com/mw00/project-maya) — GLM-5.3-Flash (321B MoE) を
-    VRAM/RAM/SSD の階層キャッシュでローカル実行するエンジン + OpenAI/Anthropic 互換サーバー
-    + ダッシュボード (Strata 系)。
+    """Project Maya (https://github.com/mw00/project-maya) — GLM-5.3-Flash (321B MoE) /
+    GLM-5.3 (744B) / DeepSeek-V4.1-Flash / MiniMax-M3.1-Flash / Qwen3.8-Flash-Next /
+    Hy4-Flash (Tencent 220B, v1.1.68+) を VRAM/RAM/SSD の階層キャッシュでローカル実行する
+    エンジン + OpenAI/Anthropic 互換サーバー + ダッシュボード (Strata 系)。
 
     起動の入口はリポジトリ直下の maya.py (セットアップ+起動ラッパ)。既定コマンドは
     maya.sh 経由で、module/maya/.venv が無ければ自作し、あればそれを使って起動する。
@@ -653,11 +654,14 @@ def build_maya() -> dict[str, Any]:
           help="setup.sh / maya.sh が生成する実行設定。モデル・コンテキスト長などはこの args に入る"),
         F("--gpu", "GPU 指定 (単一カード)", section="parallel", placeholder="0",
           help="nvidia-smi の番号。空 = config の gpu"),
-        F("--gpus", "GPU 分割 (層分散)", section="parallel", placeholder="0,1 / 0,1,2,3",
-          help="この起動だけ対象のカードを変える。空 = config の gpu"),
+        F("--gpus", "GPU 分割 (層分散 / tensor parallel)", section="parallel", placeholder="0,1 / 0,1,2,3",
+          help="この起動だけ対象のカードを変える。空 = config の gpu。GLM / Qwen / MiniMax GGUF は層分散、"
+               "DeepSeek / MiniMax EXL3 は --tp、Hy4-Flash は --tp auto (最大の同一 GPU グループで tensor parallel)",
+        ),
         F("--parallel", "同時リクエスト数 (1-8)", section="parallel", placeholder="1",
           help="指定すると config に保存される。1 枚で複数リクエストをまとめてデコードし総スループット向上。"
-               "1 リクエスト増えるごとに VRAM のコンテキスト分だけ expert キャッシュが減る"),
+               "1 リクエスト増えるごとに VRAM のコンテキスト分だけ expert キャッシュが減る。"
+               "Qwen / Hy4-Flash は非対応 (1 リクエストずつ回答)"),
         F("--vram-reserve-mib", "GPU ごとの空き VRAM 確保 (MiB)", section="sched", placeholder="700",
           help="ドライバ・デスクトップ等向けの余白。指定すると config に保存される"),
         F("--calibrate", "起動前にこの PC 向け調整 (~10-15分)", section="sched",
@@ -952,9 +956,11 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "id": "maya", "name": "Project Maya",
         "repo": "https://github.com/mw00/project-maya",
         "module_path": "module/maya", "kind": "python",
-        "desc": "GLM-5.3-Flash (321B MoE) を VRAM/RAM/SSD 階層キャッシュでローカル実行するエンジン"
-                " (OpenAI/Anthropic 互換 + ダッシュボード)。初回は module/maya で ./maya.sh を実行し"
-                " エンジンビルドとモデルダウンロード (~100GB) を済ませる。",
+        "desc": "GLM-5.3-Flash (321B MoE) / GLM-5.3 (744B) / DeepSeek-V4.1-Flash / MiniMax-M3.1-Flash / "
+                "Qwen3.8-Flash-Next / Hy4-Flash (Tencent 220B) を VRAM/RAM/SSD 階層キャッシュでローカル実行する"
+                "エンジン (OpenAI/Anthropic 互換 + ダッシュボード)。セットアップは WebUI のセットアップタブ / "
+                "初回ウィザードで完結 (家系・サイズ・コンテキスト選択 → 純正 maya.py がエンジンビルドと"
+                "モデルダウンロードまで実行)。手動なら module/maya で ./maya.sh。",
         # maya.sh が module/maya/.venv を用意 (あれば再利用) して maya.py を exec。
         # セットアップ済みなら対話なしで serve/server.py --engine strata --config maya-<model>.json を起動する
         "default_command": "sh {root}/module/maya/maya.sh",

@@ -8,9 +8,10 @@
   "aliases": [],
   "choices": [
    "cuda",
-   "hip"
+   "hip",
+   "metal"
   ],
-  "help": "GPU backend (HIP: experimental gfx1100/gfx1201/gfx1151 on Linux and Windows)",
+  "help": "GPU backend (HIP: gfx1100/gfx1201/gfx1151 on Linux and Windows; Metal: experimental, Apple Silicon Macs, text only; the default on a Mac)",
   "type": "str"
  },
  "--bench": {
@@ -20,7 +21,6 @@
  },
  "--calibrate": {
   "aliases": [],
-  "help": "tune the engine's CPU lane for this PC (the PCIe share and the CPU threads, ~10-15 minutes), then start the model (with --no-start: only tune)",
   "type": "bool"
  },
  "--check": {
@@ -30,12 +30,17 @@
  },
  "--config": {
   "aliases": [],
-  "help": "the installed JSON config to start (its run-maya-<model>.sh does), or for --bench or --report (default: most recently used)",
+  "help": "the installed JSON config to start (its run-maya-<model>.sh does), or for --bench or --report (default: most recently used). Starting an installed config uses the settings saved in it: setup flags suc",
   "type": "str"
  },
  "--context": {
   "aliases": [],
   "type": "int"
+ },
+ "--copy": {
+  "aliases": [],
+  "help": "with --import-model: copy files that cannot be moved (another drive); the originals stay",
+  "type": "bool"
  },
  "--download-model": {
   "aliases": [],
@@ -46,11 +51,50 @@
   "aliases": [],
   "type": "str"
  },
+ "--drafting": {
+  "aliases": [],
+  "choices": [
+   "measure",
+   "on",
+   "off",
+   "mtp",
+   "dfly2"
+  ],
+  "help": "the drafter (DFlash2 with --draft dflash2, DeepSeek's DSpark): measure = the speed calibration keeps it only if it is faster on this PC (the default with --yes; asked otherwise), on = draft with it, o",
+  "type": "str"
+ },
+ "--ds4-quant": {
+  "aliases": [],
+  "type": "str"
+ },
  "--env": {
   "aliases": [],
-  "help": "an engine setting kept in the config, e.g. STRATA_GLM_RAM_HEADROOM_GB=4 (docs/SETTINGS.md)",
+  "help": "an engine setting kept in the config, e.g. MAYA_GLM_RAM_HEADROOM_GB=4 (docs/SETTINGS.md)",
   "metavar": "KEY=VALUE",
   "type": "str"
+ },
+ "--fast-drafting": {
+  "aliases": [],
+  "choices": [
+   "on",
+   "off"
+  ],
+  "help": "Hy4-Flash's sizes on a small card (a setup setting, kept in the config): where the DFly2 drafter has no room beside the cache's F16 rows at the context chosen, on keeps that context with the cache in ",
+  "type": "str"
+ },
+ "--fast-prefill": {
+  "aliases": [],
+  "choices": [
+   "on",
+   "off"
+  ],
+  "help": "DeepSeek: fast prompt reading - long prompts read faster (the prompt skip as a per-layer cone); answers can shift slightly, so it is off by default; kept in the config",
+  "type": "str"
+ },
+ "--force-fit": {
+  "aliases": [],
+  "help": "GLM-5.3-Flash: set up a quant even where the setup works out that it cannot start on this PC's one NVIDIA card, not even with its experts on the CPU (it then warns instead of stopping before the downl",
+  "type": "bool"
  },
  "--gguf-dir": {
   "aliases": [],
@@ -76,12 +120,47 @@
   "help": "the C++ compiler nvcc uses, e.g. g++-12 (when the default g++ is newer than your CUDA accepts)",
   "type": "str"
  },
+ "--hy4-quant": {
+  "aliases": [],
+  "type": "str"
+ },
+ "--import-model": {
+  "aliases": [],
+  "help": "use model files downloaded some other way (a download manager, a copy from another PC, a Hugging Face cache): finds Maya's published files in FOLDER by size and sha256 (any names, any subfolders) and ",
+  "metavar": "FOLDER",
+  "type": "str"
+ },
  "--llama-dir": {
   "aliases": [],
   "help": "a llama.cpp checkout at the pinned commit, instead of downloading its source",
   "type": "str"
  },
+ "--mixed-gpus": {
+  "aliases": [],
+  "help": "experimental - DeepSeek or GLM on an AMD GPU with an NVIDIA card beside it (Linux): on - both GPUs, in the layout that suits the model (DeepSeek: the card computes the AMD GPU's most-used experts, or ",
+  "metavar": "on|off|helper|split|LAYERS",
+  "type": "str"
+ },
+ "--mm3-quant": {
+  "aliases": [],
+  "type": "str"
+ },
+ "--mmap-experts": {
+  "aliases": [],
+  "choices": [
+   "auto",
+   "on",
+   "off"
+  ],
+  "help": "DeepSeek: the experts VRAM does not hold - read in place from the files (auto, the default), or off: copied into RAM (with DS4_REQUIRE_ALL_RAM=1 all of them); kept in the config",
+  "type": "str"
+ },
  "--model": {
+  "aliases": [],
+  "metavar": "MODEL",
+  "type": "str"
+ },
+ "--model-dir": {
   "aliases": [],
   "type": "str"
  },
@@ -92,7 +171,7 @@
  },
  "--no-speed-calibration": {
   "aliases": [],
-  "help": "with --draft dflash2: keep DFlash2 without measuring it against the MTP block",
+  "help": "the same as --drafting on: draft with the drafter without measuring it",
   "type": "bool"
  },
  "--no-start": {
@@ -112,7 +191,7 @@
  },
  "--parallel": {
   "aliases": [],
-  "help": "answer up to N requests at once (1-8, default 1), kept in the config: on one GPU they are decoded together, more tokens per second in all; each extra conversation keeps its own context in VRAM, which ",
+  "help": "GLM-5.3-Flash, DeepSeek-V4.1-Flash and MiniMax-M3.1-Flash: answer up to N requests at once (1-8, default 1), kept in the config: they are decoded together, more tokens per second in all; each extra co",
   "metavar": "N",
   "type": "int"
  },
@@ -125,6 +204,10 @@
   "aliases": [],
   "help": "the dashboard's and the API's port (default 8080)",
   "type": "int"
+ },
+ "--qwen-quant": {
+  "aliases": [],
+  "type": "str"
  },
  "--rebuild": {
   "aliases": [],
@@ -148,7 +231,7 @@
  },
  "--speed-calibration": {
   "aliases": [],
-  "help": "measure on this PC whether the DFlash2 drafter decodes faster than the MTP block (sustained speed, ~5-20 minutes, the model loaded twice) and keep the faster; then start the model (with --no-start: on",
+  "help": "measure on this PC whether the drafter (DFlash2, or DeepSeek's DSpark) decodes faster than without it (sustained speed, ~5-30 minutes, the model loaded twice) and keep the faster; then start the model",
   "type": "bool"
  },
  "--vram-reserve-mib": {
