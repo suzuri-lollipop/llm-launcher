@@ -32,11 +32,16 @@ def _field(key: str) -> dict:
 
 def test_table_is_generated_from_maya_argparse():
     table = backends.load_table("maya")
-    assert table["--backend"]["choices"] == ["cuda", "hip"]
+    # v1.1.70 の純正 argparse: metal (Apple Silicon 実験的) も choices に入る。
+    # GUI の --backend は build_maya が cuda/hip を明示 (Linux launcher の対象外)
+    assert table["--backend"]["choices"] == ["cuda", "hip", "metal"]
     assert table["--port"]["type"] == "int"
     assert table["--parallel"]["type"] == "int"
     assert table["--calibrate"]["type"] == "bool"
     assert table["--env"]["type"] == "str"
+    # v1.1.68+: Hy4-Flash の --hy4-quant / --drafting (measure/on/off/mtp/dfly2)
+    assert "--hy4-quant" in table
+    assert table["--drafting"]["choices"] == ["measure", "on", "off", "mtp", "dfly2"]
     # default 無し (config / 実行時に決まる) は正表に default を書かない
     for flag in ("--host", "--api-key", "--config", "--gpu"):
         assert table[flag].get("default") in (None, "")

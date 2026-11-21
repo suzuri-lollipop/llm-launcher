@@ -344,7 +344,13 @@ def maya_speed_wanted(cfg_path: str) -> bool:
     純正 setup が config に書いたフラグで判定する — pack に drafter が無い /
     MiniMax の --parallel > 1 (drafter なしでデコード) ときは計測しても意味がない:
       GLM: --dflash (DFlash2 drafter) / DeepSeek: --dspark / MiniMax: --dspark かつ parallel <= 1
-      Qwen: --mtp (pack の MTP drafter)"""
+      Qwen: --mtp (pack の MTP drafter)
+      Hy4-Flash (v1.1.68+): MTP ブロックと DFly2 の両方が pack に入る構成
+      (installer.draft_choice == "auto"・1 GPU) なら両者の A/B (speed_calibration_hy4)。
+      2-bit エキスパートのサイズ (maya-xs / maya-s) は CPU レーンの 4-bit コピー計測
+      (q4x_calibration) も対象 — 純正 speed_calibration の hy4 分岐と同じ。
+      setup は --drafting off でもファイルは pack に入る (計測だけ ⑤ に集約)。
+      Tencent Q4_K_M は計測対象なし (純正: no speed calibration yet)"""
     try:
         cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -364,6 +370,16 @@ def maya_speed_wanted(cfg_path: str) -> bool:
         return par is None or par <= 1
     if fam == "qwen":
         return "--mtp" in args[:-1]
+    if fam == "hy4":
+        inst = cfg.get("installer") or {}
+        key = maya_setup.config_quant_key(cfg)
+        if key == "q4_k_m":
+            return False
+        both = inst.get("draft_choice") == "auto" and bool(inst.get("draft_block")) \
+            and bool(inst.get("dfly2")) and len(cfg.get("gpu") or [0]) < 2
+        if both:
+            return True
+        return key in ("maya-xs", "maya-s")   # q4x: IQ2_XXS エキスパートの 4-bit コピー計測
     return False
 
 
@@ -625,11 +641,21 @@ class CalibrationManager:
             if not cfg:
                 raise CalibrateError("Maya の config (maya-<model>.json) が見つかりません。"
                                      "プロファイルの --config に指定するか、先にセットアップしてください")
-            steps: list[dict[str, Any]] = [
-                # verify: Maya は失敗しても exit 0 なので、調整が実際に config へ書かれたかを後で確認する
-                {"name": "calibrate", "argv": build_maya_command(self.root, profile, python),
-                 "cwd": str(module_dir), "verify": cfg}]
-            # drafter (DSpark / MTP / DFlash2) の速度計測もここで集約する。セットアップ
+            steps: list[dict[str, Any]] = []
+            try:
+                cfg_doc = json.loads(Path(cfg).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cfg_doc = {}
+            # Hy4-Flash (maya-hy4) の --calibrate は「何も調整しない」(エンジンが起動ごとに
+            # この PC へ CPU レーン / expert プールを合わせる — 純正 calibrate_config の hy4
+            # 分岐は installer.calibration を書かずに True を返す)。検証が失敗扱いになる
+            # no-op step は積まない
+            if maya_setup.config_family(cfg_doc) != "hy4":
+                steps.append(
+                    # verify: Maya は失敗しても exit 0 なので、調整が実際に config へ書かれたかを後で確認する
+                    {"name": "calibrate", "argv": build_maya_command(self.root, profile, python),
+                     "cwd": str(module_dir), "verify": cfg})
+            # drafter (DSpark / MTP / DFlash2 / DFly2) の速度計測もここで集約する。セットアップ
             # (②) は --drafting off で計測しないので、GPU 独占の計測は全てこの ⑤ の
             # ジョブ (メモリガード / OOM 保護 / 排他制御が効く) で行う。
             # --calibrate --no-start は --speed-calibration より先に return 0 する純正仕様
@@ -638,6 +664,11 @@ class CalibrationManager:
                 steps.append({"name": "speed",
                               "argv": build_maya_speed_command(self.root, profile, python),
                               "cwd": str(module_dir), "verify": cfg})
+            if not steps:
+                raise CalibrateError(
+                    "この Maya モデルに調整対象がありません (Hy4-Flash はエンジンが起動ごとに"
+                    "この PC へ合わせます。drafter の速度計測対象も無い構成です — "
+                    "MTP ブロックと DFly2 の両方が pack に入るサイズ / 2-bit サイズが対象)")
         elif kind == "freetoken":
             cfg = ""
             try:
@@ -1858,8 +1889,11 @@ def _verify_maya_speed(job: dict[str, Any], cfg_path: str) -> tuple[str, dict[st
     """Maya の `--speed-calibration` が本当に計測したかを確かめる (成功なら ("", 記録))。
 
     純正は計測できなくても exit 0 で終わる (GPU 使用中 / pack に drafter 無し / 計測失敗は
-    警告のみ)。成功の証拠は config の installer.speed_calibration (DSpark / DFlash2) または
-    installer.mtp_calibration (Qwen) の計測記録 — skipped (選択のみ) / failed は失敗扱い。"""
+    警告のみ)。成功の証拠は config の installer.speed_calibration (DSpark / DFlash2 /
+    Hy4 の MTP vs DFly2 A/B) または installer.mtp_calibration (Qwen) の計測記録 —
+    skipped (選択のみ) / failed は失敗扱い。Hy4-Flash の 2-bit サイズは CPU レーンの
+    4-bit コピー計測 (installer.q4x_calibration: result on/off/n/a) も成功の証拠
+    (n/a = この PC に判定対象なし = 純正の正常終了。unmeasured は失敗)。"""
     try:
         cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -1867,10 +1901,15 @@ def _verify_maya_speed(job: dict[str, Any], cfg_path: str) -> tuple[str, dict[st
     if not isinstance(cfg, dict):
         return f"Maya の config が JSON オブジェクトではありません ({cfg_path})", {}
     inst = cfg.get("installer") or {}
-    key = "mtp_calibration" if maya_setup.config_family(cfg) == "qwen" else "speed_calibration"
+    fam = maya_setup.config_family(cfg)
+    key = "mtp_calibration" if fam == "qwen" else "speed_calibration"
     rec = inst.get(key)
     if isinstance(rec, dict) and rec.get("date") and not rec.get("failed") and not rec.get("skipped"):
         return "", rec
+    if fam == "hy4":
+        q4x = inst.get("q4x_calibration")
+        if isinstance(q4x, dict) and q4x.get("date") and q4x.get("result") in ("on", "off", "n/a"):
+            return "", q4x
     lines = (job.get("logs") or [])[-40:]
     for line in reversed(lines):
         low = line.lower()
