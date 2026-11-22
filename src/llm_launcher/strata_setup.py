@@ -8,14 +8,23 @@
 と「ホワイトリスト検証 + argv 組み立て」だけを持つ。
 
   * load_options(): 純正 setup.py を submodule cwd で import する短い subprocess から
-    FAMILIES / MODELS / MULTI_FILE_FAMILIES / CONTEXTS と PC の RAM・VRAM・GPU 一覧・
-    データディスクの空き、家系別の max_context / multi_gpu、モデル別の rec_context と
-    重み実在 (have) を JSON で受け取る (表の単一の源は常に submodule 側。upstream の
-    bump で選択肢も増えていく)。60 秒キャッシュ。
+    FAMILIES / MODELS / MULTI_FILE_FAMILIES / HY4_FAMILIES / INKLING_FAMILIES と
+    PC の RAM・VRAM・GPU 一覧・データディスクの空き、家系別の max_context /
+    multi_gpu、モデル別の rec_context と重み実在 (have) を JSON で受け取る
+    (表の単一の源は常に submodule 側。upstream の bump で選択肢も増えていく)。
+    60 秒キャッシュ。
+    0.2.19+ の Hy4-Flash (strata-hy4) / Inkling-2-Mini (strata-inkling) は
+    HY4_FAMILIES / INKLING_FAMILIES の独自エンジン家系: コンテキスト / 推奨は
+    hy4_family / inkling_family の CONTEXTS / DEFAULT_CONTEXT そのもの
+    (Inkling は「up to 1M supported」= 明示 --context が素通りするので owner 方針で
+    1M まで拡張)。重みは .strata ネイティブファイル (build + 共有 Engram / Vision)。
+    純正メニューが出さない (ダウンロードソース未設定・ローカルファイル無し) 家系は
+    表にも出さない (hy4_offered / inkling_offered と同じ見立て)。
   * build_argv(): 検証済みフラグのみ argv にする。family / model は読み出した表の
     キーそのもの、context は表の CONTEXTS の値、vision は列挙値、gpus は検出した
     usable GPU の index 集 (単一カード = --gpu N、複数 = --gpus "0,1"/all、
-    own-path 家系の複数指定は拒否 — 純正が単一 GPU 宣言)。どれか一つでも外れたら
+    単一 GPU 宣言の家系 = own-path / Hy4-Flash の複数指定は拒否。Inkling-2-Mini は
+    NVIDIA 2 枚の expert parallel まで純正どおり)。どれか一つでも外れたら
     InstallError 相当の ValueError を投げる (argv 化に値の検証は必須)。
   * weights_status() / installed_configs(): config が参照する重み (--native / --pack /
     vision / tokenizer、マルチシャードは兄弟も) の実在とサイズを検証する —
@@ -50,15 +59,29 @@ def m_entry(d):
 fams = {}
 for fid, f in getattr(S, "FAMILIES", {}).items():
     fams[fid] = {"title": str(f.get("title", fid)), "about": str(f.get("about", "")),
-                 "tag": str(f.get("tag", "")),
+                 "tag": str(f.get("tag", "")), "arch": str(f.get("arch", "")),
                  "models": {m: m_entry(d) for m, d in S.MODELS.items()
                             if fid in d.get("families", ("qwen", "swift"))}}
-for src in ("PREVIEW_FAMILIES", "MULTI_FILE_FAMILIES"):
+for src in ("PREVIEW_FAMILIES", "MULTI_FILE_FAMILIES", "HY4_FAMILIES", "INKLING_FAMILIES"):
     for fid, f in getattr(S, src, {}).items():
         ms = {m: m_entry(d) for m, d in (f.get("models") or {}).items()}
         if ms and fid not in fams:
             fams[fid] = {"title": str(f.get("title", fid)), "about": str(f.get("about", "")),
-                         "tag": str(f.get("tag", "")), "models": ms}
+                         "tag": str(f.get("tag", "")), "arch": str(f.get("arch", "")),
+                         "models": ms}
+# 0.2.19+ の独自エンジン家系 (strata-hy4 / strata-inkling): 純正メニューと同じく
+# ダウンロードソースが設定済みかローカルファイルが在るときだけ出す (offered ゲート)
+hy4 = getattr(S, "HY4_FAMILIES", {})
+ink = getattr(S, "INKLING_FAMILIES", {})
+for tbl, gate in ((hy4, "hy4_offered"), (ink, "inkling_offered")):
+    g = getattr(S, gate, None)
+    for fid in tbl:
+        try:
+            offered = bool(g()) if callable(g) else True
+        except Exception:
+            offered = True
+        if not offered:
+            fams.pop(fid, None)
 pc = {}
 try:
     pc["ram_gb"] = round(float(S.ram_gb()), 1)
@@ -122,12 +145,41 @@ vram = pc.get("vram_gb") or 0.0
 #  - DeepSeek-V4.1-Flash: native に 1M 読む (strata_control/dsv41_context.CHOICES、
 #    純正メニューも 8K–1M)。旧い 262144 上限は trained の誤読だった。
 #  - own-path (Qwen3.6): このエンジンパスに rope scaling が無く trained 262144 が上限。
+#  - Hy4-Flash (0.2.19+): 純正メニューの 8K–128K がそのまま (hy4_family.CONTEXTS。
+#    既定 128K は owner 決定 2026-11-19)。
+#  - Inkling-2-Mini (0.2.19+): メニューは 256K 止まりだが "up to 1M supported"
+#    (明示 --context は検証されず素通り) なので 1M まで出す。既定 32K。
 D = getattr(S, "dsv41_context", None)
 ds41_choices = list(getattr(D, "CHOICES", (8192, 32768, 65536, 131072, 262144, 524288, 1048576)))
 ctx_all = sorted(set(getattr(S, "CONTEXTS", []) or
                      [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]) | {1048576})
 for fid, f in fams.items():
-    raw = getattr(S, "FAMILIES", {}).get(fid) or own.get(fid) or multi.get(fid) or {}
+    raw = getattr(S, "FAMILIES", {}).get(fid) or own.get(fid) or multi.get(fid) or hy4.get(fid) or ink.get(fid) or {}
+    if fid in hy4 or fid in ink:
+        # 独自エンジン家系: ファイル / 既定は strata_control の hy4_family / inkling_family
+        # (setup.py が import したものがそのまま乗っている)。重みは .strata ネイティブ
+        # (build + 共有 Engram / Vision shard)。vision は家系既定 (両家系とも ON)
+        HF = getattr(S, "hy4_family", None) if fid in hy4 else getattr(S, "inkling_family", None)
+        ctxs = [int(c) for c in (getattr(HF, "CONTEXTS", []) or [])]
+        if fid in ink:
+            ctxs = sorted(set(ctxs) | {524288, 1048576})
+        f["contexts"] = ctxs
+        f["max_context"] = max(ctxs) if ctxs else 262144
+        # hy4: 純正が単一 GPU 宣言 ("runs on one GPU so far")。inkling: NVIDIA 2 枚で
+        # expert parallel (--gpus 2 EP。3 枚以上は先頭 2 枚を使う = 純正 install_inkling2)
+        f["multi_gpu"] = fid in ink
+        for m, d in f["models"].items():
+            d["vision"] = bool(raw.get("vision"))
+            try:
+                d["rec_context"] = int(HF.DEFAULT_CONTEXT)
+                files = HF.files_of(m, True)      # vision ON 既定のダウンロードセット
+                d["download_gb"] = round(sum(HF.size_of(n) or 0 for n in files) / 1e9, 1)
+                found = [n for n in files if n in idx]
+                d["have"] = {"files": len(files), "found": len(found),
+                             "gb": round(sum(idx[n] for n in found) / 2**30, 1)}
+            except Exception:
+                pass
+        continue
     if fid in own:
         f["contexts"] = [c for c in ctx_all if c <= 262144]
         f["max_context"] = 262144
@@ -324,7 +376,26 @@ def load_options(module_dir: Path) -> dict[str, Any]:
 
 
 _SHARD_RE = re.compile(r"^(.*-)(\d{5})-of-(\d{5})(\.\w+)$")
-_PACK_SUFFIXES = (".gguf", ".bin", ".safetensors")
+# .strata: 0.2.19+ のネイティブ重み (Hy4-Flash / Inkling-2-Mini の build / Engram / Vision)
+_PACK_SUFFIXES = (".gguf", ".bin", ".safetensors", ".strata")
+
+# 純正 tune_commands の HY4_NO_TUNING / INKLING_NO_TUNING に対応する arch:
+# この 2 家系は engine calibrate (tune) が拒否する — 速度とメモリ配置はエンジン
+# (strata-hy4 / strata-inkling) が起動ごとに自動で決める。⑤ は開始前に正直に断る
+NO_TUNING_ARCHS = {"hy4flash": "Tencent Hy4-Flash", "inkling2_loop": "Inkling-2-Mini"}
+
+
+def config_family(data: dict[str, Any], families: dict[str, Any]) -> str | None:
+    """config の家系を load_options() の表の arch から引く (Flash-Next 系は arch を
+    持たないので None)。hy4flash / inkling2_loop / qwen35moe など、純正 setup.py の
+    家系表が単一の源。"""
+    arch = str(data.get("arch") or "")
+    if not arch:
+        return None
+    for fid, f in (families or {}).items():
+        if str(f.get("arch") or "") == arch:
+            return str(fid)
+    return None
 
 
 def _merge_config_ready(module_dir: Path, data: dict[str, Any]) -> None:
@@ -348,13 +419,18 @@ def _merge_config_ready(module_dir: Path, data: dict[str, Any]) -> None:
 def weights_status(data: dict) -> dict:
     """config JSON が参照する重みの実在チェック — 「一覧に JSON が並んでいる」だけでは
     起動能否は分からない (削除/移動済み・シャード欠損がある)。参照パターンは純正 config の
-    3 種: --native/--model/--gguf/-m のファイル (マルチシャードは -0000X-of-0000N の
-    兄弟も)、--pack のディレクトリ、vision.model/mmproj。tokenizer ディレクトリも見る。
+    4 種: --native/--model/--gguf/-m のファイル (マルチシャードは -0000X-of-0000N の
+    兄弟も)、--pack のディレクトリ、--engram / --vision の引数 (0.2.19+ の Hy4-Flash /
+    Inkling-2-Mini: .strata ネイティブファイル)、vision.model/mmproj。tokenizer ディレクトリも見る。
     ok=None は「参照が見付からない config」= 判断しない (UI は重み表示なしで通す)。"""
     args = data.get("args") or []
     refs: list[Path] = []
     for i, a in enumerate(args[:-1]):
-        if str(a) in ("--native", "--model", "--gguf", "-m", "--pack"):
+        if str(a) in ("--native", "--model", "--gguf", "-m", "--pack", "--engram"):
+            refs.append(Path(str(args[i + 1])))
+        elif str(a) == "--vision" and not str(args[i + 1]).startswith("--"):
+            # Hy4-Flash / Inkling-2-Mini は --vision <file> (.strata Vision shard)。
+            # Flash-Next 系の --vision は値なしのブールフラグなので参照にしない
             refs.append(Path(str(args[i + 1])))
     v = data.get("vision") or {}
     for k in ("model", "mmproj"):

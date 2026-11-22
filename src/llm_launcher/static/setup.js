@@ -820,7 +820,9 @@ function mdStHint() {
     }
     if (st.available && fam.engine_ready === false)
       info.push("エンジンはこの設定の中でこの PC 向けにコンパイルします。初回は 10〜30 分かかります");
-    if (st.available && W.mdStFam === "hy4")
+    if (st.available && W.mdStFam === "ik2")
+      info.push("Inkling 2 Mini は実験的プレビュー (Linux・単一 GPU) です。ドラフターはセットアップで取得し、エンジンが初回起動時に 1 回だけ計測 (~1 分・最初の回答の前) して使うか決めます。⑤ の調整は計測記録を消して再計測を促します");
+    else if (st.available && W.mdStFam === "hy4")
       info.push("MTP ブロック / DFly2 drafter の速度計測 (どちらが速いかの A/B) はセットアップでは行わず、⑤ の調整に集約します。ファイル自体は VRAM に収まるなら download されます。スキップすると drafter なしで起動します");
     else if (st.available && W.mdStFam !== "glm")
       info.push("DSpark / MTP drafter の速度計測はセットアップでは行わず、⑤ の調整に集約します。スキップすると drafter なしで起動します");
@@ -828,6 +830,10 @@ function mdStHint() {
       info.push("MiniMax は純正仕様どおり、短い prefill 計測だけセットアップに含まれます。数分・エンジン起動 1 回です");
     if (W.mdStFam === "hy4" && (d.streamed_contexts || []).includes(Number(W.mdStCtx)))
       info.push("このコンテキストは KV streaming で動かします: attention キャッシュの古い行は RAM に置き (純正 hy4_fit の計算)、VRAM には最新分だけを残します。回答は同じで、長文の読み書きが数%遅くなります");
+    if (W.mdStFam === "ik2" && d.layout === "offload")
+      info.push("この VRAM では offload パスで動きます: よく使うエキスパートを VRAM に置き、残りは RAM にピン留めして必要時に取得/計算します (純正 ik2_fit の計算)。全エキスパートが VRAM に収まるより遅くなります");
+    if (d.experimental)
+      warn.push("実験的プレビューです: 一部の GPU (Linux・単一 GPU) でのみ動作確認されています。動かない場合は upstream へ報告してください");
     if (d.g53)
       info.push("GLM-5.3 (744B) はテキスト専用です (画像入力なし)。KV キャッシュはエンジン固有の形式で、コンテキスト一覧はこの PC の VRAM に収まる分だけを表示します");
   } else if (d.ram_gb) {
@@ -1779,11 +1785,13 @@ async function renderConfig() {
     const usable = ((st.pc || {}).gpus || []).filter(g => g.usable).map(g => g.index);
     /* Maya の家系別ノブ (サーバーの _maya_config_info と同じ見立て):
        GLM / Qwen = --kv (GLM-5.3 (744B) は KV 固定なので対象外)、
-       DeepSeek / MiniMax EXL3 / Hy4-Flash = --tp。Hy4 の --tp は auto 導出 (tp_auto) */
+       DeepSeek / MiniMax EXL3 / Hy4-Flash = --tp。Hy4 の --tp は auto 導出 (tp_auto)。
+       Strata の家系別ノブ: --kv は Flash-Next 系だけ (arch を持つ家系 =
+       own-path Qwen3.6 / Hy4-Flash / Inkling-2-Mini はエンジン固有の KV) */
     W.cfgArgs = { gpus: usable, gpu_multi: fam.multi_gpu !== false,
-                  family: isMaya ? W.tableReq.family : undefined,
+                  family: isMaya ? W.tableReq.family : (fam.arch ? W.tableReq.family : undefined),
                   kv_ok: isMaya ? ((W.tableReq.family === "glm" && !md.g53)
-                                   || W.tableReq.family === "qwen") : true,
+                                   || W.tableReq.family === "qwen") : !fam.arch,
                   tp_ok: isMaya && (W.tableReq.family === "deepseek" || W.tableReq.family === "hy4"
                                     || (W.tableReq.family === "minimax" && W.tableReq.model === "exl3")),
                   tp_auto: isMaya && W.tableReq.family === "hy4" };
@@ -1802,11 +1810,11 @@ async function renderConfig() {
      DeepSeek / MiniMax EXL3 = GPU の使い方 + --tp (導出)。--kv は無い (KV はエンジン固有)。
      Hy4-Flash = GPU の使い方 + --tp auto (エンジンが最大の同一 GPU グループで tensor
      parallel。3 枚以上は CPU レーン併用)。KV はエンジン固有 (--kv auto/q8) で編集させない。
-     Qwen / Hy4-Flash は --parallel 非対応 (1 リクエストずつ) — 並列数の質問自体を出さない
-     (2 以上を保存すると起動が check_parallel で失敗するため)。 */
+     Qwen / Hy4-Flash / Inkling-2-Mini は --parallel 非対応 (1 リクエストずつ) —
+     並列数の質問自体を出さない (2 以上を保存すると起動が check_parallel で失敗するため)。 */
   if (W.backend === "maya" && W.cfgArgs.family) {
     if (W.cfgArgs.kv_ok === false) delete cfg.kv;
-    if (W.cfgArgs.family === "qwen" || W.cfgArgs.family === "hy4") delete cfg.par;
+    if (W.cfgArgs.family === "qwen" || W.cfgArgs.family === "hy4" || W.cfgArgs.family === "ik2") delete cfg.par;
     /* GPU の使い方は全家系で聞く (純正 choose_gpus と同じ立場)。DS4 / MM3-EXL3 は
        カード選択から --tp を純正同款 min(2, 枚数) で導出する — --tp だけ聞いて
        config の gpu を放置すると「tp=1 なのに 2 枚 layer split」で起動 / 計測される
@@ -1820,6 +1828,15 @@ async function renderConfig() {
                    : "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます"),
                opts: [], cur: v => v, tpFromGpus: W.cfgArgs.tp_ok === true,
                tpAuto: W.cfgArgs.tp_auto === true };
+  }
+  /* Strata の家系別質問出し分け (サーバーの _strata_config_family と同じ見立て):
+     --kv は Flash-Next 系だけ (own-path Qwen3.6 / Hy4-Flash / Inkling-2-Mini は
+     エンジン固有 — 純正 setup も「Flash-Next settings」と warn する)。
+     Hy4-Flash は --parallel 非対応 (strata-hy4 は 1 リクエストずつ)。
+     Inkling-2-Mini は 1..64 スロット対応 (CF_PAR の 1-8 はその有効部分集合) */
+  if (W.backend === "strata" && W.cfgArgs.family) {
+    if (W.cfgArgs.kv_ok === false) delete cfg.kv;
+    if (W.cfgArgs.family === "hy4-flash") delete cfg.par;
   }
   /* 設定先行フロー: コンテキスト長を ② の面板で選んだ経路はセットアップが
      config に書くので ③ で二重に聞かない。済みモデル採用 (config 無し) は
@@ -2244,8 +2261,10 @@ async function startModelJob() {
       const g = String(W.setupGpus || "").trim();
       if (g && g !== "auto") body.gpus = g;          // layer split 回答 (GLM / Qwen / MM3 GGUF / Strata)
       // Maya の並列数はセットアップに渡す (config の --parallel になり、DS4 / MM3 の
-      // 推奨コンテキスト計算にも使われる)。Qwen / Hy4-Flash は --parallel 非対応なので送らない
-      if (isMaya && W.setupParallel > 0 && W.tableReq.family !== "qwen" && W.tableReq.family !== "hy4")
+      // 推奨コンテキスト計算にも使われる)。Qwen / Hy4-Flash / Inkling 2 Mini は
+      // --parallel 非対応なので送らない
+      if (isMaya && W.setupParallel > 0 && W.tableReq.family !== "qwen"
+          && W.tableReq.family !== "hy4" && W.tableReq.family !== "ik2")
         body.parallel = W.setupParallel;
       job = await api(ep, { method: "POST", body });
       W.kind = "install";
@@ -2387,6 +2406,10 @@ async function renderCal() {
       caInfo += "\nDSpark / MTP drafter の速度計測もここで行います。スキップすると drafter なしで起動します。後からダッシュボードのキャリブレーションで実行できます。";
     if (W.backend === "maya" && /^maya-hy4/.test(cn))
       caInfo += "\nHy4-Flash: MTP ブロックと DFly2 drafter のどちらが速いかの A/B 計測 (両方が pack に入る構成) と、2-bit サイズの CPU レーン 4-bit コピー計測をここで行います。スキップすると drafter なしで起動します。エンジン本体の調整は不要です (起動ごとにこの PC へ合わせます)。";
+    if (W.backend === "maya" && /^maya-inkling/.test(cn))
+      caInfo += "\nInkling 2 Mini: エンジン本体の調整は不要です (起動ごとにこの PC へ合わせます)。drafting が auto のときはここで計測記録を消し、次回起動時にエンジンが再計測します (~1 分・最初の回答の前)。";
+    if (W.backend === "strata" && /^strata-(hy4-flash|inkling-2-mini)/.test(cn))
+      caInfo += "\nこのモデルは調整不要です (エンジンが起動ごとに速度とメモリ配置をこの PC へ自動で合わせます)。スキップしてください。";
     setInfo("#ca-info", caInfo);
     /* FreeToken 系: 校正対象 (single / multi) の説明 — ダッシュボードの
        「キャリブレーション」タブと同じ問いをウィザードでも出す (2026-11-17 報告:

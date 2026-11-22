@@ -256,12 +256,12 @@ class MayaModelBody(BaseModel):
     設定先行フローでは ③ の回答 (GPU / 並列数) もここに載る: gpus はエンジンビルド /
     速度計測の対象カードを、parallel は config の --parallel (DS4 / MM3 の推奨
     コンテキスト計算にも効く) をセットアップ時点で決める。"""
-    family: str = Field(min_length=1, max_length=64)     # glm|deepseek|minimax|qwen|hy4
+    family: str = Field(min_length=1, max_length=64)     # glm|deepseek|minimax|qwen|hy4|ik2
     model: str = Field(min_length=1, max_length=128)     # 家系別の quant キー (表のキーそのもの)
     context: int = 32768
     vision: str = ""      # "" = 純正既定 (ON), "off" = --no-vision (対応モデルだけ)
-    gpus: str = ""        # "" / "auto" = 純正既定 (usable 全部), "0" = 単一, "0,1"|"all" = 分割
-    parallel: int | None = Field(default=None, ge=1, le=8)   # Qwen / Hy4-Flash は非対応 (build_argv が拒否)
+    gpus: str = ""        # "" / "auto" = 純正既定 (usable 全部), "0" = 単一, "0,1"|"all" = 分割 (ik2 は単一のみ)
+    parallel: int | None = Field(default=None, ge=1, le=8)   # Qwen / Hy4-Flash / Inkling 2 Mini は非対応 (build_argv が拒否)
 
 
 class ModelDownloadBody(BaseModel):
@@ -1434,6 +1434,14 @@ def create_app(root: Path) -> FastAPI:
                     multi = f.get("multi_gpu", True) is not False
         return cur, usable, multi
 
+    def _strata_config_family(prof: dict[str, Any], doc: dict[str, Any]) -> str | None:
+        """Strata の config の家系 (load_options の表の arch が単一の源)。
+        Flash-Next 系は arch を持たないので None。0.2.19+ の独自エンジン家系
+        (hy4-flash / inkling-2-mini) と own-path (qwen36) は arch で判定する。"""
+        bid = prof.get("backend") or "strata"
+        opts = strata_setup.load_options(root / backend_for(root, bid)["module_path"])
+        return strata_setup.config_family(doc, opts.get("families") or {})
+
     def _maya_config_family(doc: dict[str, Any]) -> str:
         """maya-<model>.json の家系 (maya_quants.family_of と同じ見立て):
         installer.family → exe 名 → args の順で判定する (maya_setup と単一の実装)。"""
@@ -1451,7 +1459,9 @@ def create_app(root: Path) -> FastAPI:
         (2026-11-21 実測: 単一 GPU / --tp 2 は正常、layer split は乱码)。TP の all-reduce は
         host pinned memory 経由 (16 host threads) なのでこの環境でも正しい。
         KV はエンジン固有 (--kv auto/q8)。
-        GLM-5.3 (744B, glm-dsa) は家系 glm だが KV が INT8 latent 固定なので --kv 編集不可。"""
+        GLM-5.3 (744B, glm-dsa) は家系 glm だが KV が INT8 latent 固定なので --kv 編集不可。
+        Inkling-2-Mini (ik2, maya-ik2) は単一 GPU 専用 (純正 check_pc が 2 枚以上を拒否)
+        で --kv / --tp は無い (KV は IK2_KV env・エンジン固有)。"""
         fam = _maya_config_family(doc)
         inst = doc.get("installer") or {}
         tp_ok = fam in ("deepseek", "hy4") or \
@@ -1462,7 +1472,7 @@ def create_app(root: Path) -> FastAPI:
         opts = maya_setup.load_options(root / "module" / "maya")
         usable = [int(x["index"]) for x in ((opts.get("pc") or {}).get("gpus") or []) if x.get("usable")]
         return {"family": fam, "kv_ok": kv_ok, "tp_ok": tp_ok, "tp_auto": fam == "hy4",
-                "gpu": cur, "gpus": usable, "gpu_multi": True}
+                "gpu": cur, "gpus": usable, "gpu_multi": fam != "ik2"}
 
     def _config_gpu_count(doc: dict[str, Any], usable: list[int]) -> int:
         """config の gpu が指すカード数。未設定 = CUDA_VISIBLE_DEVICES を絞らない =
@@ -1500,6 +1510,10 @@ def create_app(root: Path) -> FastAPI:
         if (prof.get("backend") or "") in ("strata", "strata-fork"):
             cur, usable, multi = _config_gpu_info(prof, doc)
             out.update(gpu=cur, gpus=usable, gpu_multi=multi)
+            # 家系 (arch 判定) と --kv 編集可否: --kv は Flash-Next 系のエンジン設定。
+            # own-path (Qwen3.6) / Hy4-Flash / Inkling-2-Mini はエンジン固有で持たない
+            fid = _strata_config_family(prof, doc)
+            out.update(family=fid, kv_ok=fid is None)
         elif (prof.get("backend") or "") == "maya":
             # 家系別に編集できるノブが違う (GLM/Qwen: --kv + gpu / DS4/MM3-EXL3: --tp)
             out.update(_maya_config_info(doc))
@@ -1542,6 +1556,10 @@ def create_app(root: Path) -> FastAPI:
                 if sval not in ("int8", "q4_0", "k8v4", "fp16"):
                     raise HTTPException(400, f"KV 形式が不正です: {sval}")
                 if is_maya and not maya_info["kv_ok"]:
+                    raise HTTPException(400, "このモデルは KV 形式の変更に対応していません (エンジン固有の形式です)")
+                if is_strata and _strata_config_family(prof, doc) is not None:
+                    # own-path (Qwen3.6) / Hy4-Flash / Inkling-2-Mini: --kv は
+                    # Flash-Next 系の設定 (純正 setup も「Flash-Next settings」と warn)
                     raise HTTPException(400, "このモデルは KV 形式の変更に対応していません (エンジン固有の形式です)")
             elif flag == "--tp":
                 # Hy4-Flash の --tp は auto|N (auto = 最大の同一 GPU グループで tensor

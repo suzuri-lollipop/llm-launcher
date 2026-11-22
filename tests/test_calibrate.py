@@ -621,6 +621,120 @@ def test_maya_hy4_job_without_target_fails_honestly(tmp_path, monkeypatch):
     assert mgr.active_id is None      # 排他は解放されている
 
 
+def _ik2_cfg(tmp_path: Path, drafting: str = "auto") -> Path:
+    """ik2 の config (純正 write_config_ik2 の形: --model GGUF 直読み + --drafting)。"""
+    p = tmp_path / "maya-inkling-2-mini.json"
+    p.write_text(json.dumps({
+        "exe": "/x/maya-ik2",
+        "args": ["--model", "/m/Inkling-2-Mini-UD-Q4_K_XL.gguf",
+                 "--max-context", "131072", "--drafting", drafting],
+        "gpu": [0], "installer": {"family": "ik2", "ik2_quant": "ud-q4_k_xl",
+                                 "drafting": drafting}}), encoding="utf-8")
+    return p
+
+
+def test_maya_speed_wanted_ik2(tmp_path):
+    """Inkling-2-Mini の speed step 要否: --drafting auto だけ対象 (純正
+    speed_calibration の ik2 分岐 = 記録を消して次回起動時の再計測を促す)。
+    手動 on/off は計測対象外。"""
+    assert calibrate.maya_speed_wanted(str(_ik2_cfg(tmp_path, "auto"))) is True
+    assert calibrate.maya_speed_wanted(str(_ik2_cfg(tmp_path, "on"))) is False
+    assert calibrate.maya_speed_wanted(str(_ik2_cfg(tmp_path, "off"))) is False
+
+
+def test_verify_maya_speed_ik2(tmp_path):
+    """ik2 の --speed-calibration は config に記録を書かない — ログの
+    「measured again at the next start」が成功の証拠。手動 on/off の
+    「no speed calibration」は失敗 (純正は exit 0 で警告のみ)。"""
+    cfg = _ik2_cfg(tmp_path, "auto")
+    job = {"logs": ["Inkling 2 Mini: its drafting is measured again at the next start "
+                    "(the engine times no drafting, the prompt lookup and the drafter once, "
+                    "before its first answer)"]}
+    why, rec = calibrate._verify_maya_speed(job, str(cfg))
+    assert why == "" and rec["kept"] == "auto"
+    job = {"logs": ["Inkling 2 Mini: no speed calibration - drafting is set by hand "
+                    "(--drafting on|off); maya.py --setup --drafting measure lets the engine measure it"]}
+    why, rec = calibrate._verify_maya_speed(job, str(cfg))
+    assert why and rec == {}
+    why, rec = calibrate._verify_maya_speed({"logs": []}, str(cfg))
+    assert why and rec == {}
+
+
+def _fake_maya_ik2_speed(tmp_path: Path) -> Path:
+    """ik2 用の偽 maya.sh: --speed-calibration は記録を消して「次回起動時に再計測」
+    の行を出す (純正 ik2_draft_forget + ok)。--calibrate は no-op。"""
+    mod = tmp_path / "module" / "maya"
+    mod.mkdir(parents=True, exist_ok=True)
+    body = (
+        'if echo "$@" | grep -q -- --speed-calibration; then\n'
+        '  echo "Inkling 2 Mini: its drafting is measured again at the next start'
+        ' (the engine times no drafting, the prompt lookup and the drafter once,'
+        ' before its first answer)"\n'
+        'else\n'
+        '  echo "Inkling 2 Mini: nothing to tune - every expert sits in VRAM"\n'
+        'fi\n')
+    (mod / "maya.sh").write_text("#!/bin/sh\n" + body, encoding="utf-8")
+    (mod / "maya.sh").chmod(0o755)
+    return mod / "maya.sh"
+
+
+def test_maya_ik2_job_speed_only(tmp_path, monkeypatch):
+    """Inkling-2-Mini (--drafting auto) の ⑤: --calibrate は no-op なので積まず、
+    speed (再計測の記録消し) の 1 step だけ。report の drafter は auto。"""
+    cfg = _ik2_cfg(tmp_path, "auto")
+    _fake_maya_ik2_speed(tmp_path)
+    _huge_mem(monkeypatch)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    prof = {"id": "p_i", "name": "ik2", "backend": "maya", "values": {"config": str(cfg)}}
+
+    async def go():
+        job = await mgr.start(prof, "maya")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.05)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert job["steps"] == ["speed"]          # calibrate step は無い
+    assert job["report"]["drafter"] == "auto"
+
+
+def test_maya_ik2_job_without_target_fails_honestly(tmp_path, monkeypatch):
+    """手動 drafting off の ik2 は計測対象なし + --calibrate も no-op —
+    「調整対象がありません」で正直に拒否する (no-op を成功と偽らない)。"""
+    cfg = _ik2_cfg(tmp_path, "off")
+    _fake_maya_ik2_speed(tmp_path)
+    _huge_mem(monkeypatch)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    prof = {"id": "p_i", "name": "ik2", "backend": "maya", "values": {"config": str(cfg)}}
+
+    async def go():
+        with pytest.raises(calibrate.CalibrateError, match="調整対象がありません"):
+            await mgr.start(prof, "maya")
+    asyncio.run(go())
+    assert mgr.active_id is None      # 排他は解放されている
+
+
+def test_strata_no_tuning_families_refused(tmp_path):
+    """0.2.19+ の Hy4-Flash / Inkling-2-Mini (strata-hy4 / strata-inkling) は
+    純正 tune が「調整不要」で拒否する家系 — ジョブを起こす前に正直に断る
+    (15-30 分の計測を走らせてから失敗させない)。"""
+    mod = tmp_path / "module" / "strata"
+    mod.mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    for arch, name in (("hy4flash", "Hy4-Flash"), ("inkling2_loop", "Inkling-2-Mini")):
+        cfg = mod / f"strata-{arch}.json"
+        cfg.write_text(json.dumps({"exe": "e", "arch": arch, "args": []}), encoding="utf-8")
+        prof = {"id": "p_s", "name": "s", "backend": "strata",
+                "values": {"config": str(cfg)}}
+
+        async def go():
+            with pytest.raises(calibrate.CalibrateError, match="調整不要"):
+                await mgr.start(prof, "strata")
+        asyncio.run(go())
+        assert mgr.active_id is None
+        assert name in str(calibrate.strata_setup.NO_TUNING_ARCHS[arch])
+
+
 def test_strata_job_runs_create_measure_review_apply_and_reports_settings(tmp_path):
     _fake_strata(tmp_path)
     mgr = _mgr(tmp_path, tmp_path, _FakeManager())

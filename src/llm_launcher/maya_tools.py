@@ -14,7 +14,7 @@ pack → maya-<model>.json 生成 → 起動」を一体でやる対話インス
   * llama.cpp のソースを pinned commit で third_party/llama.cpp へ (純正 get_llama_cpp:
     zip 受信・再開対応。エンジンビルドの ggml と pack 作成の gguf-py が読む)
 
-エンジンビルド (build/maya / maya-ds4 / maya-mm3 / maya-hy4) は家系ごとに異なるため
+エンジンビルド (build/maya / maya-ds4 / maya-mm3 / maya-hy4 / maya-ik2) は家系ごとに異なるため
 ① では行わず、② のモデル構成 (maya.py --yes --no-start --download-model) の中で
 純正どおり走る (在ればスキップ)。モデルダウンロードも ② の仕事。
 
