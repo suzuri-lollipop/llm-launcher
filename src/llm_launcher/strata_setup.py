@@ -17,7 +17,11 @@
     HY4_FAMILIES / INKLING_FAMILIES の独自エンジン家系: コンテキスト / 推奨は
     hy4_family / inkling_family の CONTEXTS / DEFAULT_CONTEXT そのもの
     (Inkling は「up to 1M supported」= 明示 --context が素通りするので owner 方針で
-    1M まで拡張)。重みは .strata ネイティブファイル (build + 共有 Engram / Vision)。
+    1M まで拡張。ただし Inkling のモデル別 contexts はこの PC の VRAM で安定起動
+    できる分だけに制限する — 単一 GPU CUDA エンジンは全エキスパートを VRAM に
+    常駐させ KV を貪欲に自動割り当てするため、大きい ctx はワークスペース確保が
+    OOM する。2026-11-23 実測。inkling_ctxs のコメント参照)。
+    重みは .strata ネイティブファイル (build + 共有 Engram / Vision)。
     純正メニューが出さない (ダウンロードソース未設定・ローカルファイル無し) 家系は
     表にも出さない (hy4_offered / inkling_offered と同じ見立て)。
   * build_argv(): 検証済みフラグのみ argv にする。family / model は読み出した表の
@@ -86,6 +90,7 @@ for tbl, gate in ((hy4, "hy4_offered"), (ink, "inkling_offered")):
         if not offered:
             fams.pop(fid, None)
 pc = {}
+cards = []
 try:
     pc["ram_gb"] = round(float(S.ram_gb()), 1)
 except Exception:
@@ -156,6 +161,48 @@ D = getattr(S, "dsv41_context", None)
 ds41_choices = list(getattr(D, "CHOICES", (8192, 32768, 65536, 131072, 262144, 524288, 1048576)))
 ctx_all = sorted(set(getattr(S, "CONTEXTS", []) or
                      [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]) | {1048576})
+# Inkling-2-Mini のコンテキスト上限はこの PC の VRAM から計算する (モデル別 contexts)。
+# 単一 GPU CUDA エンジン (0.1.65) は --vram-experts-gb / --ram-experts-gb を無視
+# (HIP / CPU / 2 枚 EP 専用のフラグ) し、自分の規則で全エキスパートを VRAM に常駐させる
+# (ink_runner.cuh: vfree > sec4 + reserve なら 100% VRAM)。さらに KV の自動サイジングが
+# 空き VRAM を 480MiB の予約だけ残して貪欲に埋めるため、その後のワークスペース (~40 バッファ)
+# + DSpark + cuBLAS + CUDA グラフの確保が OOM する (2026-11-23 実測: RTX PRO 4000
+# Blackwell 24GB で SQ-20 @ 262144 → auto 131520 → exit 3 / ink_cuda.cuh:54 cudaMalloc)。
+# そこで「KV + 固定 + 余裕 <= エキスパートロード後の空き」になる ctx だけを出す。
+# 定数は inkling_fit (submodule) とエンジンソース (ink_cuda.cuh / ink_runner.cuh)。
+# 余裕 0.8 GiB = ワークスペース ~0.5 (MB=512 × hidden=2304 の ~40 バッファ + DSpark
+# scratch 9216×2304 bf16 + stage 48×32×6656 等を実計算) + cuBLAS / CUDA グラフ +
+# アロケータ断片化。Vision は VRAM が足りなければ CPU ViT にフォールバックする
+# (ink_runner.cuh) ので VRAM 余裕には含めない。parallel=1 / FP16 KV 基準
+# (KV は並列数に比例 — ③ の並列数を上げるときは ctx を下げることが要る。UI が注記)
+def inkling_ctxs(build, vram_gib, uma):
+    IF = getattr(S, "inkling_fit", None)
+    full = sorted(set(int(c) for c in (getattr(IF, "CONTEXTS", []) or [])) | {524288, 1048576})
+    if IF is None or not vram_gib or uma:
+        return full, None      # GPU 未検出 / UMA: エンジンの UMA 経路は別 (上限なし)
+    try:
+        b = IF.BUILDS[build]
+        G = float(IF.GIB_TO_GB)
+        dense = float(b["dense_gb"]) / G
+        bodies = float(b["bodies_gb"]) / G
+        # エンジンの常駐判定 reserve (ink_runner.cuh: >=20GiB 1600MiB / <=13GiB 780MiB / 他 1280MiB)
+        reserve = 1.6 if vram_gib >= 20 else (0.78 if vram_gib <= 13 else 1.28)
+        if vram_gib - dense - 0.8 > bodies + reserve:
+            free_after = vram_gib - dense - bodies - 1.2   # driver+context (実測 4.72GiB と一致)
+        else:
+            free_after = 1.91                              # hybrid: hyb_reserve (1664+256 MiB)
+        budget = free_after - 0.8 - float(IF.SWA_AND_SCONV_GB_FP16) / G
+        max_ctx = int(budget * G * 1e9 / float(IF.GLOBAL_KV_BYTES_PER_TOK_FP16))
+        ctxs = [c for c in full if c <= max_ctx]
+        if not ctxs:
+            return [], ("全エキスパートを VRAM に載えた後の KV キャッシュ + ワークスペースの"
+                        "余裕が足りません (エンジンの自動割り当てが OOM します)。"
+                        "より小さいビルドがあるならそれを選ぶか、VRAM の大きいカードで実行してください")
+        return ctxs, None
+    except Exception:
+        return full, None
+ink_cards = [g for g in cards if S.gpu_problem(g) is None]
+ink_best = max(ink_cards, key=lambda g: float(g.get("vram_gb") or 0)) if ink_cards else {}
 for fid, f in fams.items():
     raw = getattr(S, "FAMILIES", {}).get(fid) or own.get(fid) or multi.get(fid) or hy4.get(fid) or ink.get(fid) or {}
     if fid in hy4 or fid in ink:
@@ -183,8 +230,18 @@ for fid, f in fams.items():
                                       "AttributeError で落ちる) のため、修正まで launcher は単一 GPU でセットアップします")
         for m, d in f["models"].items():
             d["vision"] = bool(raw.get("vision"))
+            if fid in ink:
+                # モデル別 contexts: この PC の VRAM で安定起動できる分だけ (上記 inkling_ctxs)
+                ctxs, ferr = inkling_ctxs(m, float(ink_best.get("vram_gb") or 0),
+                                          bool(ink_best.get("uma")))
+                d["contexts"] = ctxs
+                if ferr:
+                    d["fits"] = False
+                    d["fit_error"] = ferr
+                d["rec_context"] = 32768 if 32768 in ctxs else (max(ctxs) if ctxs else None)
             try:
-                d["rec_context"] = int(HF.DEFAULT_CONTEXT)
+                if fid not in ink:
+                    d["rec_context"] = int(HF.DEFAULT_CONTEXT)
                 files = HF.files_of(m, True)      # vision ON 既定のダウンロードセット
                 d["download_gb"] = round(sum(HF.size_of(n) or 0 for n in files) / 1e9, 1)
                 found = [n for n in files if n in idx]
@@ -534,8 +591,16 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
         raise ValueError(f"family が一覧にありません: {fam}")
     if model not in fams[fam]["models"]:
         raise ValueError(f"model が {fam} の一覧にありません: {model}")
-    # 家系別の選択肢を優先 (own-path 256K / DS4.1 の 8K–1M など、UI が出す範囲で検証)
-    contexts = [int(c) for c in (fams[fam].get("contexts") or data.get("contexts") or [])]
+    entry = fams[fam]["models"][model]
+    if entry.get("fits") is False:
+        raise ValueError(str(entry.get("fit_error")
+                             or f"{model} はこの PC の GPU では起動できません (VRAM 不足)"))
+    # モデル別 contexts (Inkling-2-Mini = この VRAM で安定起動できる分) が在ればそれ、
+    # 無ければ家系別の選択肢 (own-path 256K / DS4.1 の 8K–1M など。UI が出す範囲で検証)
+    src = entry.get("contexts") if "contexts" in entry else fams[fam].get("contexts")
+    contexts = [int(c) for c in (src or data.get("contexts") or [])]
+    if "contexts" in entry and not contexts:
+        raise ValueError(f"{model} で選べるコンテキストがありません (この PC の VRAM 不足)")
     if contexts and context not in contexts:
         raise ValueError(f"context が一覧にありません: {context} ({contexts})")
     if not 4096 <= context <= 4_194_304:

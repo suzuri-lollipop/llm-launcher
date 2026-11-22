@@ -498,8 +498,13 @@ def test_build_argv_against_real_submodule():
         assert ink.get("force_single_gpu") is True
         assert 1048576 in ink.get("contexts") or []
         for m, d in ink["models"].items():
-            assert d.get("rec_context") == 32768, m
             assert d.get("vision") is True, m
+            # モデル別 contexts = この PC の VRAM で安定起動できる分 (GPU 未検出 / UMA は全一覧)
+            assert isinstance(d.get("contexts"), list), m
+            if d.get("fits") is False:
+                assert d["contexts"] == [] and d.get("fit_error"), m
+            elif d["contexts"]:
+                assert d.get("rec_context") in d["contexts"], m
         argv, cfg = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
                                                   "context": 1048576})
         assert cfg == "strata-inkling-2-mini-sq-20.json"
@@ -806,6 +811,32 @@ def test_build_argv_hy4_inkling(monkeypatch, tmp_path: Path):
                                           "context": 32768, "gpus": g})
 
 
+def test_build_argv_inkling_model_contexts(monkeypatch, tmp_path: Path):
+    """Inkling のモデル別 contexts (この VRAM で安定起動できる分) は家系一覧より優先。
+    fits=False (KV + ワークスペースの余裕不足) は context 関係なく拒否。
+    単一 GPU CUDA エンジンは全エキスパートを VRAM に常駐させ KV を貪欲に自動割り当て
+    するため大きい ctx は OOM する (2026-11-23 実測: 24GB で SQ-20 @ 262144 → exit 3)。"""
+    mod = tmp_path / "module" / "strata"
+    (mod / ".venv" / "bin").mkdir(parents=True)
+    (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
+    mod = _seed_tables(monkeypatch, mod)
+    tables = strata_setup._CACHE[str(mod)][1]
+    ink = tables["families"]["inkling-2-mini"]["models"]
+    ink["SQ-20"]["contexts"] = [8192, 32768, 65536]   # 24GB カードの計算結果
+    ink["SQ-20"]["rec_context"] = 32768
+    ink["SQ-15"]["contexts"] = []
+    ink["SQ-15"]["fits"] = False
+    ink["SQ-15"]["fit_error"] = "全エキスパートを VRAM に載えた後の KV キャッシュ + ワークスペースの余裕が足りません"
+    argv, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
+                                            "context": 65536})
+    assert argv[argv.index("--context") + 1] == "65536"
+    for bad in ({"family": "inkling-2-mini", "model": "SQ-20", "context": 262144},  # OOM した値
+                {"family": "inkling-2-mini", "model": "SQ-20", "context": 131072},  # 上限超え
+                {"family": "inkling-2-mini", "model": "SQ-15", "context": 8192}):   # fits=False
+        with pytest.raises(ValueError):
+            strata_setup.build_argv(mod, bad)
+
+
 def test_weights_status_strata_native(tmp_path: Path):
     """0.2.19+ の .strata ネイティブ重み: --native / --engram / --vision の引数が
     参照するファイルの実在を検証する (Engram / Vision 欠損も ok=False)。"""
@@ -920,4 +951,5 @@ def test_wizard_strata_new_families_ui_wiring():
     assert 'if (W.cfgArgs.family === "hy4-flash") delete cfg.par;' in js
     assert "|| W.tableReq.family === \"qwen\") : !fam.arch," in js
     assert '/^strata-(hy4-flash|inkling-2-mini)/.test(cn)' in js
-    assert 'W.mdStFam === "inkling-2-mini"' in js   # ② upstream バグ回避の注記
+    assert 'W.mdStFam === "inkling-2-mini"' in js   # ② upstream バグ回避 + VRAM 上限の注記
+    assert "安定起動できる分だけ出します" in js

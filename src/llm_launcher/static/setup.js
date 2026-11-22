@@ -839,8 +839,10 @@ function mdStHint() {
   } else if (d.ram_gb) {
     info.push(`RAM ${d.ram_gb} GB 推奨`);
   }
-  if (!isMaya && W.mdStFam === "inkling-2-mini")
+  if (!isMaya && W.mdStFam === "inkling-2-mini") {
     info.push("Strata 0.2.19 の複数 GPU セットアップは upstream バグ (AttributeError) のため、launcher は単一 GPU (VRAM 最大のカード) でセットアップします。2 枚の expert parallel は upstream の修正後に戻します");
+    info.push("コンテキスト一覧はこの VRAM で安定起動できる分だけ出します (エンジンは全エキスパートを VRAM に常駐させ KV を自動割り当てするため、大きいコンテキストは OOM します — 2026-11-23 実測)。KV は並列数に比例するので、③ で並列数を上げるときはコンテキストを下げてください");
+  }
   if (pc.disk_free_gb) info.push(`モデル保存先 ${pc.data_dir || (isMaya ? "Maya-data" : "Strata-data")} の空き ${pc.disk_free_gb} GB`);
   /* 純正の対話と同じ立場: 推奨より大きいコンテキストは「注記して従う」。
      24GB クラスで 512K はエンジン起動時の KV 確保に失敗しうる (2026-11-09 実測) */
