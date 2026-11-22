@@ -23,8 +23,11 @@
   * build_argv(): 検証済みフラグのみ argv にする。family / model は読み出した表の
     キーそのもの、context は表の CONTEXTS の値、vision は列挙値、gpus は検出した
     usable GPU の index 集 (単一カード = --gpu N、複数 = --gpus "0,1"/all、
-    単一 GPU 宣言の家系 = own-path / Hy4-Flash の複数指定は拒否。Inkling-2-Mini は
-    NVIDIA 2 枚の expert parallel まで純正どおり)。どれか一つでも外れたら
+    単一 GPU 宣言の家系 = own-path / Hy4-Flash の複数指定は拒否)。
+    Inkling-2-Mini は 0.2.19 の複数 GPU セットアップが upstream バグ
+    (install_inkling2 の AttributeError) のため force_single_gpu: 複数指定は
+    理由付きで拒否し、未指定でも --gpu を明示して単一 GPU でセットアップする
+    (upstream が直したら表の multi_gpu を戻す)。どれか一つでも外れたら
     InstallError 相当の ValueError を投げる (argv 化に値の検証は必須)。
   * weights_status() / installed_configs(): config が参照する重み (--native / --pack /
     vision / tokenizer、マルチシャードは兄弟も) の実在とサイズを検証する —
@@ -165,9 +168,19 @@ for fid, f in fams.items():
             ctxs = sorted(set(ctxs) | {524288, 1048576})
         f["contexts"] = ctxs
         f["max_context"] = max(ctxs) if ctxs else 262144
-        # hy4: 純正が単一 GPU 宣言 ("runs on one GPU so far")。inkling: NVIDIA 2 枚で
-        # expert parallel (--gpus 2 EP。3 枚以上は先頭 2 枚を使う = 純正 install_inkling2)
-        f["multi_gpu"] = fid in ink
+        # hy4: 純正が単一 GPU 宣言 ("runs on one GPU so far")。inkling: NVIDIA 2 枚の
+        # expert parallel (--gpus 2 EP) が純正の仕様だが、0.2.19 の install_inkling2 は
+        # multi (choose_gpus が返すカード番号のリスト) をカード辞書のリストとして
+        # g.get("vendor") して AttributeError で落ちる upstream バグ (setup.py:10197)。
+        # --yes の既定も 2 枚を選ぶため GPU 指定なしでも同じく落ちる。upstream が直すまで
+        # launcher は単一 GPU でセットアップする (force_single_gpu: build_argv が --gpu を
+        # 明示して純正の複数枚既定も回避。単一カードなら multi=[] でバグを踏まない)
+        f["multi_gpu"] = False
+        if fid in ink:
+            f["force_single_gpu"] = True
+            f["single_gpu_reason"] = ("Strata 0.2.19 の Inkling-2-Mini 複数 GPU セットアップは upstream バグ "
+                                      "(install_inkling2 がカード番号のリストをカード辞書として扱い "
+                                      "AttributeError で落ちる) のため、修正まで launcher は単一 GPU でセットアップします")
         for m, d in f["models"].items():
             d["vision"] = bool(raw.get("vision"))
             try:
@@ -531,13 +544,20 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
     if vision:   # vision 非対応パックは --vision を渡さない (upstream 側でも vision 質問自体が出ない)
         argv += ["--vision", vision]
     gpus = str(opts.get("gpus") or "").strip().lower()
+    single_reason = str(fams[fam].get("single_gpu_reason") or "")
+
+    def _no_multi() -> ValueError:
+        if single_reason:
+            return ValueError(f"{fams[fam].get('title', fam)} は複数 GPU でセットアップできません: {single_reason}")
+        return ValueError(f"{fams[fam].get('title', fam)} は現在単一 GPU 専用です (純正: runs on one GPU so far)")
+
     if gpus and gpus not in ("auto", ""):
         usable = {int(g["index"]) for g in (data.get("pc") or {}).get("gpus") or [] if g.get("usable")}
         if gpus == "all":
             if len(usable) < 2:
                 raise ValueError("使える GPU が 2 枚無い環境で all は指定できません")
             if not fams[fam].get("multi_gpu", True):
-                raise ValueError(f"{fams[fam].get('title', fam)} は現在単一 GPU 専用です (純正: runs on one GPU so far)")
+                raise _no_multi()
             argv += ["--gpus", "all"]
         else:
             try:
@@ -550,8 +570,16 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
                 argv += ["--gpu", str(sel[0])]      # 単一カード指定は純正 --gpu
             else:
                 if not fams[fam].get("multi_gpu", True):
-                    raise ValueError(f"{fams[fam].get('title', fam)} は現在単一 GPU 専用です (純正: runs on one GPU so far)")
+                    raise _no_multi()
                 argv += ["--gpus", ",".join(str(i) for i in sel)]
+    # force_single_gpu (0.2.19 inkling の upstream バグ回避): 複数指定は上で拒否済み。
+    # 未指定 (auto) も純正 --yes の既定が 2 枚を選んで同じバグを踏むため、明示の --gpu を
+    # 渡す。カード選びは純正 fallback_card と同じ「VRAM 最大・同量は番号が小さい方」
+    if fams[fam].get("force_single_gpu") and "--gpu" not in argv and "--gpus" not in argv:
+        cards = [g for g in (data.get("pc") or {}).get("gpus") or [] if g.get("usable")]
+        if cards:
+            best = sorted(cards, key=lambda g: (-round(float(g.get("vram_gb") or 0)), int(g["index"])))[0]
+            argv += ["--gpu", str(int(best["index"]))]
     argv += ["--yes", "--no-start", "--no-browser"]
     tag = str(fams[fam].get("tag") or "")
     config_name = f"strata-{(tag + model).lower()}.json"
