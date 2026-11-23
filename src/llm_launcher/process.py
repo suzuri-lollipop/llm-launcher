@@ -54,7 +54,14 @@ def port_in_use(port: int, host: str = "0.0.0.0") -> bool:
 # アリーナを二重確保し、OS ごと固まる。stop() は解放完了を待ち、start() は
 # 解放中のエンジンが残っている間は(force でない限り)起動を拒否する。
 STRATA_ENGINE_BACKENDS = {"strata", "strata-fork", "maya", "basalt"}
-_STRATA_ENGINE_EXES = {"strata", "strata.exe", "basalt", "basalt.exe"}
+# --serve で常駐するエンジン本体の名前。Strata 0.2.19+ の独自エンジン家系
+# (strata-hy4 / strata-inkling) と Maya の家系別エンジン (maya / maya-ds4 /
+# maya-mm3 / maya-hy4 / maya-ik2) も同じ --serve 線プロトコルで動く
+_STRATA_ENGINE_EXES = {"strata", "strata.exe", "basalt", "basalt.exe",
+                       "strata-hy4", "strata-hy4.exe", "strata-inkling", "strata-inkling.exe",
+                       "maya", "maya.exe", "maya-ds4", "maya-ds4.exe",
+                       "maya-mm3", "maya-mm3.exe", "maya-hy4", "maya-hy4.exe",
+                       "maya-ik2", "maya-ik2.exe"}
 
 
 def lingering_engine_pids() -> list[int]:

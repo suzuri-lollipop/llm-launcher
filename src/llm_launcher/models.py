@@ -35,7 +35,9 @@ from . import strata_setup
 
 # 重みファイルと見なす拡張子 (scan_hf_cache / scan_data_models 共通の基準)。
 # .basalt は Basalt 専用 pack なので「汎用重み」には数えない (他バックエンドは読めない)。
-_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".gguf")
+# .strata は Strata ネイティブの重み (0.2.19+ の Hy4-Flash / Inkling-2-Mini: build /
+# Engram / Vision shard)。Strata-data/models 直下の家系フォルダをモデル単位にする。
+_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".gguf", ".strata")
 _WEIGHT_MIN = 1 << 20
 # サイズ計算の_walk_上限 (巨大なデータフォルダで API が固まらないための保険)
 _SIZE_MAX_FILES = 20000

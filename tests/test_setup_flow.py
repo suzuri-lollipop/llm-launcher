@@ -119,8 +119,14 @@ def test_pre_job_config_questions_built_from_table():
     # (tableCtxPick = ctx 未選択) は ③ で聞く (2026-11-17 の選択不能修正)
     assert "if (W.preJob && mdTableBackend() && !W.tableCtxPick) delete cfg.ctx;" in fn
     assert "if (W.preJob && mdTableBackend() && W.tableCtxPick && cfg.ctx && W.tableReq) {" in fn
-    # Qwen / Hy4-Flash は --parallel 非対応 (2 以上で起動が check_parallel で失敗する)
-    assert 'if (W.cfgArgs.family === "qwen" || W.cfgArgs.family === "hy4") delete cfg.par;' in fn
+    # Qwen / Hy4-Flash / Inkling 2 Mini は --parallel 非対応 (2 以上で起動が check_parallel で失敗する)
+    assert 'if (W.cfgArgs.family === "qwen" || W.cfgArgs.family === "hy4" || W.cfgArgs.family === "ik2") delete cfg.par;' in fn
+    # Strata の家系別出し分け: --kv は Flash-Next 系だけ (arch 持ち家系はエンジン固有)、
+    # Hy4-Flash は --parallel 非対応 (strata-hy4 は 1 リクエストずつ)
+    assert 'if (W.backend === "strata" && W.cfgArgs.family) {' in fn
+    assert 'if (W.cfgArgs.family === "hy4-flash") delete cfg.par;' in fn
+    assert "kv_ok: isMaya ? ((W.tableReq.family === \"glm\" && !md.g53)" in fn
+    assert "|| W.tableReq.family === \"qwen\") : !fam.arch," in fn
     # 保存 / 推奨 / 補足は描画済みの定義を使う (GLM の GPU 回答を --tp と誤記しない)
     assert "W.cfgRendered = cfg;" in fn
     assert JS.count("W.cfgRendered || RUNCFG[W.backend] || {}") >= 4
