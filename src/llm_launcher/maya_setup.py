@@ -25,13 +25,16 @@ launcher は「表の読み出し」と「ホワイトリスト検証 + argv 組
     v1.1.72+ の Inkling-2-Mini (ik2, maya-ik2 エンジン・実験的プレビュー) は
     1 ファイルセット (unsloth UD-Q4_K_XL) で contexts / rec_context は ik2_fit
     (このカードの VRAM に全エキスパートが収まる最大。収まらないカードは offload
-    パス = VRAM tier + pinned RAM で動く)。単一 GPU 専用・Linux 専用 (純正
-    check_pc / IK2F.unsupported が拒否)。fits=False はその拒否理由そのまま。
+    パス = VRAM tier + pinned RAM、長いコンテキストは KV streaming でキャッシュの
+    行を RAM に置く)。v1.1.74 で trained 1M まで・Windows + NVIDIA 対応・
+    NVIDIA 2 枚まで (Linux のみ。max_gpus=2)。拒否は純正 IK2F.unsupported の
+    理由そのまま (fits=False)。--parallel は CLI 非対応のまま (同時回答数は
+    ダッシュボード Models ページが config に書く)。
   * build_argv(): 検証済みフラグのみ argv にする。family / model は読み出した表の
     キーそのもの、context はモデル別 contexts (Hy4-Flash / GLM-5.3) か家系別
     CONTEXTS の値、vision は on/off、gpus は検出した usable GPU の index 集
-    (単一カード = --gpu N、複数 = --gpus "0,1" / all = 全 usable。単一 GPU 専用の
-    家系 = ik2 の複数指定は拒否 — 純正 check_pc が拒否する)。
+    (単一カード = --gpu N、複数 = --gpus "0,1" / all = 全 usable。家系の上限
+    (max_gpus: ik2 = 2) 超えは拒否 — 純正 check_pc / unsupported が拒否する)。
     どれか一つでも外れたら InstallError 相当の ValueError を投げる。
     常に --yes --no-start --plain --download-model を付ける (完全非対話・起動しない・
     TUI でなくプレーンテキスト・モデルダウンロード確認なし)。
@@ -330,12 +333,15 @@ if hasattr(M, "HY4_QUANTS"):
                        "model_arg": M.HY4, "quant_flag": "--hy4-quant",
                        "engine_ready": M.HY4_EXE.exists()}
 # ---- Inkling-2-Mini (v1.1.72+: maya-ik2 エンジン・実験的プレビュー。1 ファイルセット =
-# unsloth UD-Q4_K_XL)。コンテキストは ik2_fit.CONTEXTS (32K-256K)、推奨は
-# recommended_context (全エキスパートが VRAM に収まる最大。収まらないカードは
-# offload パス = VRAM tier + pinned RAM で動くので 8 GB カードでも起動できる)。
-# 単一 GPU 専用・Linux 専用 — 拒否は純正 IK2F.unsupported の理由そのまま (fits=False)。
+# unsloth UD-Q4_K_XL)。コンテキストは ik2_fit.CONTEXTS (v1.1.74 で trained 1M まで。
+# VRAM に収まらない分は offload パス / KV streaming = キャッシュの行を RAM に置く)。
+# 推奨は recommended_context (全エキスパートが VRAM に収まる最大。RECOMMEND_MAX=262144
+# 止まり)。v1.1.74: Windows + NVIDIA 対応・NVIDIA 2 枚まで (Linux のみ。大きい方が先)。
+# 拒否は純正 IK2F.unsupported の理由そのまま (fits=False)。
 # drafter は --drafting 既定 (auto): セットアップで取得し、エンジンが初回起動時に
-# 1 回だけ計測する (⑤ の --speed-calibration は記録を消して再計測を促す)
+# 1 回だけ計測する (⑤ の --speed-calibration は記録を消して再計測を促す)。
+# --parallel はセットアップ / 起動 CLI では非対応のまま (純正 check_parallel。
+# 同時回答数はダッシュボード Models ページの「Answers at once」が config に書く)
 if hasattr(M, "IK2"):
     import ik2_fit as IK2F
     ik2 = {}
@@ -354,11 +360,11 @@ if hasattr(M, "IK2"):
         e["have"] = {"files": len(files), "found": len(found),
                      "gb": round(sum(files[n] for n in found) / 2**30, 1)}
     # 純正 check_pc の拒否と同じ見立て: カードが読めていない / 古すぎる / VRAM 不足 /
-    # RAM+VRAM がモデルに届かない / Windows / Mac。理由が在れば fits=False で選択不可
+    # RAM+VRAM がモデルに届かない / Mac。理由が在れば fits=False で選択不可
     why = None
     if not ik2_usable:
         why = ("Inkling 2 Mini needs an NVIDIA V100 / RTX 20 or newer GPU (compute capability 7.0 or newer, "
-               "8 GB of VRAM or more) - an experimental preview on Linux, one GPU only")
+               "8 GB of VRAM or more)")
     else:
         why = guard(IK2F.unsupported, "cuda", sys.platform.startswith("win"), 0, ik2_usable, ram)
     if why:
@@ -373,10 +379,12 @@ if hasattr(M, "IK2"):
         plan = guard(IK2F.plan, vram_ik2, e.get("rec_context") or IK2F.CONTEXTS[0], IK2F.DEFAULT_KV) or {}
         if plan.get("layout"):
             e["layout"] = str(plan["layout"])   # resident / offload (UI の注記用)
+        if plan.get("kv_streamed"):
+            e["kv_streamed"] = True             # キャッシュの行を RAM に置く (UI の注記用)
     ik2[Q.IK2_QUANT] = e
     families["ik2"] = {"title": M.IK2_SHOWN + " (experimental)", "models": ik2,
                        "contexts": [int(c) for c in IK2F.CONTEXTS],
-                       "max_context": max(IK2F.CONTEXTS), "multi_gpu": False,
+                       "max_context": max(IK2F.CONTEXTS), "multi_gpu": True, "max_gpus": 2,
                        "rec": Q.IK2_QUANT, "model_arg": M.IK2,
                        "engine_ready": M.IK2_EXE.exists()}
 print(json.dumps({"families": families, "pc": pc}))
@@ -754,11 +762,14 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
         usable = sorted({int(g["index"]) for g in (data.get("pc") or {}).get("gpus") or []
                          if g.get("usable")})
         multi_ok = fams[fam].get("multi_gpu", True) is not False
+        max_g = fams[fam].get("max_gpus")      # ik2: 2 枚まで (純正 unsupported が 3 枚以上を拒否)
         if gpus == "all":
             if not multi_ok:
                 raise ValueError(f"{fams[fam].get('title', fam)} は単一 GPU 専用です (純正: one GPU only for now)")
             if len(usable) < 2:
                 raise ValueError("使える GPU が 2 枚無い環境で all は指定できません")
+            if max_g and len(usable) > max_g:
+                raise ValueError(f"{fams[fam].get('title', fam)} が使えるのは最大 {max_g} 枚です (カードを選んで指定してください)")
             argv += ["--gpus", ",".join(str(i) for i in usable)]
         else:
             try:
@@ -771,6 +782,8 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
                 raise ValueError("Maya が分割できるのは最大 16 枚です")
             if len(sel) > 1 and not multi_ok:
                 raise ValueError(f"{fams[fam].get('title', fam)} は単一 GPU 専用です (純正: one GPU only for now)")
+            if max_g and len(sel) > max_g:
+                raise ValueError(f"{fams[fam].get('title', fam)} が使えるのは最大 {max_g} 枚です (純正: three or more are not in it yet)")
             if len(sel) == 1:
                 argv += ["--gpu", str(sel[0])]      # 単一カード指定は純正 --gpu
             else:

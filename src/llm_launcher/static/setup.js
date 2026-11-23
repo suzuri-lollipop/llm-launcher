@@ -821,7 +821,7 @@ function mdStHint() {
     if (st.available && fam.engine_ready === false)
       info.push("エンジンはこの設定の中でこの PC 向けにコンパイルします。初回は 10〜30 分かかります");
     if (st.available && W.mdStFam === "ik2")
-      info.push("Inkling 2 Mini は実験的プレビュー (Linux・単一 GPU) です。ドラフターはセットアップで取得し、エンジンが初回起動時に 1 回だけ計測 (~1 分・最初の回答の前) して使うか決めます。⑤ の調整は計測記録を消して再計測を促します");
+      info.push("Inkling 2 Mini は実験的プレビュー (NVIDIA: Linux / Windows。Linux は 2 枚まで) です。ドラフターはセットアップで取得し、エンジンが初回起動時に 1 回だけ計測 (~1 分・最初の回答の前) して使うか決めます。⑤ の調整は計測記録を消して再計測を促します。コンテキストは 1M まで (VRAM に収まらないキャッシュは KV streaming で RAM に置きます)");
     else if (st.available && W.mdStFam === "hy4")
       info.push("MTP ブロック / DFly2 drafter の速度計測 (どちらが速いかの A/B) はセットアップでは行わず、⑤ の調整に集約します。ファイル自体は VRAM に収まるなら download されます。スキップすると drafter なしで起動します");
     else if (st.available && W.mdStFam !== "glm")
@@ -832,6 +832,8 @@ function mdStHint() {
       info.push("このコンテキストは KV streaming で動かします: attention キャッシュの古い行は RAM に置き (純正 hy4_fit の計算)、VRAM には最新分だけを残します。回答は同じで、長文の読み書きが数%遅くなります");
     if (W.mdStFam === "ik2" && d.layout === "offload")
       info.push("この VRAM では offload パスで動きます: よく使うエキスパートを VRAM に置き、残りは RAM にピン留めして必要時に取得/計算します (純正 ik2_fit の計算)。全エキスパートが VRAM に収まるより遅くなります");
+    if (W.mdStFam === "ik2" && d.kv_streamed)
+      info.push("このコンテキストは KV streaming で動かします: キャッシュの一部を RAM に置き、トークンごとにバス越しに読みます (純正 ik2_fit の計算)。回答は同じで、深い会話ほど遅くなります");
     if (d.experimental)
       warn.push("実験的プレビューです: 一部の GPU (Linux・単一 GPU) でのみ動作確認されています。動かない場合は upstream へ報告してください");
     if (d.g53)
@@ -1795,6 +1797,7 @@ async function renderConfig() {
        Strata の家系別ノブ: --kv は Flash-Next 系だけ (arch を持つ家系 =
        own-path Qwen3.6 / Hy4-Flash / Inkling-2-Mini はエンジン固有の KV) */
     W.cfgArgs = { gpus: usable, gpu_multi: fam.multi_gpu !== false,
+                  gpu_max: fam.max_gpus || undefined,
                   family: isMaya ? W.tableReq.family : (fam.arch ? W.tableReq.family : undefined),
                   kv_ok: isMaya ? ((W.tableReq.family === "glm" && !md.g53)
                                    || W.tableReq.family === "qwen") : !fam.arch,
@@ -1807,6 +1810,7 @@ async function renderConfig() {
     try {
       const r = (await api(`/api/profiles/${p.id}/config-args`)) || {};
       W.cfgArgs = { ...(r.args || {}), gpu: r.gpu, gpus: r.gpus, gpu_multi: r.gpu_multi,
+                    gpu_max: r.gpu_max,
                     family: r.family, kv_ok: r.kv_ok, tp_ok: r.tp_ok, tp_auto: r.tp_auto,
                     source_config: r.source_config || "" };
     } catch { /* 読めなければ未設定扱い (推奨プリチェック) */ }
@@ -1834,6 +1838,8 @@ async function renderConfig() {
                    : "2枚以上なら layer split でモデルを分け、より多くのエキスパートを VRAM/RAM に保持できます"),
                opts: [], cur: v => v, tpFromGpus: W.cfgArgs.tp_ok === true,
                tpAuto: W.cfgArgs.tp_auto === true };
+    if (W.cfgArgs.family === "ik2")
+      cfg.tp.hint = "最大 2 枚まで (Linux のみ。エキスパート分割: 大きいカードが密重みとキャッシュを持ち、2 枚目が残りのエキスパートを持ちます。1 枚で全エキスパートが収まるなら 1 枚の方が速いです)";
   }
   /* Strata の家系別質問出し分け (サーバーの _strata_config_family と同じ見立て):
      --kv は Flash-Next 系だけ (own-path Qwen3.6 / Hy4-Flash / Inkling-2-Mini は
@@ -1875,7 +1881,8 @@ async function renderConfig() {
     const cards = W.cfgArgs.gpus || [];
     const opts = [["auto", "まかせる", ""]];
     cards.forEach(i => opts.push([String(i), `GPU ${i} のみ`, ""]));
-    if (cards.length >= 2 && W.cfgArgs.gpu_multi !== false)
+    if (cards.length >= 2 && W.cfgArgs.gpu_multi !== false
+        && !(W.cfgArgs.gpu_max && cards.length > W.cfgArgs.gpu_max))
       opts.push([cards.join(","), `全カード共有 ${cards.join(",")} — ${cfg.tp.tpAuto ? "tensor parallel" : "layer split"}`, ""]);
     cfg.tp = { ...cfg.tp, opts };
   }

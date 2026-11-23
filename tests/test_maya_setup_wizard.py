@@ -312,14 +312,14 @@ FAKE_TABLES = {
                                       "contexts": [32768, 65536, 131072, 262144],
                                       "rec_context": 131072}}},
         "ik2": {"title": "Inkling 2 Mini (experimental)",
-                "contexts": [32768, 65536, 131072, 262144],
-                "max_context": 262144, "multi_gpu": False, "rec": "ud-q4_k_xl",
+                "contexts": [32768, 65536, 131072, 262144, 524288, 1048576],
+                "max_context": 1048576, "multi_gpu": True, "max_gpus": 2, "rec": "ud-q4_k_xl",
                 "model_arg": "Inkling-2-Mini", "engine_ready": False,
                 "models": {"ud-q4_k_xl": {"label": "Inkling 2 Mini · unsloth UD-Q4_K_XL (18 GB)",
                                           "download_gb": 17.6, "vision": True,
                                           "experimental": True,
                                           "config": "maya-inkling-2-mini.json",
-                                          "contexts": [32768, 65536, 131072, 262144],
+                                          "contexts": [32768, 65536, 131072, 262144, 524288, 1048576],
                                           "rec_context": 131072, "layout": "resident"}}},
     },
     "pc": {"ram_gb": 128.0, "vram_gb": 24.0, "data_dir": "/x/Maya-data", "disk_free_gb": 400.0,
@@ -504,7 +504,9 @@ def test_build_argv_against_real_submodule():
     # 純正 IK2F.unsupported の理由そのまま選択不可
     ik2 = fams["ik2"]
     assert ik2.get("model_arg") == "Inkling-2-Mini" and not ik2.get("quant_flag")
-    assert ik2.get("multi_gpu") is False
+    # v1.1.74+: NVIDIA 2 枚まで (max_gpus=2)・trained 1M まで
+    assert ik2.get("multi_gpu") is True and ik2.get("max_gpus") == 2
+    assert 1048576 in ik2.get("contexts") or []
     assert ik2.get("rec") in ik2["models"]
     ik2m = ik2["models"][ik2["rec"]]
     assert ik2m["config"] == "maya-inkling-2-mini.json"
@@ -520,9 +522,11 @@ def test_build_argv_against_real_submodule():
         assert "--drafting" not in argv    # 純正既定 auto (エンジンが初回起動時に計測)
         assert "--no-vision" in argv
         assert cfg == "maya-inkling-2-mini.json"
+        # v1.1.74+: 1M まで選択可。--parallel は CLI 非対応のまま
+        argv1m, _ = maya_setup.build_argv(mod, {"family": "ik2", "model": ik2["rec"], "context": 1048576})
+        assert argv1m[argv1m.index("--context") + 1] == "1048576"
         for bad in ({"family": "ik2", "model": ik2["rec"], "context": 32768, "parallel": 2},
-                    {"family": "ik2", "model": ik2["rec"], "context": 32768, "gpus": "0,1"},
-                    {"family": "ik2", "model": ik2["rec"], "context": 1048576}):
+                    {"family": "ik2", "model": ik2["rec"], "context": 204800}):
             with pytest.raises(ValueError):
                 maya_setup.build_argv(mod, bad)
     # GLM-5.3 (744B, G53_MODELS): glm 家系にモデル別 contexts で同居 (テキスト専用)
@@ -1201,7 +1205,9 @@ def test_build_argv_ik2(monkeypatch, tmp_path: Path):
     """Inkling-2-Mini: --model Inkling-2-Mini (quant フラグ無し = 1 ファイルセット)。
     --drafting は付けない (純正既定 auto: ドラフターはセットアップで取得し、計測は
     エンジンが初回起動時に 1 回行う — セットアップ中の GPU 独占計測では無い)。
-    --parallel は拒否 (1 リクエストずつ)、複数 GPU も拒否 (純正 check_pc が拒否)。"""
+    --parallel は CLI 非対応のまま拒否 (純正 check_parallel。同時回答数は
+    ダッシュボード Models ページが config に書く)。v1.1.74+ は NVIDIA 2 枚まで
+    (max_gpus=2。3 枚以上 / 3 枚環境での all は拒否)。コンテキストは 1M まで。"""
     mod = _fake_module(tmp_path, with_venv=True)
     mod = _seed_tables(monkeypatch, mod)
     argv, cfg = maya_setup.build_argv(mod, {"family": "ik2", "model": "ud-q4_k_xl",
@@ -1213,21 +1219,33 @@ def test_build_argv_ik2(monkeypatch, tmp_path: Path):
     assert "--drafting" not in argv
     assert argv[-4:] == ["--yes", "--no-start", "--plain", "--download-model"]
     assert cfg == "maya-inkling-2-mini.json"
-    # vision "" = 純正既定 (ON)
-    argv2, _ = maya_setup.build_argv(mod, {"family": "ik2", "model": "ud-q4_k_xl", "context": 32768})
+    # vision "" = 純正既定 (ON)。1M まで選択可 (v1.1.74 の trained 長)
+    argv2, _ = maya_setup.build_argv(mod, {"family": "ik2", "model": "ud-q4_k_xl", "context": 1048576})
     assert "--no-vision" not in argv2
-    # 単一カード指定は可 (--gpu N)
+    assert argv2[argv2.index("--context") + 1] == "1048576"
+    # 単一カード指定は可 (--gpu N)。2 枚も可 (--gpus 0,1 / all = usable 2 枚)
     argv3, _ = maya_setup.build_argv(mod, {"family": "ik2", "model": "ud-q4_k_xl",
                                            "context": 32768, "gpus": "1"})
     assert argv3[argv3.index("--gpu") + 1] == "1" and "--gpus" not in argv3
+    argv4, _ = maya_setup.build_argv(mod, {"family": "ik2", "model": "ud-q4_k_xl",
+                                           "context": 32768, "gpus": "0,1"})
+    assert argv4[argv4.index("--gpus") + 1] == "0,1"
+    argv5, _ = maya_setup.build_argv(mod, {"family": "ik2", "model": "ud-q4_k_xl",
+                                           "context": 32768, "gpus": "all"})
+    assert argv5[argv5.index("--gpus") + 1] == "0,1"
     for bad in ({"family": "ik2", "model": "ud-q4_k_xl", "context": 32768, "parallel": 2},
-                {"family": "ik2", "model": "ud-q4_k_xl", "context": 32768, "gpus": "0,1"},
-                {"family": "ik2", "model": "ud-q4_k_xl", "context": 32768, "gpus": "all"},
-                {"family": "ik2", "model": "ud-q4_k_xl", "context": 1048576},   # 家系一覧外
                 {"family": "ik2", "model": "ud-q4_k_xl", "context": 8192},      # ik2_fit.CONTEXTS 外
+                {"family": "ik2", "model": "ud-q4_k_xl", "context": 204800},    # 一覧外
                 {"family": "ik2", "model": "gguf-q8", "context": 32768}):       # 家系違いの quant
         with pytest.raises(ValueError):
             maya_setup.build_argv(mod, bad)
+    # 3 枚目以降は拒否 (純正: three or more are not in it yet)。usable 3 枚の all も拒否
+    tables = maya_setup._CACHE[str(mod)][1]
+    tables["pc"]["gpus"].append({"index": 3, "name": "RTX C", "vram_gb": 24.0, "usable": True})
+    for g in ("0,1,3", "all"):
+        with pytest.raises(ValueError, match="最大 2 枚"):
+            maya_setup.build_argv(mod, {"family": "ik2", "model": "ud-q4_k_xl",
+                                        "context": 32768, "gpus": g})
 
 
 def test_build_argv_ik2_fits_false(monkeypatch, tmp_path: Path):
@@ -1292,8 +1310,8 @@ def test_merge_config_ready_ik2(tmp_path: Path):
 
 
 def test_ik2_config_asks_gpu_only(client, monkeypatch):
-    """Inkling-2-Mini (maya-ik2): --kv / --tp は無い (エンジン固有)。単一 GPU 専用
-    (gpu_multi=False) なので 2 枚の選択は拒否、単一カードへの切り替えは可。"""
+    """Inkling-2-Mini (maya-ik2): --kv / --tp は無い (エンジン固有)。v1.1.74+ は
+    NVIDIA 2 枚まで (gpu_max=2) — 2 枚の選択は可、3 枚は拒否。単一カードへの切り替えも可。"""
     c, root = client
     _seed_maya_gpus(monkeypatch, root)
     _maya_cfg(root, "maya-inkling-2-mini.json",
@@ -1304,15 +1322,22 @@ def test_ik2_config_asks_gpu_only(client, monkeypatch):
     pid = _profile(c, "module/maya/maya-inkling-2-mini.json")
     r = c.get(f"/api/profiles/{pid}/config-args").json()
     assert r["family"] == "ik2" and r["kv_ok"] is False and r["tp_ok"] is False
-    assert r["gpu_multi"] is False
+    assert r["gpu_multi"] is True and r["gpu_max"] == 2
     assert c.post(f"/api/profiles/{pid}/config-args",
                   json={"updates": {"--kv": "fp16"}}).status_code == 400
     assert c.post(f"/api/profiles/{pid}/config-args",
                   json={"updates": {"--tp": "1"}}).status_code == 400
+    # 2 枚までは可 (エキスパート分割。--tp は導出されない)
     assert c.post(f"/api/profiles/{pid}/config-args",
-                  json={"updates": {"gpu": "0,1"}}).status_code == 400
+                  json={"updates": {"gpu": "0,1"}}).status_code == 200
     assert c.post(f"/api/profiles/{pid}/config-args",
                   json={"updates": {"gpu": "1"}}).status_code == 200
+    # 3 枚は拒否 (usable を 3 枚に増やして検証)
+    mod = root / "module" / "maya"
+    tables = maya_setup._CACHE[str(mod)][1]
+    tables["pc"]["gpus"].append({"index": 2, "usable": True})
+    r = c.post(f"/api/profiles/{pid}/config-args", json={"updates": {"gpu": "0,1,2"}})
+    assert r.status_code == 400 and "最大 2 枚" in r.json()["detail"]
     # --max-context は編集可 (ik2_fit.CONTEXTS の範囲は ② が検証する。③ は範囲検査)
     assert c.post(f"/api/profiles/{pid}/config-args",
                   json={"updates": {"--max-context": "262144"}}).status_code == 200
@@ -1327,5 +1352,7 @@ def test_wizard_ik2_ui_wiring():
     assert 'W.mdStFam === "ik2"' in js                       # ② の drafter 案内
     assert "エンジンが初回起動時に 1 回だけ計測" in js
     assert 'd.layout === "offload"' in js                    # offload パスの注記
-    assert 'W.cfgArgs.family === "ik2") delete cfg.par' in js  # ③ 並列数を出さない
+    assert "d.kv_streamed" in js                             # KV streaming の注記 (v1.1.74)
+    assert 'W.cfgArgs.family === "ik2") delete cfg.par' in js  # ③ 並列数を出さない (CLI 非対応)
+    assert "W.cfgArgs.gpu_max" in js                         # ③ 全カード共有の上限ガード
     assert '/^maya-inkling/.test(cn)' in js                  # ⑤ の案内

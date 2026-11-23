@@ -662,12 +662,13 @@ def build_maya() -> dict[str, Any]:
         F("--gpus", "GPU 分割 (層分散 / tensor parallel)", section="parallel", placeholder="0,1 / 0,1,2,3",
           help="この起動だけ対象のカードを変える。空 = config の gpu。GLM / Qwen / MiniMax GGUF は層分散、"
                "DeepSeek / MiniMax EXL3 は --tp、Hy4-Flash は --tp auto (最大の同一 GPU グループで tensor parallel)。"
-               "Inkling 2 Mini は単一 GPU 専用",
+               "Inkling 2 Mini は最大 2 枚 (Linux。エキスパート分割)",
         ),
         F("--parallel", "同時リクエスト数 (1-8)", section="parallel", placeholder="1",
           help="指定すると config に保存される。1 枚で複数リクエストをまとめてデコードし総スループット向上。"
                "1 リクエスト増えるごとに VRAM のコンテキスト分だけ expert キャッシュが減る。"
-               "Qwen / Hy4-Flash / Inkling 2 Mini は非対応 (1 リクエストずつ回答)"),
+               "Qwen / Hy4-Flash は非対応 (1 リクエストずつ回答)。Inkling 2 Mini は CLI 非対応 — "
+               "ダッシュボードの Models ページ (Answers at once) で設定します"),
         F("--vram-reserve-mib", "GPU ごとの空き VRAM 確保 (MiB)", section="sched", placeholder="700",
           help="ドライバ・デスクトップ等向けの余白。指定すると config に保存される"),
         F("--calibrate", "起動前にこの PC 向け調整 (~10-15分)", section="sched",

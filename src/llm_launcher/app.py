@@ -1460,8 +1460,9 @@ def create_app(root: Path) -> FastAPI:
         host pinned memory 経由 (16 host threads) なのでこの環境でも正しい。
         KV はエンジン固有 (--kv auto/q8)。
         GLM-5.3 (744B, glm-dsa) は家系 glm だが KV が INT8 latent 固定なので --kv 編集不可。
-        Inkling-2-Mini (ik2, maya-ik2) は単一 GPU 専用 (純正 check_pc が 2 枚以上を拒否)
-        で --kv / --tp は無い (KV は IK2_KV env・エンジン固有)。"""
+        Inkling-2-Mini (ik2, maya-ik2) は --kv / --tp が無い (KV は IK2_KV env・
+        エンジン固有。2 GPU はエキスパート分割で --tp ではない)。v1.1.74+ は
+        NVIDIA 2 枚まで (gpu_max=2。Linux のみ)・Windows + NVIDIA 対応。"""
         fam = _maya_config_family(doc)
         inst = doc.get("installer") or {}
         tp_ok = fam in ("deepseek", "hy4") or \
@@ -1472,7 +1473,8 @@ def create_app(root: Path) -> FastAPI:
         opts = maya_setup.load_options(root / "module" / "maya")
         usable = [int(x["index"]) for x in ((opts.get("pc") or {}).get("gpus") or []) if x.get("usable")]
         return {"family": fam, "kv_ok": kv_ok, "tp_ok": tp_ok, "tp_auto": fam == "hy4",
-                "gpu": cur, "gpus": usable, "gpu_multi": fam != "ik2"}
+                "gpu": cur, "gpus": usable, "gpu_multi": True,
+                **({"gpu_max": 2} if fam == "ik2" else {})}
 
     def _config_gpu_count(doc: dict[str, Any], usable: list[int]) -> int:
         """config の gpu が指すカード数。未設定 = CUDA_VISIBLE_DEVICES を絞らない =
@@ -1586,6 +1588,9 @@ def create_app(root: Path) -> FastAPI:
                 raise HTTPException(400, f"GPU 指定が検出外の GPU を指しています: {gv} (使える GPU: {usable})")
             if len(sel) >= 2 and not multi:
                 raise HTTPException(400, "この家系は現在単一 GPU 専用です (純正: runs on one GPU so far)")
+            gpu_max = maya_info.get("gpu_max") if is_maya else None
+            if gpu_max and len(sel) > gpu_max:
+                raise HTTPException(400, f"この家系が使えるのは最大 {gpu_max} 枚です (純正: three or more are not in it yet)")
             if len(sel) == 1:
                 doc["gpu"] = sel[0]
                 doc.pop("layer_split", None)
