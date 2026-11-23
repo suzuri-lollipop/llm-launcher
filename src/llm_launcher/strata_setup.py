@@ -60,7 +60,7 @@ import setup as S
 def m_entry(d):
     return {"about": str(d.get("about", "")), "label": str(d.get("label", "")),
             "download_gb": d.get("download_gb"), "ram_gb": d.get("ram_gb"),
-            "vision": bool(d.get("vision"))}
+            "vision": bool(d.get("vision")), "format": d.get("format")}
 fams = {}
 for fid, f in getattr(S, "FAMILIES", {}).items():
     fams[fid] = {"title": str(f.get("title", fid)), "about": str(f.get("about", "")),
@@ -184,6 +184,17 @@ for fid, f in fams.items():
         f["multi_gpu"] = fid in ink
         for m, d in f["models"].items():
             d["vision"] = bool(raw.get("vision"))
+            if fid in ink and str(d.get("format") or "") == "gguf":
+                # エンジン 0.1.66 の GGUF + DSpark drafter は upstream バグ:
+                # GGUF ローダーの変換名 (layers.N.*) に dspark. プレフィックスが無く、
+                # CUDA ランタイムの検索 (dspark.layers.N.*) と不一致 → missing tensor
+                # で exit 2 (ink_runner.cuh の man.dspark コピーがキーを正規化しない。
+                # ネイティブ SQ ビルドは埋め込み DSpark の名前が dspark. 付きで動く)。
+                # launcher は GGUF ビルドを drafter なし (--drafter off) で起動する
+                d["drafter_off_reason"] = ("エンジン 0.1.66 の GGUF + DSpark drafter は upstream バグ "
+                                           "(テンソル名不一致: missing tensor dspark.layers.*) のため、"
+                                           "launcher は GGUF ビルドを drafter なしで起動します。"
+                                           "DSpark を使う場合はネイティブ SQ ビルド (SQ-20 / SQ-15 / SQ-10) を選んでください")
             try:
                 d["rec_context"] = int(HF.DEFAULT_CONTEXT)
                 files = HF.files_of(m, True)      # vision ON 既定のダウンロードセット
@@ -554,6 +565,11 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
     argv = ["setup.py", "--family", fam, "--model", model, "--context", str(context)]
     if vision:   # vision 非対応パックは --vision を渡さない (upstream 側でも vision 質問自体が出ない)
         argv += ["--vision", vision]
+    # エンジン 0.1.66 の GGUF + DSpark upstream バグ回避: 純正 --drafter off で
+    # drafter なしの構成を作ってもらう (--dspark が args に入らず drafting=off になる)。
+    # upstream が直したら表の drafter_off_reason が消えてこの分岐も通らなくなる
+    if entry.get("drafter_off_reason"):
+        argv += ["--drafter", "off"]
     gpus = str(opts.get("gpus") or "").strip().lower()
     single_reason = str(fams[fam].get("single_gpu_reason") or "")
 

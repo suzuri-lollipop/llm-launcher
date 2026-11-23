@@ -346,9 +346,15 @@ FAKE_TABLES = {
                            "contexts": [8192, 32768, 65536, 131072, 262144, 524288, 1048576],
                            "max_context": 1048576,
                            "models": {"SQ-20": {"about": "", "label": "", "download_gb": 20.0,
-                                                "ram_gb": 20, "vision": True, "rec_context": 32768},
+                                                "ram_gb": 20, "vision": True, "rec_context": 32768,
+                                                "format": "strata"},
                                       "SQ-15": {"about": "", "label": "", "download_gb": 15.0,
-                                                "ram_gb": 15, "vision": True, "rec_context": 32768}}},
+                                                "ram_gb": 15, "vision": True, "rec_context": 32768,
+                                                "format": "strata"},
+                                      "UD-IQ4_XS": {"about": "", "label": "", "download_gb": 15.7,
+                                                    "ram_gb": 16, "vision": True, "rec_context": 32768,
+                                                    "format": "gguf",
+                                                    "drafter_off_reason": "エンジン 0.1.66 の GGUF + DSpark は upstream バグのため drafter なし"}}},
         "deepseek41": {"title": "DeepSeek-V4.1-Flash", "about": "",
                        "tag": "deepseek-v4.1-flash-", "multi_gpu": True,
                        "models": {"IST-DAS-2.00bpw": {"about": "", "label": "ISTA-DAS 2.00 bpw",
@@ -504,12 +510,20 @@ def test_build_argv_against_real_submodule():
                                                   "context": 1048576})
         assert cfg == "strata-inkling-2-mini-sq-20.json"
         assert argv[argv.index("--context") + 1] == "1048576"
+        assert "--drafter" not in argv      # ネイティブ SQ は埋め込み DSpark がそのまま動く
         with pytest.raises(ValueError):
             strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-99", "context": 32768})
+        # エンジン 0.1.66 の GGUF + DSpark upstream バグ (テンソル名不一致) 回避:
+        # GGUF ビルドは --drafter off で drafter なし構成にする
+        assert ink["models"]["UD-IQ4_XS"].get("drafter_off_reason")
+        argv, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "UD-IQ4_XS",
+                                                "context": 32768})
+        assert argv[argv.index("--drafter") + 1] == "off"
     # 組み立てたフラグは全て純正 setup.py の argparse に実在する
     src = (strata_setup.setup_dir(mod) / "setup.py").read_text(encoding="utf-8")
     known = set(re.findall(r'add_argument\("(--[a-z0-9-]+)"', src))
-    for fam, model in (("hy4-flash", "SQ-64"), ("inkling-2-mini", "SQ-10")):
+    for fam, model in (("hy4-flash", "SQ-64"), ("inkling-2-mini", "SQ-10"),
+                       ("inkling-2-mini", "UD-IQ4_XS")):
         if fam not in fams:
             continue
         av, _ = strata_setup.build_argv(mod, {"family": fam, "model": model, "context": 32768})
@@ -804,6 +818,25 @@ def test_build_argv_hy4_inkling(monkeypatch, tmp_path: Path):
             strata_setup.build_argv(mod, bad)
 
 
+def test_build_argv_inkling_gguf_drafter_off(monkeypatch, tmp_path: Path):
+    """エンジン 0.1.66 の GGUF + DSpark drafter は upstream バグ (テンソル名不一致:
+    GGUF ローダーの変換名 layers.N.* に dspark. プレフィックスが無く CUDA ランタイムの
+    検索 dspark.layers.N.* と不一致 → missing tensor で exit 2)。launcher は GGUF
+    ビルドに純正 --drafter off を渡して drafter なし構成で起動する。
+    ネイティブ SQ ビルド (埋め込み DSpark) は対象外。"""
+    mod = tmp_path / "module" / "strata"
+    (mod / ".venv" / "bin").mkdir(parents=True)
+    (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
+    mod = _seed_tables(monkeypatch, mod)
+    argv, cfg = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "UD-IQ4_XS",
+                                              "context": 32768})
+    assert argv[argv.index("--drafter") + 1] == "off"
+    assert cfg == "strata-inkling-2-mini-ud-iq4_xs.json"
+    argv2, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
+                                             "context": 32768})
+    assert "--drafter" not in argv2
+
+
 def test_build_argv_model_contexts_whitelist(monkeypatch, tmp_path: Path):
     """モデル別 contexts が在れば家系一覧より優先して検証する (maya と同じ契約)。
     fits=False (この PC では起動できない) は context 関係なく拒否。
@@ -963,3 +996,4 @@ def test_wizard_strata_new_families_ui_wiring():
     assert '/^strata-(hy4-flash|inkling-2-mini)/.test(cn)' in js
     assert 'W.mdStFam === "inkling-2-mini"' in js   # ② Host KV Offload / 複数 GPU の注記
     assert "Host KV Offload" in js
+    assert "d.drafter_off_reason" in js             # GGUF + DSpark upstream バグの警告

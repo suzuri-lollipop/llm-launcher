@@ -842,6 +842,8 @@ function mdStHint() {
   if (!isMaya && W.mdStFam === "inkling-2-mini") {
     info.push("大きいコンテキストはグローバル KV キャッシュを RAM に退避して動かします (Host KV Offload・エンジン 0.1.66+)。RAM 容量が導線です (エンジンは足りない分を自動で退避 / 縮小)。KV は並列数に比例するので、③ で並列数を上げるときはコンテキストと RAM に注意してください");
     info.push("複数 GPU は CUDA 2〜4 枚の expert parallel / layer-split に対応します (0.2.20+。純正がカードの組み合わせから方式を選びます)");
+    if (d.drafter_off_reason)
+      warn.push("GGUF ビルド: エンジン 0.1.66 の upstream バグ (DSpark テンソル名不一致) のため drafter なしで起動します (デコードは遅くなります)。DSpark を使う場合はネイティブ SQ ビルド (SQ-20 / SQ-15 / SQ-10) を選んでください");
   }
   if (pc.disk_free_gb) info.push(`モデル保存先 ${pc.data_dir || (isMaya ? "Maya-data" : "Strata-data")} の空き ${pc.disk_free_gb} GB`);
   /* 純正の対話と同じ立場: 推奨より大きいコンテキストは「注記して従う」。
