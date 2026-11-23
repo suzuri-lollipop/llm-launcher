@@ -342,9 +342,7 @@ FAKE_TABLES = {
                       "models": {"SQ-64": {"about": "", "label": "", "download_gb": 130.5,
                                            "ram_gb": 62, "vision": True, "rec_context": 131072}}},
         "inkling-2-mini": {"title": "Inkling-2-Mini", "about": "", "tag": "inkling-2-mini-",
-                           "arch": "inkling2_loop", "multi_gpu": False,
-                           "force_single_gpu": True,
-                           "single_gpu_reason": "Strata 0.2.19 の複数 GPU セットアップは upstream バグのため単一 GPU",
+                           "arch": "inkling2_loop", "multi_gpu": True,
                            "contexts": [8192, 32768, 65536, 131072, 262144, 524288, 1048576],
                            "max_context": 1048576,
                            "models": {"SQ-20": {"about": "", "label": "", "download_gb": 20.0,
@@ -492,19 +490,16 @@ def test_build_argv_against_real_submodule():
     ink = fams.get("inkling-2-mini") or {}
     if ink:
         assert ink.get("arch") == "inkling2_loop"
-        # 0.2.19 の複数 GPU セットアップは upstream バグ (install_inkling2 の
-        # AttributeError) — launcher は単一 GPU で回避 (upstream 修正で戻す)
-        assert ink.get("multi_gpu") is False
-        assert ink.get("force_single_gpu") is True
+        # 0.2.20+ は複数 GPU (CUDA 2〜4 枚 EP / layer-split) が修正済み — 単一 GPU 回避は撤去
+        assert ink.get("multi_gpu") is True
+        assert "force_single_gpu" not in ink
         assert 1048576 in ink.get("contexts") or []
+        # 0.2.20+ は Unsloth GGUF ビルドも同じ家系表に乗る (DSpark GGUF 同伴)
+        assert "UD-Q4_K_XL" in ink["models"]
         for m, d in ink["models"].items():
             assert d.get("vision") is True, m
-            # モデル別 contexts = この PC の VRAM で安定起動できる分 (GPU 未検出 / UMA は全一覧)
-            assert isinstance(d.get("contexts"), list), m
-            if d.get("fits") is False:
-                assert d["contexts"] == [] and d.get("fit_error"), m
-            elif d["contexts"]:
-                assert d.get("rec_context") in d["contexts"], m
+            assert d.get("rec_context") == 32768, m
+            assert d.get("download_gb") and d["download_gb"] > 0, m
         argv, cfg = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
                                                   "context": 1048576})
         assert cfg == "strata-inkling-2-mini-sq-20.json"
@@ -768,10 +763,9 @@ def test_strata_model_api_lists_installed_configs(tmp_path: Path, monkeypatch: p
 
 def test_build_argv_hy4_inkling(monkeypatch, tmp_path: Path):
     """Hy4-Flash: 単一 GPU 宣言 (複数指定は拒否)・コンテキストは純正メニュー 8K-128K。
-    Inkling-2-Mini: 1M まで (up to 1M supported)。0.2.19 の複数 GPU セットアップは
-    upstream バグ (install_inkling2 がカード番号リストを辞書として扱う) のため
-    force_single_gpu — 複数は理由付き拒否、未指定でも --gpu を明示 (純正 --yes の
-    2 枚既定も同じバグを踏むため)。config 名は strata-<tag+model>.json 作法。"""
+    Inkling-2-Mini: 1M まで (up to 1M supported)。0.2.20+ は複数 GPU (CUDA 2〜4 枚の
+    EP / layer-split) が純正どおり通る (0.2.19 の install_inkling2 バグは修正済み)。
+    config 名は strata-<tag+model>.json 作法。"""
     mod = tmp_path / "module" / "strata"
     (mod / ".venv" / "bin").mkdir(parents=True)
     (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
@@ -783,19 +777,23 @@ def test_build_argv_hy4_inkling(monkeypatch, tmp_path: Path):
                     "--yes", "--no-start", "--no-browser"]
     assert cfg == "strata-hy4-flash-sq-64.json"
     # vision "" = 渡さない = 純正既定 ON (両家系とも画像既定 ON)。
-    # inkling は GPU 未指定でも --gpu を明示 (VRAM 最大・同量は番号が小さい方 = 0)
+    # inkling は GPU 未指定ならフラグ無し (純正の推奨構成にまかせる)
     argv2, cfg2 = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
                                                 "context": 1048576})
     assert "--vision" not in argv2
-    assert argv2[argv2.index("--gpu") + 1] == "0" and "--gpus" not in argv2
+    assert "--gpu" not in argv2 and "--gpus" not in argv2
     assert cfg2 == "strata-inkling-2-mini-sq-20.json"
-    # 単一カード指定は両家系とも可 (指定があればそれが優先)
+    # 単一カード指定は両家系とも可
     argv3, _ = strata_setup.build_argv(mod, {"family": "hy4-flash", "model": "SQ-64",
                                              "context": 8192, "gpus": "1"})
     assert argv3[argv3.index("--gpu") + 1] == "1"
+    # Inkling は 2 枚 EP / all が純正どおり通る (0.2.20+)
     argv4, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-15",
-                                             "context": 32768, "gpus": "1"})
-    assert argv4[argv4.index("--gpu") + 1] == "1" and "--gpus" not in argv4
+                                             "context": 32768, "gpus": "0,1"})
+    assert argv4[argv4.index("--gpus") + 1] == "0,1"
+    argv5, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-15",
+                                             "context": 32768, "gpus": "all"})
+    assert argv5[argv5.index("--gpus") + 1] == "all"
     for bad in ({"family": "hy4-flash", "model": "SQ-64", "context": 262144},   # 純正メニュー外
                 {"family": "hy4-flash", "model": "SQ-64", "context": 131072, "gpus": "0,1"},
                 {"family": "hy4-flash", "model": "SQ-64", "context": 131072, "gpus": "all"},
@@ -804,34 +802,30 @@ def test_build_argv_hy4_inkling(monkeypatch, tmp_path: Path):
                 {"family": "inkling-2-mini", "model": "SQ-64", "context": 32768}):  # 家系違いの size
         with pytest.raises(ValueError):
             strata_setup.build_argv(mod, bad)
-    # inkling の複数指定は upstream バグの理由付きで拒否 (all も)
-    for g in ("0,1", "all"):
-        with pytest.raises(ValueError, match="upstream バグ"):
-            strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
-                                          "context": 32768, "gpus": g})
 
 
-def test_build_argv_inkling_model_contexts(monkeypatch, tmp_path: Path):
-    """Inkling のモデル別 contexts (この VRAM で安定起動できる分) は家系一覧より優先。
-    fits=False (KV + ワークスペースの余裕不足) は context 関係なく拒否。
-    単一 GPU CUDA エンジンは全エキスパートを VRAM に常駐させ KV を貪欲に自動割り当て
-    するため大きい ctx は OOM する (2026-11-23 実測: 24GB で SQ-20 @ 262144 → exit 3)。"""
+def test_build_argv_model_contexts_whitelist(monkeypatch, tmp_path: Path):
+    """モデル別 contexts が在れば家系一覧より優先して検証する (maya と同じ契約)。
+    fits=False (この PC では起動できない) は context 関係なく拒否。
+    0.2.19 では Inkling の VRAM 上限に使っていた機構 — 0.2.20 で upstream が
+    Host KV Offload により再設計したため Inkling は家系一覧に戻したが、
+    機構自体は表がモデル別 contexts を持つ限り有効。"""
     mod = tmp_path / "module" / "strata"
     (mod / ".venv" / "bin").mkdir(parents=True)
     (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
     mod = _seed_tables(monkeypatch, mod)
     tables = strata_setup._CACHE[str(mod)][1]
     ink = tables["families"]["inkling-2-mini"]["models"]
-    ink["SQ-20"]["contexts"] = [8192, 32768, 65536]   # 24GB カードの計算結果
+    ink["SQ-20"]["contexts"] = [8192, 32768, 65536]   # 表がモデル別一覧を持つ場合
     ink["SQ-20"]["rec_context"] = 32768
     ink["SQ-15"]["contexts"] = []
     ink["SQ-15"]["fits"] = False
-    ink["SQ-15"]["fit_error"] = "全エキスパートを VRAM に載えた後の KV キャッシュ + ワークスペースの余裕が足りません"
+    ink["SQ-15"]["fit_error"] = "この PC の VRAM では起動できません"
     argv, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
                                             "context": 65536})
     assert argv[argv.index("--context") + 1] == "65536"
-    for bad in ({"family": "inkling-2-mini", "model": "SQ-20", "context": 262144},  # OOM した値
-                {"family": "inkling-2-mini", "model": "SQ-20", "context": 131072},  # 上限超え
+    for bad in ({"family": "inkling-2-mini", "model": "SQ-20", "context": 262144},  # 家系一覧には在るがモデル別外
+                {"family": "inkling-2-mini", "model": "SQ-20", "context": 131072},
                 {"family": "inkling-2-mini", "model": "SQ-15", "context": 8192}):   # fits=False
         with pytest.raises(ValueError):
             strata_setup.build_argv(mod, bad)
@@ -871,6 +865,22 @@ def test_weights_status_strata_native(tmp_path: Path):
     assert strata_setup.weights_status(idoc)["ok"] is True
     iv.unlink()
     assert strata_setup.weights_status(idoc)["ok"] is False
+    # 0.2.20+ の Unsloth GGUF ビルド: --dspark <file> (同伴 drafter GGUF) も参照。
+    # --ssd-experts は値なしフラグなので参照にしない
+    gd = idir / "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+    ds = idir / "dspark-Inkling-2-Mini-Q8_0.gguf"
+    gd.write_bytes(b"x" * 2048)
+    ds.write_bytes(b"x" * 1024)
+    gdoc = {"exe": "/x/strata-inkling", "arch": "inkling2_loop",
+            "args": ["--native", str(gd), "--max-context", "32768", "--dspark", str(ds),
+                     "--ssd-experts", "--vision", str(iv)],
+            "tokenizer": str(tok)}
+    iv.write_bytes(b"x" * 1024)
+    assert strata_setup.weights_status(gdoc)["ok"] is True
+    ds.unlink()
+    w = strata_setup.weights_status(gdoc)
+    assert w["ok"] is False and "dspark-Inkling-2-Mini-Q8_0.gguf" in w["missing"]
+    assert "--ssd-experts" not in " ".join(w["missing"])
 
 
 def test_weights_status_boolean_vision_flag_not_a_ref(tmp_path: Path):
@@ -951,5 +961,5 @@ def test_wizard_strata_new_families_ui_wiring():
     assert 'if (W.cfgArgs.family === "hy4-flash") delete cfg.par;' in js
     assert "|| W.tableReq.family === \"qwen\") : !fam.arch," in js
     assert '/^strata-(hy4-flash|inkling-2-mini)/.test(cn)' in js
-    assert 'W.mdStFam === "inkling-2-mini"' in js   # ② upstream バグ回避 + VRAM 上限の注記
-    assert "安定起動できる分だけ出します" in js
+    assert 'W.mdStFam === "inkling-2-mini"' in js   # ② Host KV Offload / 複数 GPU の注記
+    assert "Host KV Offload" in js

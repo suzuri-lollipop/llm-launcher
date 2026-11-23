@@ -17,22 +17,20 @@
     HY4_FAMILIES / INKLING_FAMILIES の独自エンジン家系: コンテキスト / 推奨は
     hy4_family / inkling_family の CONTEXTS / DEFAULT_CONTEXT そのもの
     (Inkling は「up to 1M supported」= 明示 --context が素通りするので owner 方針で
-    1M まで拡張。ただし Inkling のモデル別 contexts はこの PC の VRAM で安定起動
-    できる分だけに制限する — 単一 GPU CUDA エンジンは全エキスパートを VRAM に
-    常駐させ KV を貪欲に自動割り当てするため、大きい ctx はワークスペース確保が
-    OOM する。2026-11-23 実測。inkling_ctxs のコメント参照)。
-    重みは .strata ネイティブファイル (build + 共有 Engram / Vision)。
-    純正メニューが出さない (ダウンロードソース未設定・ローカルファイル無し) 家系は
-    表にも出さない (hy4_offered / inkling_offered と同じ見立て)。
+    1M まで拡張。0.2.20 / エンジン 0.1.66 の Host KV Offload = グローバル KV を
+    mapped pinned host RAM へ退避する設計で、大きい ctx の導線は RAM 容量。
+    エンジンが自動で退避 / 縮小する)。重みは .strata ネイティブファイル
+    (build + 共有 Engram / Vision) と Unsloth GGUF ビルド (0.2.20+ は
+    dspark-Inkling-2-Mini-Q8_0.gguf を同伴)。純正メニューが出さない
+    (ダウンロードソース未設定・ローカルファイル無し) 家系は表にも出さない
+    (hy4_offered / inkling_offered と同じ見立て)。
   * build_argv(): 検証済みフラグのみ argv にする。family / model は読み出した表の
-    キーそのもの、context は表の CONTEXTS の値、vision は列挙値、gpus は検出した
-    usable GPU の index 集 (単一カード = --gpu N、複数 = --gpus "0,1"/all、
-    単一 GPU 宣言の家系 = own-path / Hy4-Flash の複数指定は拒否)。
-    Inkling-2-Mini は 0.2.19 の複数 GPU セットアップが upstream バグ
-    (install_inkling2 の AttributeError) のため force_single_gpu: 複数指定は
-    理由付きで拒否し、未指定でも --gpu を明示して単一 GPU でセットアップする
-    (upstream が直したら表の multi_gpu を戻す)。どれか一つでも外れたら
-    InstallError 相当の ValueError を投げる (argv 化に値の検証は必須)。
+    キーそのもの、context は表の CONTEXTS の値 (モデル別 contexts が在ればそれ)、
+    vision は列挙値、gpus は検出した usable GPU の index 集 (単一カード = --gpu N、
+    複数 = --gpus "0,1"/all、単一 GPU 宣言の家系 = own-path / Hy4-Flash の複数指定は
+    拒否。Inkling-2-Mini は 0.2.20+ で CUDA 2〜4 枚の EP / layer-split が純正どおり
+    通る — 0.2.19 の install_inkling2 バグは upstream 修正済み)。
+    どれか一つでも外れたら InstallError 相当の ValueError を投げる (argv 化に値の検証は必須)。
   * weights_status() / installed_configs(): config が参照する重み (--native / --pack /
     vision / tokenizer、マルチシャードは兄弟も) の実在とサイズを検証する —
     「一覧に出る = 起動できる」の根拠。UI に JSON 名は出さない (モデル名で出す)。
@@ -157,52 +155,15 @@ vram = pc.get("vram_gb") or 0.0
 #    既定 128K は owner 決定 2026-11-19)。
 #  - Inkling-2-Mini (0.2.19+): メニューは 256K 止まりだが "up to 1M supported"
 #    (明示 --context は検証されず素通り) なので 1M まで出す。既定 32K。
+#    0.2.20 / エンジン 0.1.66 で VRAM 配置が再設計された (Host KV Offload =
+#    グローバル KV を mapped pinned host RAM へ退避、--vram-experts-gb 尊重、
+#    ワークスペース予約 768MiB+DSpark 256MiB、inkling_fit の 4-tier 契約
+#    「32K–128K では OOM しない」)。大きい ctx は RAM 容量が導線になる
+#    (エンジンが自動で KV をホストへ退避 / 足りなければ ctx を自動縮小する)
 D = getattr(S, "dsv41_context", None)
 ds41_choices = list(getattr(D, "CHOICES", (8192, 32768, 65536, 131072, 262144, 524288, 1048576)))
 ctx_all = sorted(set(getattr(S, "CONTEXTS", []) or
                      [8192, 32768, 65536, 131072, 204800, 262144, 393216, 524288]) | {1048576})
-# Inkling-2-Mini のコンテキスト上限はこの PC の VRAM から計算する (モデル別 contexts)。
-# 単一 GPU CUDA エンジン (0.1.65) は --vram-experts-gb / --ram-experts-gb を無視
-# (HIP / CPU / 2 枚 EP 専用のフラグ) し、自分の規則で全エキスパートを VRAM に常駐させる
-# (ink_runner.cuh: vfree > sec4 + reserve なら 100% VRAM)。さらに KV の自動サイジングが
-# 空き VRAM を 480MiB の予約だけ残して貪欲に埋めるため、その後のワークスペース (~40 バッファ)
-# + DSpark + cuBLAS + CUDA グラフの確保が OOM する (2026-11-23 実測: RTX PRO 4000
-# Blackwell 24GB で SQ-20 @ 262144 → auto 131520 → exit 3 / ink_cuda.cuh:54 cudaMalloc)。
-# そこで「KV + 固定 + 余裕 <= エキスパートロード後の空き」になる ctx だけを出す。
-# 定数は inkling_fit (submodule) とエンジンソース (ink_cuda.cuh / ink_runner.cuh)。
-# 余裕 0.8 GiB = ワークスペース ~0.5 (MB=512 × hidden=2304 の ~40 バッファ + DSpark
-# scratch 9216×2304 bf16 + stage 48×32×6656 等を実計算) + cuBLAS / CUDA グラフ +
-# アロケータ断片化。Vision は VRAM が足りなければ CPU ViT にフォールバックする
-# (ink_runner.cuh) ので VRAM 余裕には含めない。parallel=1 / FP16 KV 基準
-# (KV は並列数に比例 — ③ の並列数を上げるときは ctx を下げることが要る。UI が注記)
-def inkling_ctxs(build, vram_gib, uma):
-    IF = getattr(S, "inkling_fit", None)
-    full = sorted(set(int(c) for c in (getattr(IF, "CONTEXTS", []) or [])) | {524288, 1048576})
-    if IF is None or not vram_gib or uma:
-        return full, None      # GPU 未検出 / UMA: エンジンの UMA 経路は別 (上限なし)
-    try:
-        b = IF.BUILDS[build]
-        G = float(IF.GIB_TO_GB)
-        dense = float(b["dense_gb"]) / G
-        bodies = float(b["bodies_gb"]) / G
-        # エンジンの常駐判定 reserve (ink_runner.cuh: >=20GiB 1600MiB / <=13GiB 780MiB / 他 1280MiB)
-        reserve = 1.6 if vram_gib >= 20 else (0.78 if vram_gib <= 13 else 1.28)
-        if vram_gib - dense - 0.8 > bodies + reserve:
-            free_after = vram_gib - dense - bodies - 1.2   # driver+context (実測 4.72GiB と一致)
-        else:
-            free_after = 1.91                              # hybrid: hyb_reserve (1664+256 MiB)
-        budget = free_after - 0.8 - float(IF.SWA_AND_SCONV_GB_FP16) / G
-        max_ctx = int(budget * G * 1e9 / float(IF.GLOBAL_KV_BYTES_PER_TOK_FP16))
-        ctxs = [c for c in full if c <= max_ctx]
-        if not ctxs:
-            return [], ("全エキスパートを VRAM に載えた後の KV キャッシュ + ワークスペースの"
-                        "余裕が足りません (エンジンの自動割り当てが OOM します)。"
-                        "より小さいビルドがあるならそれを選ぶか、VRAM の大きいカードで実行してください")
-        return ctxs, None
-    except Exception:
-        return full, None
-ink_cards = [g for g in cards if S.gpu_problem(g) is None]
-ink_best = max(ink_cards, key=lambda g: float(g.get("vram_gb") or 0)) if ink_cards else {}
 for fid, f in fams.items():
     raw = getattr(S, "FAMILIES", {}).get(fid) or own.get(fid) or multi.get(fid) or hy4.get(fid) or ink.get(fid) or {}
     if fid in hy4 or fid in ink:
@@ -215,33 +176,16 @@ for fid, f in fams.items():
             ctxs = sorted(set(ctxs) | {524288, 1048576})
         f["contexts"] = ctxs
         f["max_context"] = max(ctxs) if ctxs else 262144
-        # hy4: 純正が単一 GPU 宣言 ("runs on one GPU so far")。inkling: NVIDIA 2 枚の
-        # expert parallel (--gpus 2 EP) が純正の仕様だが、0.2.19 の install_inkling2 は
-        # multi (choose_gpus が返すカード番号のリスト) をカード辞書のリストとして
-        # g.get("vendor") して AttributeError で落ちる upstream バグ (setup.py:10197)。
-        # --yes の既定も 2 枚を選ぶため GPU 指定なしでも同じく落ちる。upstream が直すまで
-        # launcher は単一 GPU でセットアップする (force_single_gpu: build_argv が --gpu を
-        # 明示して純正の複数枚既定も回避。単一カードなら multi=[] でバグを踏まない)
-        f["multi_gpu"] = False
-        if fid in ink:
-            f["force_single_gpu"] = True
-            f["single_gpu_reason"] = ("Strata 0.2.19 の Inkling-2-Mini 複数 GPU セットアップは upstream バグ "
-                                      "(install_inkling2 がカード番号のリストをカード辞書として扱い "
-                                      "AttributeError で落ちる) のため、修正まで launcher は単一 GPU でセットアップします")
+        # hy4: 純正が単一 GPU 宣言 ("runs on one GPU so far")。inkling: 0.2.20 で
+        # 複数 GPU が修正された (_multi_gpu_cards が番号→辞書を解決。CUDA は 2〜4 枚の
+        # expert parallel / layer-split、HIP は 2 枚)。0.2.19 の install_inkling2
+        # AttributeError バグと、それに伴う launcher の単一 GPU 回避 (force_single_gpu)
+        # はここで撤去
+        f["multi_gpu"] = fid in ink
         for m, d in f["models"].items():
             d["vision"] = bool(raw.get("vision"))
-            if fid in ink:
-                # モデル別 contexts: この PC の VRAM で安定起動できる分だけ (上記 inkling_ctxs)
-                ctxs, ferr = inkling_ctxs(m, float(ink_best.get("vram_gb") or 0),
-                                          bool(ink_best.get("uma")))
-                d["contexts"] = ctxs
-                if ferr:
-                    d["fits"] = False
-                    d["fit_error"] = ferr
-                d["rec_context"] = 32768 if 32768 in ctxs else (max(ctxs) if ctxs else None)
             try:
-                if fid not in ink:
-                    d["rec_context"] = int(HF.DEFAULT_CONTEXT)
+                d["rec_context"] = int(HF.DEFAULT_CONTEXT)
                 files = HF.files_of(m, True)      # vision ON 既定のダウンロードセット
                 d["download_gb"] = round(sum(HF.size_of(n) or 0 for n in files) / 1e9, 1)
                 found = [n for n in files if n in idx]
@@ -489,14 +433,16 @@ def _merge_config_ready(module_dir: Path, data: dict[str, Any]) -> None:
 def weights_status(data: dict) -> dict:
     """config JSON が参照する重みの実在チェック — 「一覧に JSON が並んでいる」だけでは
     起動能否は分からない (削除/移動済み・シャード欠損がある)。参照パターンは純正 config の
-    4 種: --native/--model/--gguf/-m のファイル (マルチシャードは -0000X-of-0000N の
-    兄弟も)、--pack のディレクトリ、--engram / --vision の引数 (0.2.19+ の Hy4-Flash /
-    Inkling-2-Mini: .strata ネイティブファイル)、vision.model/mmproj。tokenizer ディレクトリも見る。
-    ok=None は「参照が見付からない config」= 判断しない (UI は重み表示なしで通す)。"""
+    5 種: --native/--model/--gguf/-m のファイル (マルチシャードは -0000X-of-0000N の
+    兄弟も)、--pack のディレクトリ、--engram / --vision / --dspark の引数 (0.2.19+ の
+    Hy4-Flash / Inkling-2-Mini: .strata ネイティブファイル。--dspark は 0.2.20+ の
+    Unsloth GGUF ビルドが同伴する drafter GGUF)、vision.model/mmproj。
+    tokenizer ディレクトリも見る。--ssd-experts / --kv 等は値なしフラグ / 形式名なので
+    参照にしない。ok=None は「参照が見付からない config」= 判断しない (UI は重み表示なしで通す)。"""
     args = data.get("args") or []
     refs: list[Path] = []
     for i, a in enumerate(args[:-1]):
-        if str(a) in ("--native", "--model", "--gguf", "-m", "--pack", "--engram"):
+        if str(a) in ("--native", "--model", "--gguf", "-m", "--pack", "--engram", "--dspark"):
             refs.append(Path(str(args[i + 1])))
         elif str(a) == "--vision" and not str(args[i + 1]).startswith("--"):
             # Hy4-Flash / Inkling-2-Mini は --vision <file> (.strata Vision shard)。
@@ -637,14 +583,6 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
                 if not fams[fam].get("multi_gpu", True):
                     raise _no_multi()
                 argv += ["--gpus", ",".join(str(i) for i in sel)]
-    # force_single_gpu (0.2.19 inkling の upstream バグ回避): 複数指定は上で拒否済み。
-    # 未指定 (auto) も純正 --yes の既定が 2 枚を選んで同じバグを踏むため、明示の --gpu を
-    # 渡す。カード選びは純正 fallback_card と同じ「VRAM 最大・同量は番号が小さい方」
-    if fams[fam].get("force_single_gpu") and "--gpu" not in argv and "--gpus" not in argv:
-        cards = [g for g in (data.get("pc") or {}).get("gpus") or [] if g.get("usable")]
-        if cards:
-            best = sorted(cards, key=lambda g: (-round(float(g.get("vram_gb") or 0)), int(g["index"])))[0]
-            argv += ["--gpu", str(int(best["index"]))]
     argv += ["--yes", "--no-start", "--no-browser"]
     tag = str(fams[fam].get("tag") or "")
     config_name = f"strata-{(tag + model).lower()}.json"
