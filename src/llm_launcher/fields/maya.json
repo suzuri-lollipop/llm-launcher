@@ -1,4 +1,13 @@
 {
+ "--ablation": {
+  "aliases": [],
+  "choices": [
+   "on",
+   "off"
+  ],
+  "help": "GLM, DeepSeek and MiniMax: the model's refusal direction loaded (on - each request still asks for it, off by default) or left out (off). Not given: a new config loads it, a setup again keeps what its ",
+  "type": "str"
+ },
  "--api-key": {
   "aliases": [],
   "help": "require this key from API clients and the dashboard",
@@ -236,7 +245,7 @@
  },
  "--vram-reserve-mib": {
   "aliases": [],
-  "help": "VRAM in MiB the expert pool leaves free on each GPU for the driver, the desktop and other programs (default 700), kept in the config",
+  "help": "VRAM in MiB the expert pool leaves free on each GPU for the driver, the desktop and other programs (default 700; DeepSeek 600, MiniMax 1024, Hy4-Flash 715), kept in the config - given on a start too, ",
   "metavar": "N",
   "type": "int"
  },

@@ -269,3 +269,25 @@ def test_wizard_uses_source_config_backlink():
     js = (Path(llm_launcher.__file__).parent / "static" / "setup.js").read_text("utf-8")
     assert "source_config: r.source_config || \"\"" in js
     assert "String(W.cfgArgs.source_config || String(v.config || \"\").split(\"/\").pop())" in js
+
+
+def test_scan_pack_dirs_strata_native(tmp_path):
+    """0.2.19+ の .strata ネイティブ重み (Hy4-Flash / Inkling-2-Mini): 家系フォルダ
+    (models/hy4-flash/ 等) がモデル単位として棚卸しに出る (重み拡張子に .strata)。
+    tokenizer サブフォルダはモデル単位の中なので二重エントリにならない。"""
+    root = tmp_path / "Strata-data" / "models"
+    hy4 = root / "hy4-flash"
+    hy4.mkdir(parents=True)
+    (hy4 / "Hy4-Flash-SQ-64.strata").write_bytes(b"x" * (2 << 20))
+    (hy4 / "Hy4-Flash-Engram-Q8.strata").write_bytes(b"x" * (2 << 20))
+    ink = root / "inkling-2-mini"
+    (ink / "tokenizer").mkdir(parents=True)
+    (ink / "Inkling-2-Mini-SQ-20.strata").write_bytes(b"x" * (2 << 20))
+    (ink / "tokenizer" / "tokenizer.json").write_text("{}")
+    got = mm.scan_pack_dirs(root)
+    names = {g["name"] for g in got}
+    assert names == {"hy4-flash", "inkling-2-mini"}
+    assert all(g["has_weights"] for g in got)
+    # 汎用重みとしても数える (Strata の「ダウンロード済み」判定の根拠)
+    has, _gguf = mm._dir_weights(hy4)
+    assert has is True

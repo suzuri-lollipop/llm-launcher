@@ -11,7 +11,7 @@ launcher は「表の読み出し」と「ホワイトリスト検証 + argv 組
 (strata_setup と同じ立場)。
 
   * load_options(): 純正 maya.py を submodule cwd で import する短い subprocess から
-    家系 (glm / deepseek / minimax / qwen / hy4) 別のモデル表・CONTEXTS・PC の RAM・
+    家系 (glm / deepseek / minimax / qwen / hy4 / ik2) 別のモデル表・CONTEXTS・PC の RAM・
     VRAM・GPU 一覧・データディスクの空き・エンジン実在 (build/maya 等)・家系別の推奨
     コンテキスト (純正の recommended_context / ds4_recommended_context /
     mm3_recommended_context / qwen_recommended_context そのもの。Hy4-Flash は
@@ -22,10 +22,19 @@ launcher は「表の読み出し」と「ホワイトリスト検証 + argv 組
     fits を持つ (VRAM プラン hy4_fit がサイズ別に計算する。GLM-5.3 (744B, G53_MODELS)
     も g53_contexts のモデル別 contexts)。v1.1.66+ の DeepSeek は量子化ごとに
     config が分かれる (ds4_config_path: maya-ds4.json / maya-deepseek-maya-s.json)。
+    v1.1.72+ の Inkling-2-Mini (ik2, maya-ik2 エンジン・実験的プレビュー) は
+    1 ファイルセット (unsloth UD-Q4_K_XL) で contexts / rec_context は ik2_fit
+    (このカードの VRAM に全エキスパートが収まる最大。収まらないカードは offload
+    パス = VRAM tier + pinned RAM、長いコンテキストは KV streaming でキャッシュの
+    行を RAM に置く)。v1.1.74 で trained 1M まで・Windows + NVIDIA 対応・
+    NVIDIA 2 枚まで (Linux のみ。max_gpus=2)。拒否は純正 IK2F.unsupported の
+    理由そのまま (fits=False)。--parallel は CLI 非対応のまま (同時回答数は
+    ダッシュボード Models ページが config に書く)。
   * build_argv(): 検証済みフラグのみ argv にする。family / model は読み出した表の
     キーそのもの、context はモデル別 contexts (Hy4-Flash / GLM-5.3) か家系別
     CONTEXTS の値、vision は on/off、gpus は検出した usable GPU の index 集
-    (単一カード = --gpu N、複数 = --gpus "0,1" / all = 全 usable)。
+    (単一カード = --gpu N、複数 = --gpus "0,1" / all = 全 usable。家系の上限
+    (max_gpus: ik2 = 2) 超えは拒否 — 純正 check_pc / unsupported が拒否する)。
     どれか一つでも外れたら InstallError 相当の ValueError を投げる。
     常に --yes --no-start --plain --download-model を付ける (完全非対話・起動しない・
     TUI でなくプレーンテキスト・モデルダウンロード確認なし)。
@@ -37,14 +46,15 @@ launcher は「表の読み出し」と「ホワイトリスト検証 + argv 組
     maya-ds4.json / 2 つ目以降の量子化は maya-deepseek-maya-*.json (v1.1.66+ の
     ds4_config_path)、MiniMax: maya-mm3.json / maya-minimax-maya-*.json、
     Qwen: maya-cyber-frost.json / maya-qwen-ud-iq2_xs.json、Hy4-Flash:
-    maya-hy4-flash-maya-*.json / maya-hy4-flash.json — maya_quants.config_stem)。
+    maya-hy4-flash-maya-*.json / maya-hy4-flash.json、Inkling-2-Mini:
+    maya-inkling-2-mini.json — maya_quants.config_stem)。
     ジョブ完了後の result.config はこの名前ピンポイント + mtime フォールバックで
     解決し、result.parallel は config の args の --parallel (③ の並列数既定)。
 
 ① のインストール (installer.INSTALL_SPECS["maya"]) は機械部分だけ: .venv (標準
 venv+pip — maya.sh / 純正 pip_install が -m pip を前提) → 薄い driver maya_tools.py が
 純正 tools_step() で PY_PACKAGES + llama.cpp ソースを入れる。エンジンビルドは家系ごとに
-異なる (build/maya / maya-ds4 / maya-mm3 / maya-hy4) ため ② の純正セットアップ内で
+異なる (build/maya / maya-ds4 / maya-mm3 / maya-hy4 / maya-ik2) ため ② の純正セットアップ内で
 行われる (在ればスキップされる)。
 """
 from __future__ import annotations
@@ -322,6 +332,61 @@ if hasattr(M, "HY4_QUANTS"):
                        "max_context": max(M.HY4_CONTEXTS), "multi_gpu": True, "rec": hy4_rec,
                        "model_arg": M.HY4, "quant_flag": "--hy4-quant",
                        "engine_ready": M.HY4_EXE.exists()}
+# ---- Inkling-2-Mini (v1.1.72+: maya-ik2 エンジン・実験的プレビュー。1 ファイルセット =
+# unsloth UD-Q4_K_XL)。コンテキストは ik2_fit.CONTEXTS (v1.1.74 で trained 1M まで。
+# VRAM に収まらない分は offload パス / KV streaming = キャッシュの行を RAM に置く)。
+# 推奨は recommended_context (全エキスパートが VRAM に収まる最大。RECOMMEND_MAX=262144
+# 止まり)。v1.1.74: Windows + NVIDIA 対応・NVIDIA 2 枚まで (Linux のみ。大きい方が先)。
+# 拒否は純正 IK2F.unsupported の理由そのまま (fits=False)。
+# drafter は --drafting 既定 (auto): セットアップで取得し、エンジンが初回起動時に
+# 1 回だけ計測する (⑤ の --speed-calibration は記録を消して再計測を促す)。
+# --parallel はセットアップ / 起動 CLI では非対応のまま (純正 check_parallel。
+# 同時回答数はダッシュボード Models ページの「Answers at once」が config に書く)
+if hasattr(M, "IK2"):
+    import ik2_fit as IK2F
+    ik2 = {}
+    m = guard(M.ik2_entry) or {}
+    gb = m.get("download_gb")
+    ik2_usable = [g for g in cards if int(g.get("arch") or 0) >= M.IK2_MIN_CC]
+    vram_ik2 = max([g["vram_gb"] for g in ik2_usable], default=0.0)
+    e = {"about": str(m.get("about", "")), "label": Q.shown("ik2", Q.IK2_QUANT, gb),
+         "download_gb": gb, "vision": bool(guard(M.ik2_vision_model)),
+         "experimental": True,
+         "config": (Q.config_stem("ik2", Q.IK2_QUANT) or "maya-inkling-2-mini") + ".json"}
+    d = guard(M.ik2_dir, NS, models, {})
+    files = m.get("files") or {}
+    if d and files:
+        found = [n for n, sz in files.items() if (d / n).is_file() and (d / n).stat().st_size == sz]
+        e["have"] = {"files": len(files), "found": len(found),
+                     "gb": round(sum(files[n] for n in found) / 2**30, 1)}
+    # 純正 check_pc の拒否と同じ見立て: カードが読めていない / 古すぎる / VRAM 不足 /
+    # RAM+VRAM がモデルに届かない / Mac。理由が在れば fits=False で選択不可
+    why = None
+    if not ik2_usable:
+        why = ("Inkling 2 Mini needs an NVIDIA V100 / RTX 20 or newer GPU (compute capability 7.0 or newer, "
+               "8 GB of VRAM or more)")
+    else:
+        why = guard(IK2F.unsupported, "cuda", sys.platform.startswith("win"), 0, ik2_usable, ram)
+    if why:
+        e["contexts"] = []
+        e["fits"] = False
+        e["fit_error"] = str(why)
+    else:
+        e["contexts"] = [int(c) for c in IK2F.CONTEXTS]
+        rc = guard(IK2F.recommended_context, vram_ik2, IK2F.DEFAULT_KV)
+        if rc:
+            e["rec_context"] = int(rc)
+        plan = guard(IK2F.plan, vram_ik2, e.get("rec_context") or IK2F.CONTEXTS[0], IK2F.DEFAULT_KV) or {}
+        if plan.get("layout"):
+            e["layout"] = str(plan["layout"])   # resident / offload (UI の注記用)
+        if plan.get("kv_streamed"):
+            e["kv_streamed"] = True             # キャッシュの行を RAM に置く (UI の注記用)
+    ik2[Q.IK2_QUANT] = e
+    families["ik2"] = {"title": M.IK2_SHOWN + " (experimental)", "models": ik2,
+                       "contexts": [int(c) for c in IK2F.CONTEXTS],
+                       "max_context": max(IK2F.CONTEXTS), "multi_gpu": True, "max_gpus": 2,
+                       "rec": Q.IK2_QUANT, "model_arg": M.IK2,
+                       "engine_ready": M.IK2_EXE.exists()}
 print(json.dumps({"families": families, "pc": pc}))
 """
 
@@ -432,12 +497,13 @@ def _pack_model_files(pack: Path) -> list[Path]:
 def weights_status(data: dict) -> dict:
     """maya-<model>.json が参照する重みの実在チェック。参照パターンは純正 config の形:
     --glm-pack / --pack (pack ディレクトリ + その index が指す実ファイル)、
-    --gguf / --native / --ple-gguf (GGUF。マルチシャードは兄弟も)、vision.model/mmproj、
+    --gguf / --native / --model / --ple-gguf (GGUF。マルチシャードは兄弟も。
+    --model は Inkling-2-Mini の GGUF 直読み)、vision.model/mmproj、
     tokenizer ディレクトリ。ok=None は「参照が見付からない config」= 判断しない。"""
     args = data.get("args") or []
     refs: list[Path] = []
     for i, a in enumerate(args[:-1]):
-        if str(a) in ("--glm-pack", "--pack", "--gguf", "--native", "-m", "--ple-gguf"):
+        if str(a) in ("--glm-pack", "--pack", "--gguf", "--native", "--model", "-m", "--ple-gguf"):
             p = Path(str(args[i + 1]))
             if p not in refs:
                 refs.append(p)
@@ -505,14 +571,17 @@ def config_parallel(data: dict) -> int | None:
 
 def config_family(data: dict) -> str:
     """config の家系 (maya_quants.family_of と同じ見立て): installer.family → exe 名 → args。
-    Hy4 (maya-hy4) も --pack を持つので DeepSeek より先に判定する。"""
+    Hy4 (maya-hy4) も --pack を持つので DeepSeek より先に判定する。ik2 (maya-ik2) は
+    --model (GGUF 直読み) で pack を持たない — exe / installer で判定する。"""
     inst = data.get("installer") or {}
-    if inst.get("family") in ("glm", "deepseek", "minimax", "qwen", "hy4"):
+    if inst.get("family") in ("glm", "deepseek", "minimax", "qwen", "hy4", "ik2"):
         return str(inst["family"])
     exe = Path(str(data.get("exe", ""))).name
     args = data.get("args") or []
     if exe.startswith("maya-hy4"):
         return "hy4"
+    if exe.startswith("maya-ik2"):
+        return "ik2"
     if exe.startswith("maya-mm3"):
         return "minimax"
     if "--ple-gguf" in args[:-1]:
@@ -533,6 +602,8 @@ def config_quant_key(data: dict) -> str | None:
         return str(inst.get("mm3_quant") or "exl3") if inst else None
     if fam == "hy4":
         return str(inst.get("hy4_quant") or "maya-xs") if inst else None
+    if fam == "ik2":
+        return str(inst.get("ik2_quant") or "ud-q4_k_xl") if inst else None
     if fam == "qwen":
         return str(inst.get("qwen_quant") or "q5_k_m").lower() if inst else None
     return str(inst["quant"]) if inst.get("quant") else None
@@ -638,8 +709,12 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
     argv = ["maya.py"]
     model_arg = str(fams[fam].get("model_arg") or "")
     if model_arg:
-        # DeepSeek / MiniMax / Qwen: --model は家系そのもの、ファイルは quant フラグで選ぶ
-        argv += ["--model", model_arg, str(fams[fam]["quant_flag"]), model]
+        # DeepSeek / MiniMax / Qwen / Hy4-Flash: --model は家系そのもの、ファイルは
+        # quant フラグで選ぶ。Inkling-2-Mini は quant フラグ無し (1 ファイルセット)
+        argv += ["--model", model_arg]
+        quant_flag = str(fams[fam].get("quant_flag") or "")
+        if quant_flag:
+            argv += [quant_flag, model]
     else:
         argv += ["--model", model]
     argv += ["--context", str(context)]
@@ -660,6 +735,8 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
             raise ValueError("Qwen3.8-Flash-Next は --parallel 非対応です (1 リクエストずつ回答します)")
         if fam == "hy4":
             raise ValueError("Hy4-Flash は --parallel 非対応です (1 リクエストずつ回答します)")
+        if fam == "ik2":
+            raise ValueError("Inkling 2 Mini は --parallel 非対応です (1 リクエストずつ回答します)")
         argv += ["--parallel", str(par_n)]
     # drafter (DSpark / MTP / DFly2) の速度計測はセットアップでは行わない (--drafting off)。
     # 純正 --yes 既定は計測 (measure) だが、それは 10-30 分の GPU 独占計測で、
@@ -672,15 +749,27 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
     # Hy4-Flash: MTP ブロック / DFly2 のファイル自体は (VRAM に収まるなら)  download
     # され pack に入る — ⑤ の --speed-calibration が両者の A/B を計測して速い方を
     # config に書く (純正 speed_calibration_hy4。maya_speed_wanted が対象を判定)。
+    # Inkling-2-Mini (ik2) はここに含めない: 純正既定 --drafting auto はドラフターを
+    # セットアップで取得し、計測はエンジンが初回起動時に 1 回だけ行う (~1 分・最初の
+    # 回答の前)。セットアップ中の GPU 独占計測では無いので純正既定のまま通す。
+    # ⑤ の --speed-calibration は計測記録 (data/ik2-drafting.txt) を消して次回起動時の
+    # 再計測を促す (純正 ik2_draft_forget)。Volta / Turing / offload パスでは純正が
+    # 自動的に drafting off にする (ik2_drafting / drafting_off_reason)
     if fam in ("deepseek", "minimax", "qwen", "hy4"):
         argv += ["--drafting", "off"]
     gpus = str(opts.get("gpus") or "").strip().lower()
     if gpus and gpus not in ("auto", ""):
         usable = sorted({int(g["index"]) for g in (data.get("pc") or {}).get("gpus") or []
                          if g.get("usable")})
+        multi_ok = fams[fam].get("multi_gpu", True) is not False
+        max_g = fams[fam].get("max_gpus")      # ik2: 2 枚まで (純正 unsupported が 3 枚以上を拒否)
         if gpus == "all":
+            if not multi_ok:
+                raise ValueError(f"{fams[fam].get('title', fam)} は単一 GPU 専用です (純正: one GPU only for now)")
             if len(usable) < 2:
                 raise ValueError("使える GPU が 2 枚無い環境で all は指定できません")
+            if max_g and len(usable) > max_g:
+                raise ValueError(f"{fams[fam].get('title', fam)} が使えるのは最大 {max_g} 枚です (カードを選んで指定してください)")
             argv += ["--gpus", ",".join(str(i) for i in usable)]
         else:
             try:
@@ -691,6 +780,10 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
                 raise ValueError(f"gpus が検出外の GPU を指しています: {gpus} (使える GPU: {usable})")
             if len(sel) > 16:
                 raise ValueError("Maya が分割できるのは最大 16 枚です")
+            if len(sel) > 1 and not multi_ok:
+                raise ValueError(f"{fams[fam].get('title', fam)} は単一 GPU 専用です (純正: one GPU only for now)")
+            if max_g and len(sel) > max_g:
+                raise ValueError(f"{fams[fam].get('title', fam)} が使えるのは最大 {max_g} 枚です (純正: three or more are not in it yet)")
             if len(sel) == 1:
                 argv += ["--gpu", str(sel[0])]      # 単一カード指定は純正 --gpu
             else:
