@@ -161,6 +161,11 @@
   "metavar": "PREFILL,DECODE",
   "type": "str"
  },
+ "--strict-model": {
+  "aliases": [],
+  "help": "reject requests whose 'model' is not the loaded model or an alias (also \"strict_model\": true in the config or $STRATA_STRICT_MODEL=1)",
+  "type": "bool"
+ },
  "--tokenizer": {
   "aliases": [],
   "help": "pack tokenizer directory (falls back to a byte tokenizer if absent)",

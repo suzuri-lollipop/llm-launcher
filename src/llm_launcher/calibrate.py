@@ -331,6 +331,9 @@ def build_maya_speed_command(root: Path, profile: dict[str, Any], python: str) -
     セットアップ (②) では計測しない (--drafting off) 方針なので、DSpark / MTP の
     あり/なし比較はここ (⑤) で行う。純正 maya.py は --calibrate --no-start が
     --speed-calibration より先に return 0 するため、別コマンド (別 step) で逐次実行する。
+    例外は Inkling-2-Mini: 純正既定 --drafting auto の計測はエンジンが初回起動時に
+    1 回行うもので、⑤ のこのコマンドは記録を消して次回起動時の再計測を促す
+    (maya_speed_wanted / _verify_maya_speed がその意味で扱う)。
     config が無いときは [] (step を追加しない)。"""
     cfg = maya_config_path(root, profile)
     if not cfg:
@@ -350,7 +353,10 @@ def maya_speed_wanted(cfg_path: str) -> bool:
       2-bit エキスパートのサイズ (maya-xs / maya-s) は CPU レーンの 4-bit コピー計測
       (q4x_calibration) も対象 — 純正 speed_calibration の hy4 分岐と同じ。
       setup は --drafting off でもファイルは pack に入る (計測だけ ⑤ に集約)。
-      Tencent Q4_K_M は計測対象なし (純正: no speed calibration yet)"""
+      Tencent Q4_K_M は計測対象なし (純正: no speed calibration yet)。
+      Inkling-2-Mini (v1.1.72+): --drafting auto のときだけ対象 — 純正
+      speed_calibration の ik2 分岐は計測記録 (data/ik2-drafting.txt) を消して
+      次回起動時のエンジン再計測を促す (ik2_draft_forget)。手動 on/off は対象外"""
     try:
         cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
@@ -380,6 +386,10 @@ def maya_speed_wanted(cfg_path: str) -> bool:
         if both:
             return True
         return key in ("maya-xs", "maya-s")   # q4x: IQ2_XXS エキスパートの 4-bit コピー計測
+    if fam == "ik2":
+        # --drafting auto: エンジンが初回起動時に 1 回計測する。⑤ は記録を消して
+        # 再計測を促す (純正 ik2_draft_forget)。手動 on/off は計測対象外 (純正 False)
+        return "--drafting" in args[:-1] and args[args.index("--drafting") + 1] == "auto"
     return False
 
 
@@ -646,11 +656,12 @@ class CalibrationManager:
                 cfg_doc = json.loads(Path(cfg).read_text(encoding="utf-8"))
             except (OSError, json.JSONDecodeError):
                 cfg_doc = {}
-            # Hy4-Flash (maya-hy4) の --calibrate は「何も調整しない」(エンジンが起動ごとに
-            # この PC へ CPU レーン / expert プールを合わせる — 純正 calibrate_config の hy4
-            # 分岐は installer.calibration を書かずに True を返す)。検証が失敗扱いになる
-            # no-op step は積まない
-            if maya_setup.config_family(cfg_doc) != "hy4":
+            # Hy4-Flash (maya-hy4) / Inkling-2-Mini (maya-ik2) の --calibrate は
+            # 「何も調整しない」(hy4: エンジンが起動ごとにこの PC へ CPU レーン /
+            # expert プールを合わせる。ik2: 全エキスパートが VRAM に載る構成で
+            # 調整対象なし — 純正 calibrate_config の各分岐は installer.calibration
+            # を書かずに True を返す)。検証が失敗扱いになる no-op step は積まない
+            if maya_setup.config_family(cfg_doc) not in ("hy4", "ik2"):
                 steps.append(
                     # verify: Maya は失敗しても exit 0 なので、調整が実際に config へ書かれたかを後で確認する
                     {"name": "calibrate", "argv": build_maya_command(self.root, profile, python),
@@ -666,9 +677,10 @@ class CalibrationManager:
                               "cwd": str(module_dir), "verify": cfg})
             if not steps:
                 raise CalibrateError(
-                    "この Maya モデルに調整対象がありません (Hy4-Flash はエンジンが起動ごとに"
-                    "この PC へ合わせます。drafter の速度計測対象も無い構成です — "
-                    "MTP ブロックと DFly2 の両方が pack に入るサイズ / 2-bit サイズが対象)")
+                    "この Maya モデルに調整対象がありません (Hy4-Flash / Inkling 2 Mini は"
+                    "エンジンが起動ごとにこの PC へ合わせます。drafter の速度計測対象も無い構成です — "
+                    "MTP ブロックと DFly2 の両方が pack に入るサイズ / 2-bit サイズ / "
+                    "Inkling 2 Mini の --drafting auto が対象)")
         elif kind == "freetoken":
             cfg = ""
             try:
@@ -703,6 +715,19 @@ class CalibrationManager:
             if not cfg:
                 raise CalibrateError("Strata の config (strata-<model>.json) をプロファイルの --config に"
                                      "指定してください (ファイルが存在しません)")
+            # 0.2.19+ の独自エンジン家系 (strata-hy4 / strata-inkling): 純正 tune は
+            # 「調整不要」で拒否する (HY4_NO_TUNING / INKLING_NO_TUNING — 速度とメモリ
+            # 配置はエンジンが起動ごとに自動で決める)。15-30 分の計測ジョブを起こす前に
+            # 正直に断る (Maya の hy4 / ik2 no-op スキップと同じ立場)
+            try:
+                cfg_doc = json.loads(Path(cfg).read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                cfg_doc = {}
+            no_tune = strata_setup.NO_TUNING_ARCHS.get(str((cfg_doc or {}).get("arch") or ""))
+            if no_tune:
+                raise CalibrateError(
+                    f"{no_tune} は調整不要です (エンジンが起動ごとに速度とメモリ配置を"
+                    "この PC へ自動で合わせます — 純正: needs no tuning)。キャリブレーションはスキップしてください")
             name = strata_profile_name(profile)
             try:
                 existing = await self._strata_profiles(python, module_dir)
@@ -1893,7 +1918,9 @@ def _verify_maya_speed(job: dict[str, Any], cfg_path: str) -> tuple[str, dict[st
     Hy4 の MTP vs DFly2 A/B) または installer.mtp_calibration (Qwen) の計測記録 —
     skipped (選択のみ) / failed は失敗扱い。Hy4-Flash の 2-bit サイズは CPU レーンの
     4-bit コピー計測 (installer.q4x_calibration: result on/off/n/a) も成功の証拠
-    (n/a = この PC に判定対象なし = 純正の正常終了。unmeasured は失敗)。"""
+    (n/a = この PC に判定対象なし = 純正の正常終了。unmeasured は失敗)。
+    Inkling-2-Mini (--drafting auto) は config に記録を書かない — ログの
+    「measured again at the next start」(次回起動時のエンジン再計測) が証拠。"""
     try:
         cfg = json.loads(Path(cfg_path).read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as e:
@@ -1910,6 +1937,14 @@ def _verify_maya_speed(job: dict[str, Any], cfg_path: str) -> tuple[str, dict[st
         q4x = inst.get("q4x_calibration")
         if isinstance(q4x, dict) and q4x.get("date") and q4x.get("result") in ("on", "off", "n/a"):
             return "", q4x
+    if fam == "ik2":
+        # Inkling-2-Mini の --speed-calibration (--drafting auto) は config に記録を
+        # 書かない: 計測記録 (data/ik2-drafting.txt) を消して「次回起動時にエンジンが
+        # 再計測」が成功の証拠 (純正 ik2_draft_forget + ok の行)。手動 on/off の
+        # "no speed calibration" は下の失敗キーワードが拾う
+        for line in reversed((job.get("logs") or [])[-40:]):
+            if "measured again at the next start" in line.lower():
+                return "", {"kept": "auto", "engine_start": True}
     lines = (job.get("logs") or [])[-40:]
     for line in reversed(lines):
         low = line.lower()

@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -331,9 +332,29 @@ FAKE_TABLES = {
         "qwen": {"title": "Qwen3.8-Flash-Next", "about": "", "tag": "", "multi_gpu": True,
                  "models": {"Q2_0": {"about": "", "label": "", "download_gb": 66.4,
                                      "ram_gb": 48, "vision": False}}},
-        "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "", "tag": "qwen36-", "multi_gpu": False,
+        "qwen36": {"title": "Qwen3.6-35B-A3B", "about": "", "tag": "qwen36-",
+                   "arch": "qwen35moe", "multi_gpu": False,
                    "models": {"UD-Q4_K_XL": {"about": "", "label": "", "download_gb": None,
                                              "ram_gb": 32, "vision": False}}},
+        "hy4-flash": {"title": "Tencent Hy4-Flash", "about": "", "tag": "hy4-flash-",
+                      "arch": "hy4flash", "multi_gpu": False,
+                      "contexts": [8192, 32768, 65536, 131072], "max_context": 131072,
+                      "models": {"SQ-64": {"about": "", "label": "", "download_gb": 130.5,
+                                           "ram_gb": 62, "vision": True, "rec_context": 131072}}},
+        "inkling-2-mini": {"title": "Inkling-2-Mini", "about": "", "tag": "inkling-2-mini-",
+                           "arch": "inkling2_loop", "multi_gpu": True,
+                           "contexts": [8192, 32768, 65536, 131072, 262144, 524288, 1048576],
+                           "max_context": 1048576,
+                           "models": {"SQ-20": {"about": "", "label": "", "download_gb": 20.0,
+                                                "ram_gb": 20, "vision": True, "rec_context": 32768,
+                                                "format": "strata"},
+                                      "SQ-15": {"about": "", "label": "", "download_gb": 15.0,
+                                                "ram_gb": 15, "vision": True, "rec_context": 32768,
+                                                "format": "strata"},
+                                      "UD-IQ4_XS": {"about": "", "label": "", "download_gb": 15.7,
+                                                    "ram_gb": 16, "vision": True, "rec_context": 32768,
+                                                    "format": "gguf",
+                                                    "drafter_off_reason": "エンジン 0.1.66 の GGUF + DSpark は upstream バグのため drafter なし"}}},
         "deepseek41": {"title": "DeepSeek-V4.1-Flash", "about": "",
                        "tag": "deepseek-v4.1-flash-", "multi_gpu": True,
                        "models": {"IST-DAS-2.00bpw": {"about": "", "label": "ISTA-DAS 2.00 bpw",
@@ -453,6 +474,62 @@ def test_build_argv_against_real_submodule():
         with pytest.raises(ValueError):
             strata_setup.build_argv(mod, {"family": "qwen36",
                                           "model": next(iter(q36["models"])), "context": 524288})
+    # 0.2.19+ の独自エンジン家系: Hy4-Flash (単一 GPU・8K-128K) / Inkling-2-Mini
+    # (1M まで・NVIDIA 2 枚 EP)。コンテキスト / 推奨は strata_control の家系定義そのまま
+    fams = opts.get("families") or {}
+    hy4 = fams.get("hy4-flash") or {}
+    if hy4:
+        assert hy4.get("arch") == "hy4flash"
+        assert hy4.get("multi_gpu") is False
+        assert hy4.get("contexts") == [8192, 32768, 65536, 131072]
+        assert hy4.get("tag") == "hy4-flash-"
+        for m, d in hy4["models"].items():
+            assert d.get("rec_context") == 131072, m
+            assert d.get("vision") is True, m
+            assert d.get("download_gb") and d["download_gb"] > 60, m   # build + Engram + Vision
+        argv, cfg = strata_setup.build_argv(mod, {"family": "hy4-flash", "model": "SQ-64",
+                                                  "context": 131072, "vision": "no"})
+        assert argv[:4] == ["setup.py", "--family", "hy4-flash", "--model"]
+        assert cfg == "strata-hy4-flash-sq-64.json"
+        with pytest.raises(ValueError):
+            strata_setup.build_argv(mod, {"family": "hy4-flash", "model": "SQ-64", "context": 262144})
+    ink = fams.get("inkling-2-mini") or {}
+    if ink:
+        assert ink.get("arch") == "inkling2_loop"
+        # 0.2.20+ は複数 GPU (CUDA 2〜4 枚 EP / layer-split) が修正済み — 単一 GPU 回避は撤去
+        assert ink.get("multi_gpu") is True
+        assert "force_single_gpu" not in ink
+        assert 1048576 in ink.get("contexts") or []
+        # 0.2.20+ は Unsloth GGUF ビルドも同じ家系表に乗る (DSpark GGUF 同伴)
+        assert "UD-Q4_K_XL" in ink["models"]
+        for m, d in ink["models"].items():
+            assert d.get("vision") is True, m
+            assert d.get("rec_context") == 32768, m
+            assert d.get("download_gb") and d["download_gb"] > 0, m
+        argv, cfg = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
+                                                  "context": 1048576})
+        assert cfg == "strata-inkling-2-mini-sq-20.json"
+        assert argv[argv.index("--context") + 1] == "1048576"
+        assert "--drafter" not in argv      # ネイティブ SQ は埋め込み DSpark がそのまま動く
+        with pytest.raises(ValueError):
+            strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-99", "context": 32768})
+        # エンジン 0.1.66 の GGUF + DSpark upstream バグ (テンソル名不一致) 回避:
+        # GGUF ビルドは --drafter off で drafter なし構成にする
+        assert ink["models"]["UD-IQ4_XS"].get("drafter_off_reason")
+        argv, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "UD-IQ4_XS",
+                                                "context": 32768})
+        assert argv[argv.index("--drafter") + 1] == "off"
+    # 組み立てたフラグは全て純正 setup.py の argparse に実在する
+    src = (strata_setup.setup_dir(mod) / "setup.py").read_text(encoding="utf-8")
+    known = set(re.findall(r'add_argument\("(--[a-z0-9-]+)"', src))
+    for fam, model in (("hy4-flash", "SQ-64"), ("inkling-2-mini", "SQ-10"),
+                       ("inkling-2-mini", "UD-IQ4_XS")):
+        if fam not in fams:
+            continue
+        av, _ = strata_setup.build_argv(mod, {"family": fam, "model": model, "context": 32768})
+        for x in av[1:]:
+            if x.startswith("--"):
+                assert x in known, x
     assert isinstance(opts.get("pc", {}).get("gpus"), list)
     m = next(iter((q.get("models") or {}).values()), {})
     if "rec_context" in m:
@@ -694,3 +771,229 @@ def test_strata_model_api_lists_installed_configs(tmp_path: Path, monkeypatch: p
     assert body["configs"][0]["model_name"] == "qwen3.8-flash-next-q2_0"
     # parallel は ③ の既定になる (config 無し = None → UI は 1 に倒す)
     assert body["configs"][0]["parallel"] == 4
+
+
+# ---------------------------------------------------------------- 0.2.19+ 独自エンジン家系 (Hy4-Flash / Inkling-2-Mini)
+
+def test_build_argv_hy4_inkling(monkeypatch, tmp_path: Path):
+    """Hy4-Flash: 単一 GPU 宣言 (複数指定は拒否)・コンテキストは純正メニュー 8K-128K。
+    Inkling-2-Mini: 1M まで (up to 1M supported)。0.2.20+ は複数 GPU (CUDA 2〜4 枚の
+    EP / layer-split) が純正どおり通る (0.2.19 の install_inkling2 バグは修正済み)。
+    config 名は strata-<tag+model>.json 作法。"""
+    mod = tmp_path / "module" / "strata"
+    (mod / ".venv" / "bin").mkdir(parents=True)
+    (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
+    mod = _seed_tables(monkeypatch, mod)
+    argv, cfg = strata_setup.build_argv(mod, {"family": "hy4-flash", "model": "SQ-64",
+                                              "context": 131072, "vision": "no"})
+    assert argv == ["setup.py", "--family", "hy4-flash", "--model", "SQ-64",
+                    "--context", "131072", "--vision", "no",
+                    "--yes", "--no-start", "--no-browser"]
+    assert cfg == "strata-hy4-flash-sq-64.json"
+    # vision "" = 渡さない = 純正既定 ON (両家系とも画像既定 ON)。
+    # inkling は GPU 未指定ならフラグ無し (純正の推奨構成にまかせる)
+    argv2, cfg2 = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
+                                                "context": 1048576})
+    assert "--vision" not in argv2
+    assert "--gpu" not in argv2 and "--gpus" not in argv2
+    assert cfg2 == "strata-inkling-2-mini-sq-20.json"
+    # 単一カード指定は両家系とも可
+    argv3, _ = strata_setup.build_argv(mod, {"family": "hy4-flash", "model": "SQ-64",
+                                             "context": 8192, "gpus": "1"})
+    assert argv3[argv3.index("--gpu") + 1] == "1"
+    # Inkling は 2 枚 EP / all が純正どおり通る (0.2.20+)
+    argv4, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-15",
+                                             "context": 32768, "gpus": "0,1"})
+    assert argv4[argv4.index("--gpus") + 1] == "0,1"
+    argv5, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-15",
+                                             "context": 32768, "gpus": "all"})
+    assert argv5[argv5.index("--gpus") + 1] == "all"
+    for bad in ({"family": "hy4-flash", "model": "SQ-64", "context": 262144},   # 純正メニュー外
+                {"family": "hy4-flash", "model": "SQ-64", "context": 131072, "gpus": "0,1"},
+                {"family": "hy4-flash", "model": "SQ-64", "context": 131072, "gpus": "all"},
+                {"family": "hy4-flash", "model": "SQ-99", "context": 131072},
+                {"family": "inkling-2-mini", "model": "SQ-20", "context": 204800},  # 一覧外
+                {"family": "inkling-2-mini", "model": "SQ-64", "context": 32768}):  # 家系違いの size
+        with pytest.raises(ValueError):
+            strata_setup.build_argv(mod, bad)
+
+
+def test_build_argv_inkling_gguf_drafter_off(monkeypatch, tmp_path: Path):
+    """エンジン 0.1.66 の GGUF + DSpark drafter は upstream バグ (テンソル名不一致:
+    GGUF ローダーの変換名 layers.N.* に dspark. プレフィックスが無く CUDA ランタイムの
+    検索 dspark.layers.N.* と不一致 → missing tensor で exit 2)。launcher は GGUF
+    ビルドに純正 --drafter off を渡して drafter なし構成で起動する。
+    ネイティブ SQ ビルド (埋め込み DSpark) は対象外。"""
+    mod = tmp_path / "module" / "strata"
+    (mod / ".venv" / "bin").mkdir(parents=True)
+    (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
+    mod = _seed_tables(monkeypatch, mod)
+    argv, cfg = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "UD-IQ4_XS",
+                                              "context": 32768})
+    assert argv[argv.index("--drafter") + 1] == "off"
+    assert cfg == "strata-inkling-2-mini-ud-iq4_xs.json"
+    argv2, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
+                                             "context": 32768})
+    assert "--drafter" not in argv2
+
+
+def test_build_argv_model_contexts_whitelist(monkeypatch, tmp_path: Path):
+    """モデル別 contexts が在れば家系一覧より優先して検証する (maya と同じ契約)。
+    fits=False (この PC では起動できない) は context 関係なく拒否。
+    0.2.19 では Inkling の VRAM 上限に使っていた機構 — 0.2.20 で upstream が
+    Host KV Offload により再設計したため Inkling は家系一覧に戻したが、
+    機構自体は表がモデル別 contexts を持つ限り有効。"""
+    mod = tmp_path / "module" / "strata"
+    (mod / ".venv" / "bin").mkdir(parents=True)
+    (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
+    mod = _seed_tables(monkeypatch, mod)
+    tables = strata_setup._CACHE[str(mod)][1]
+    ink = tables["families"]["inkling-2-mini"]["models"]
+    ink["SQ-20"]["contexts"] = [8192, 32768, 65536]   # 表がモデル別一覧を持つ場合
+    ink["SQ-20"]["rec_context"] = 32768
+    ink["SQ-15"]["contexts"] = []
+    ink["SQ-15"]["fits"] = False
+    ink["SQ-15"]["fit_error"] = "この PC の VRAM では起動できません"
+    argv, _ = strata_setup.build_argv(mod, {"family": "inkling-2-mini", "model": "SQ-20",
+                                            "context": 65536})
+    assert argv[argv.index("--context") + 1] == "65536"
+    for bad in ({"family": "inkling-2-mini", "model": "SQ-20", "context": 262144},  # 家系一覧には在るがモデル別外
+                {"family": "inkling-2-mini", "model": "SQ-20", "context": 131072},
+                {"family": "inkling-2-mini", "model": "SQ-15", "context": 8192}):   # fits=False
+        with pytest.raises(ValueError):
+            strata_setup.build_argv(mod, bad)
+
+
+def test_weights_status_strata_native(tmp_path: Path):
+    """0.2.19+ の .strata ネイティブ重み: --native / --engram / --vision の引数が
+    参照するファイルの実在を検証する (Engram / Vision 欠損も ok=False)。"""
+    wdir = tmp_path / "models" / "hy4-flash"
+    wdir.mkdir(parents=True)
+    build = wdir / "Hy4-Flash-SQ-64.strata"
+    engram = wdir / "Hy4-Flash-Engram-Q8.strata"
+    vision = wdir / "Hy4-Flash-Vision.strata"
+    for f in (build, engram, vision):
+        f.write_bytes(b"x" * 2048)
+    tok = tmp_path / "tok"
+    tok.mkdir()
+    doc = {"exe": "/x/strata-hy4", "arch": "hy4flash",
+           "args": ["--native", str(build), "--engram", str(engram),
+                    "--max-context", "131072", "--vision", str(vision)],
+           "tokenizer": str(tok)}
+    w = strata_setup.weights_status(doc)
+    assert w["ok"] is True and w["size_gb"] is not None
+    engram.unlink()
+    w = strata_setup.weights_status(doc)
+    assert w["ok"] is False and "Hy4-Flash-Engram-Q8.strata" in w["missing"]
+    # Inkling-2-Mini: --native + --vision (Vision shard)
+    idir = tmp_path / "models" / "inkling-2-mini"
+    idir.mkdir(parents=True)
+    ib = idir / "Inkling-2-Mini-SQ-20.strata"
+    iv = idir / "Inkling-2-Mini-Vision.strata"
+    ib.write_bytes(b"x" * 2048)
+    iv.write_bytes(b"x" * 1024)
+    idoc = {"exe": "/x/strata-inkling", "arch": "inkling2_loop",
+            "args": ["--native", str(ib), "--max-context", "32768", "--vision", str(iv)],
+            "tokenizer": str(tok), "parallel": 1}
+    assert strata_setup.weights_status(idoc)["ok"] is True
+    iv.unlink()
+    assert strata_setup.weights_status(idoc)["ok"] is False
+    # 0.2.20+ の Unsloth GGUF ビルド: --dspark <file> (同伴 drafter GGUF) も参照。
+    # --ssd-experts は値なしフラグなので参照にしない
+    gd = idir / "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+    ds = idir / "dspark-Inkling-2-Mini-Q8_0.gguf"
+    gd.write_bytes(b"x" * 2048)
+    ds.write_bytes(b"x" * 1024)
+    gdoc = {"exe": "/x/strata-inkling", "arch": "inkling2_loop",
+            "args": ["--native", str(gd), "--max-context", "32768", "--dspark", str(ds),
+                     "--ssd-experts", "--vision", str(iv)],
+            "tokenizer": str(tok)}
+    iv.write_bytes(b"x" * 1024)
+    assert strata_setup.weights_status(gdoc)["ok"] is True
+    ds.unlink()
+    w = strata_setup.weights_status(gdoc)
+    assert w["ok"] is False and "dspark-Inkling-2-Mini-Q8_0.gguf" in w["missing"]
+    assert "--ssd-experts" not in " ".join(w["missing"])
+
+
+def test_weights_status_boolean_vision_flag_not_a_ref(tmp_path: Path):
+    """Flash-Next 系の --vision は値なしのブールフラグ (次は別のフラグ) —
+    重み参照として扱わない (Hy4-Flash / Inkling-2-Mini の --vision <file> との出し分け)。
+    実 config (strata-nvfp4-*.json) で次が --vram-reserve-mib だった回帰。"""
+    g = tmp_path / "q.gguf"
+    g.write_bytes(b"x" * 2048)
+    doc = {"exe": "/x/strata",
+           "args": ["--native", str(g), "--vision", "--vram-reserve-mib", "700"]}
+    w = strata_setup.weights_status(doc)
+    assert w["ok"] is True
+    assert "--vram-reserve-mib" not in " ".join(w["missing"])
+
+
+def test_config_family_arch_and_no_tuning():
+    """家系判定は表の arch が単一の源 (Flash-Next 系は arch 無し = None)。
+    NO_TUNING_ARCHS は純正 tune_commands の HY4_NO_TUNING / INKLING_NO_TUNING 対応。"""
+    fams = FAKE_TABLES["families"]
+    assert strata_setup.config_family({"arch": "hy4flash"}, fams) == "hy4-flash"
+    assert strata_setup.config_family({"arch": "inkling2_loop"}, fams) == "inkling-2-mini"
+    assert strata_setup.config_family({"arch": "qwen35moe"}, fams) == "qwen36"
+    assert strata_setup.config_family({"args": ["--native", "/x.gguf"]}, fams) is None
+    assert strata_setup.config_family({}, fams) is None
+    assert set(strata_setup.NO_TUNING_ARCHS) == {"hy4flash", "inkling2_loop"}
+
+
+def test_strata_config_args_family_kv_guard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """③ config-args: 家系 (arch) と --kv 編集可否を返す。--kv は Flash-Next 系だけ
+    (own-path / Hy4-Flash / Inkling-2-Mini はエンジン固有 — 書き込みは 400)。"""
+    from fastapi.testclient import TestClient
+
+    from llm_launcher import app as app_mod
+    from llm_launcher import strata_setup as ss
+
+    mod = tmp_path / "module" / "strata"
+    mod.mkdir(parents=True)
+    (mod / "setup.py").write_text("# fake\n", encoding="utf-8")
+    (mod / "strata-hy4-flash-sq-64.json").write_text(json.dumps({
+        "exe": "/x/strata-hy4", "arch": "hy4flash",
+        "args": ["--native", "/m/Hy4-Flash-SQ-64.strata", "--max-context", "131072"]}),
+        encoding="utf-8")
+    (mod / "strata-q2_0.json").write_text(json.dumps({
+        "exe": "/x/strata", "args": ["--native", "/m/q.gguf", "--max-context", "131072"]}),
+        encoding="utf-8")
+    tables = (time.monotonic(), dict(FAKE_TABLES))
+    monkeypatch.setattr(ss, "_CACHE", {str(mod): tables, str(mod.resolve()): tables})
+    client = TestClient(app_mod.create_app(tmp_path))
+
+    def prof(cfg: str) -> str:
+        r = client.post("/api/profiles", json={"name": "t", "backend": "strata",
+                                               "values": {"config": cfg, "engine": "strata"}})
+        assert r.status_code in (200, 201), r.text
+        return r.json()["id"]
+
+    pid = prof("module/strata/strata-hy4-flash-sq-64.json")
+    r = client.get(f"/api/profiles/{pid}/config-args").json()
+    assert r["family"] == "hy4-flash" and r["kv_ok"] is False
+    assert client.post(f"/api/profiles/{pid}/config-args",
+                       json={"updates": {"--kv": "int8"}}).status_code == 400
+    assert client.post(f"/api/profiles/{pid}/config-args",
+                       json={"updates": {"--max-context": "65536"}}).status_code == 200
+    # Flash-Next 系 (arch 無し) は --kv 編集可のまま
+    pid2 = prof("module/strata/strata-q2_0.json")
+    r2 = client.get(f"/api/profiles/{pid2}/config-args").json()
+    assert r2["family"] is None and r2["kv_ok"] is True
+    assert client.post(f"/api/profiles/{pid2}/config-args",
+                       json={"updates": {"--kv": "int8"}}).status_code == 200
+
+
+def test_wizard_strata_new_families_ui_wiring():
+    """③ の UI 配線: Strata の --kv は arch 持ち家系で出し分かれ、Hy4-Flash は
+    並列数の質問を出さない。⑤ は調整不要の案内を出す。"""
+    import llm_launcher
+
+    js = (Path(llm_launcher.__file__).parent / "static" / "setup.js").read_text("utf-8")
+    assert 'if (W.backend === "strata" && W.cfgArgs.family) {' in js
+    assert 'if (W.cfgArgs.family === "hy4-flash") delete cfg.par;' in js
+    assert "|| W.tableReq.family === \"qwen\") : !fam.arch," in js
+    assert '/^strata-(hy4-flash|inkling-2-mini)/.test(cn)' in js
+    assert 'W.mdStFam === "inkling-2-mini"' in js   # ② Host KV Offload / 複数 GPU の注記
+    assert "Host KV Offload" in js
+    assert "d.drafter_off_reason" in js             # GGUF + DSpark upstream バグの警告

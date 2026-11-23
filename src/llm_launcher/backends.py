@@ -549,6 +549,10 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
     """Strata (https://github.com/Niko1221/Strata) — MoE エキスパートを RAM/SSD に階層化して
     consumer GPU で大型モデルを動かすエンジン + OpenAI/Anthropic 互換サーバー。
 
+    0.2.19+ は Qwen3.8-Flash-Next 系に加えて Hy4-Flash (strata-hy4) /
+    Inkling-2-Mini (strata-inkling) の独自エンジン家系をセットアップが提供する
+    (.strata ネイティブ重み。起動は同じ serve/server.py が config の arch で振り分け)。
+
     起動するのはリポジトリ直下の serve/server.py (Python) で、モデル本体の設定
     (GGUF・コンテキスト長・MTP など) は serve 層の CLI ではなく setup.py が生成する
     strata-<model>.json の "args" 配列に入る。よって GUI から出すのはサーバープロセスの
@@ -636,7 +640,8 @@ def build_strata(bid: str = "strata") -> dict[str, Any]:
 def build_maya() -> dict[str, Any]:
     """Project Maya (https://github.com/mw00/project-maya) — GLM-5.3-Flash (321B MoE) /
     GLM-5.3 (744B) / DeepSeek-V4.1-Flash / MiniMax-M3.1-Flash / Qwen3.8-Flash-Next /
-    Hy4-Flash (Tencent 220B, v1.1.68+) を VRAM/RAM/SSD の階層キャッシュでローカル実行する
+    Hy4-Flash (Tencent 220B, v1.1.68+) / Inkling-2-Mini (thinkingmachines 26B,
+    v1.1.72+・実験的プレビュー) を VRAM/RAM/SSD の階層キャッシュでローカル実行する
     エンジン + OpenAI/Anthropic 互換サーバー + ダッシュボード (Strata 系)。
 
     起動の入口はリポジトリ直下の maya.py (セットアップ+起動ラッパ)。既定コマンドは
@@ -656,12 +661,14 @@ def build_maya() -> dict[str, Any]:
           help="nvidia-smi の番号。空 = config の gpu"),
         F("--gpus", "GPU 分割 (層分散 / tensor parallel)", section="parallel", placeholder="0,1 / 0,1,2,3",
           help="この起動だけ対象のカードを変える。空 = config の gpu。GLM / Qwen / MiniMax GGUF は層分散、"
-               "DeepSeek / MiniMax EXL3 は --tp、Hy4-Flash は --tp auto (最大の同一 GPU グループで tensor parallel)",
+               "DeepSeek / MiniMax EXL3 は --tp、Hy4-Flash は --tp auto (最大の同一 GPU グループで tensor parallel)。"
+               "Inkling 2 Mini は最大 2 枚 (Linux。エキスパート分割)",
         ),
         F("--parallel", "同時リクエスト数 (1-8)", section="parallel", placeholder="1",
           help="指定すると config に保存される。1 枚で複数リクエストをまとめてデコードし総スループット向上。"
                "1 リクエスト増えるごとに VRAM のコンテキスト分だけ expert キャッシュが減る。"
-               "Qwen / Hy4-Flash は非対応 (1 リクエストずつ回答)"),
+               "Qwen / Hy4-Flash は非対応 (1 リクエストずつ回答)。Inkling 2 Mini は CLI 非対応 — "
+               "ダッシュボードの Models ページ (Answers at once) で設定します"),
         F("--vram-reserve-mib", "GPU ごとの空き VRAM 確保 (MiB)", section="sched", placeholder="700",
           help="ドライバ・デスクトップ等向けの余白。指定すると config に保存される"),
         F("--calibrate", "起動前にこの PC 向け調整 (~10-15分)", section="sched",
@@ -957,7 +964,8 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "repo": "https://github.com/mw00/project-maya",
         "module_path": "module/maya", "kind": "python",
         "desc": "GLM-5.3-Flash (321B MoE) / GLM-5.3 (744B) / DeepSeek-V4.1-Flash / MiniMax-M3.1-Flash / "
-                "Qwen3.8-Flash-Next / Hy4-Flash (Tencent 220B) を VRAM/RAM/SSD 階層キャッシュでローカル実行する"
+                "Qwen3.8-Flash-Next / Hy4-Flash (Tencent 220B) / Inkling-2-Mini (thinkingmachines 26B・"
+                "実験的プレビュー) を VRAM/RAM/SSD 階層キャッシュでローカル実行する"
                 "エンジン (OpenAI/Anthropic 互換 + ダッシュボード)。セットアップは WebUI のセットアップタブ / "
                 "初回ウィザードで完結 (家系・サイズ・コンテキスト選択 → 純正 maya.py がエンジンビルドと"
                 "モデルダウンロードまで実行)。手動なら module/maya で ./maya.sh。",
