@@ -138,9 +138,15 @@ function hfPickerHtml(f) {
     if (bid === "basalt") {
       for (const g of (m.basalt || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
     } else if (bid === "llamacpp") {
-      for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name} (${fmtSize(g.size)})`});
+      for (const g of (m.gguf || [])) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name}${g.parts > 1 ? ` (分割 ${g.parts} ファイル)` : ""} (${fmtSize(g.size)})`});
       if (!(m.gguf || []).length && m.has_weights !== false)
         opts.push({v: m.snapshot, label: `${tag}${m.repo_id} · (ggufなし・ディレクトリ指定)`});
+    } else if ((bid === "freetoken" || bid === "freetoken-fork") && (m.gguf || []).length) {
+      /* FreeToken 系も GGUF はファイル指定 (--model-path <file.gguf>)。
+         snapshot DIR を渡すと config.json を探して起動が落ちる。
+         safetensors 等が併存する repo は DIR 指定も残す */
+      for (const g of m.gguf) opts.push({v: `${m.snapshot}/${g.name}`, label: `${tag}${m.repo_id} · ${g.name}${g.parts > 1 ? ` (分割 ${g.parts} ファイル)` : ""} (${fmtSize(g.size)})`});
+      if (m.dir_weights) opts.push({v: m.snapshot, label: `${tag}${m.repo_id} · (ディレクトリ指定 / safetensors 等)`});
     } else {
       // 他 (vLLM / SGLang / FreeToken 系) は汎用重みのある DIR だけ。
       // .basalt pack は basalt 専用 (has_weights に含まれない) なのでここには出さない

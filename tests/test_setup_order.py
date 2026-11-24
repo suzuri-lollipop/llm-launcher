@@ -8,7 +8,7 @@
 SECTION_ORDER (FreeToken のセットアップ基準) で全バックエンドを統一する。
 
 セットアップウィザード (/setup) の ③ 稼働設定も同じ基準で揃える:
-  - 質問順は ctx → out → kv → tp → par → vis の固定順 (定義側の並びに依存しない)
+  - 質問順は ctx → out → kv → moe → ple → tp → par → vis の固定順 (定義側の並びに依存しない)
   - freetoken (upstream) の RUNCFG 欠落で ③④ が丸ごとスキップされ、
     プロファイルが作られない状態を fork と同じ導線に直す
 """
@@ -80,8 +80,8 @@ def test_sections_ja_covers_the_canonical_order():
 
 def test_wizard_question_order_is_fixed():
     """描画 / 補足 / 保存の 3 ループとも同じ固定順 (FreeToken 基準の
-    ctx → out → kv → tp → par → vis)。定義オブジェクトの並び順には依存しない。"""
-    assert WIZARD_JS.count('for (const id of ["ctx", "out", "kv", "tp", "par", "vis"])') == 3
+    ctx → out → kv → moe → ple → tp → par → vis)。定義オブジェクトの並び順には依存しない。"""
+    assert WIZARD_JS.count('for (const id of ["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"])') == 3
 
 
 def test_wizard_covers_every_installable_backend():
@@ -137,6 +137,47 @@ def test_wizard_freetoken_matches_the_fork_flow():
     assert "kv_cache_dtype" not in up_keys
     assert "--kv-cache-dtype" not in tbl
     assert "kv_cache_dtype" in fork_keys
+
+
+def test_wizard_fork_asks_expert_and_ple_placement():
+    """fork の ③ はエキスパート配置 (--moe-strategy) と PLE 配置 (--ple-backend) を聞く。
+    選択肢はエンジン正表に実在する値だけ (gpu は fork 独自の PLE VRAM 常駐)。
+    upstream はこの 2 問を出さない (fork の VRAM 常駐 PLE を持たないため)。"""
+    fork = _runcfg_block("freetoken-fork")
+    assert 'key: "moe_strategy"' in fork
+    assert 'key: "ple_backend"' in fork
+    # KV の後 / GPU 分割の前に置く (メモリ配置の質問はひとまとまり)
+    assert fork.index('key: "kv_cache_dtype"') < fork.index('key: "moe_strategy"') \
+        < fork.index('key: "ple_backend"') < fork.index('key: "tp_size"')
+    tbl = load_table("freetoken-fork")
+    for const, flag, want in (("CF_MOE_FT", "--moe-strategy", ["auto", "offload", "fused"]),
+                              ("CF_PLE_FT", "--ple-backend", ["disk", "pinned", "gpu"])):
+        m = re.search(r'const %s = \[(.*?)\];' % const, WIZARD_JS, re.S)
+        assert m, f"{const} が無い"
+        vals = re.findall(r'\["(\w+)"', m.group(1))
+        assert vals == want
+        assert set(vals) <= set(tbl[flag]["choices"]), flag
+    up = _runcfg_block("freetoken")
+    assert 'key: "moe_strategy"' not in up and 'key: "ple_backend"' not in up
+
+
+def test_wizard_fork_hides_ple_for_non_ple_models_and_names_quant():
+    """PLE 非搭載と判明しているモデル (Inkling 等) には PLE 配置を聞かない (表に無い
+    不明 repo は保守側に残す)。GGUF はプロファイル名既定を選択ファイル単位にする
+    (全量子化が 1 repo にまとまるため。basename から .gguf を除く)。"""
+    assert "if (W.ftModel.known && !W.ftModel.ple) delete cfg.ple;" in WIZARD_JS
+    assert "W.ftModel = ftModelInfo(W.dlReq, W.job, W.mdList" in WIZARD_JS
+    # ファイル単位の命名 (DL 選択 / 済みスナップショット)
+    assert "gguf = ggufBase(g.name)" in WIZARD_JS
+    assert "allow_patterns: pats, gguf," in WIZARD_JS
+    assert 'return String(W.dlReq.gguf || "") || String(W.dlReq.repo_id).split("/").pop();' in WIZARD_JS
+    # 済み一覧は GGUF をファイル単位に展開済み (ggufFile 持ち) — 名前は選択ファイル自身から。
+    # repo 全体の gguf 一覧を見ると複数量子化で一意判定に失敗する (2026-11-24 報告の実害)
+    assert 'const gguf = m.ggufFile ? ggufBase(m.snapshot) : (bs.length === 1 ? bs[0] : "");' in WIZARD_JS
+    assert "const bs = ggufTextBases(m.gguf);" in WIZARD_JS
+    assert 'gguf: bs.length === 1 ? bs[0] : ""' not in WIZARD_JS
+    # drafter sidecar はモデル択に出さない
+    assert '.filter(g => !/^(dspark|mtp)-/i.test(String(g.name).split("/").pop()))' in WIZARD_JS
 
 
 # ---------------------------------------------------------------- ダウンロード択の取得済みガード

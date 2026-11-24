@@ -184,6 +184,10 @@
       <label for="md-strata-exist">ダウンロード済みのモデル</label></div>
     <div class="field sel-fixed" id="md-dl-field"><select id="md-sel"></select>
       <label for="md-sel">ダウンロードするモデル</label></div>
+    <div class="field sel-fixed hidden" id="md-gguf-field"><select id="md-gguf"></select>
+      <label for="md-gguf">GGUF 量子化 (取得ファイル)</label></div>
+    <label class="switch hidden" id="md-gguf-mmproj-row" style="margin-top:6px"><input type="checkbox" id="md-gguf-mmproj" checked><span class="track"></span><span class="lab" style="font-size:12.5px">mmproj (画像入力) も取得</span></label>
+    <p class="hint hidden" id="md-gguf-note"></p>
     <div class="field sel-fixed hidden" id="md-local-field"><select id="md-local"></select>
       <label for="md-local">ダウンロード済みのモデル</label></div>
     <p class="hint" id="md-dest"></p>

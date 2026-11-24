@@ -79,8 +79,126 @@ def test_scan_data_models_records(tmp_path: Path):
     out = {x["repo_id"]: x for x in scan_data_models(tmp_path)}
     mini = out["org/Mini"]
     assert mini["snapshot"] == str(m) and mini["source"] == "data"
-    assert mini["has_weights"] and mini["gguf"] == [{"name": "f16.gguf", "size": 3 << 20}]
+    assert mini["has_weights"] and mini["gguf"] == [{"name": "f16.gguf", "size": 3 << 20, "parts": 1}]
     assert not out["org/Empty"]["has_weights"]
+
+
+def test_scan_data_models_resolves_hf_cache_layout(tmp_path: Path):
+    # hf download CLI 等がデータフォルダへ HF キャッシュ形式 (models--org--name) で
+    # 置いたモデルは snapshots を scan_hf_cache と同じ規則で解決する
+    # (重みは snapshots/<rev>/ の下。Inkling-2-Mini の実配置で踏んだ形)
+    repo = tmp_path / "models--thinkingmachines--Inkling-2-Mini"
+    snap = repo / "snapshots" / "abc123"
+    snap.mkdir(parents=True)
+    (snap / "config.json").write_text('{"model_type": "inkling2_loop"}', "utf-8")
+    (snap / "model.safetensors").write_bytes(b"\0" * (2 << 20))
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("abc123", "utf-8")
+    # 通常の <org>--<name> 配置と混在しても両方出る
+    plain = tmp_path / "org--Mini"
+    plain.mkdir()
+    (plain / "model.safetensors").write_bytes(b"\0" * (2 << 20))
+    out = {x["repo_id"]: x for x in scan_data_models(tmp_path)}
+    m = out["thinkingmachines/Inkling-2-Mini"]
+    assert m["snapshot"] == str(snap) and m["source"] == "data"
+    assert m["has_weights"] and m["revision"] == "main"
+    assert out["org/Mini"]["snapshot"] == str(plain)
+
+
+def test_scan_data_models_prepares_unsloth_gguf_layout(tmp_path: Path):
+    # unsloth Mainline_Support: テキストは .gguf_file (サブフォルダ)、mmproj はルート。
+    # エンジンは .gguf をテキストの隣で mmproj と共に読む -> symlink で準備して一覧化する
+    repo = tmp_path / "models--unsloth--Inkling-2-Mini-GGUF"
+    snap = repo / "snapshots" / "rev1"
+    sub = snap / "Mainline_Support"
+    sub.mkdir(parents=True)
+    (snap / "mmproj-F16.gguf").write_bytes(b"\0" * (2 << 20))
+    (sub / "Inkling-2-Mini-UD-Q4_K_XL.gguf_file").write_bytes(b"\0" * (3 << 20))
+    (repo / "refs").mkdir()
+    (repo / "refs" / "main").write_text("rev1", "utf-8")
+    out = {x["repo_id"]: x for x in scan_data_models(tmp_path)}
+    m = out["unsloth/Inkling-2-Mini-GGUF"]
+    assert m["has_weights"]
+    # mmproj はビジョン射影 (テキストモデルではない) なので一覧に出さない
+    assert [g["name"] for g in m["gguf"]] == ["Mainline_Support/Inkling-2-Mini-UD-Q4_K_XL.gguf"]
+    alias = sub / "Inkling-2-Mini-UD-Q4_K_XL.gguf"
+    assert alias.is_symlink() and alias.is_file()
+    assert (sub / "mmproj-F16.gguf").is_symlink()   # テキストの隣へ (エンジンは隣を探す)
+    # 冪等: 再スキャンで symlink を壊さない
+    scan_data_models(tmp_path)
+    assert alias.is_symlink() and (sub / "mmproj-F16.gguf").is_symlink()
+
+
+def test_classify_gguf_files_publisher_layouts():
+    # 配信者ごとにレイアウトが違う: ルート直下 (bartowski 系) / 分割 / サブフォルダ +
+    # .gguf_file (unsloth Mainline_Support) / mmproj / MTP sidecar をまとめて分類
+    from llm_launcher.models import classify_gguf_files
+    files = [
+        {"path": "Model-Q4_K_M.gguf", "size": 4000},
+        {"path": "Model-Q8_0-00001-of-00002.gguf", "size": 5000},
+        {"path": "Model-Q8_0-00002-of-00002.gguf", "size": 5000},
+        {"path": "mmproj-Model-f16.gguf", "size": 900},
+        {"path": "Mainline_Support/Model-UD-Q4_K_XL.gguf_file", "size": 7000},
+        {"path": "MTP/mtp-Model.gguf", "size": 300},
+        {"path": "README.md", "size": 10},
+    ]
+    c = classify_gguf_files(files)
+    assert [g["name"] for g in c["groups"]] == [
+        "Mainline_Support/Model-UD-Q4_K_XL.gguf",   # 表示は .gguf (DL 後 symlink 準備)
+        "Model-Q4_K_M.gguf",
+        "Model-Q8_0-00001-of-00002.gguf",           # 分割は先頭パーツ名で 1 量子化
+    ]
+    q8 = next(g for g in c["groups"] if g["parts"] == 2)
+    assert q8["size"] == 10000 and len(q8["paths"]) == 2
+    # DL の allow_patterns は repo 内の実パス (.gguf_file のまま)
+    assert c["groups"][0]["paths"] == ["Mainline_Support/Model-UD-Q4_K_XL.gguf_file"]
+    assert [f["path"] for f in c["mmproj"]] == ["mmproj-Model-f16.gguf"]
+    assert all("mtp-" not in g["name"] for g in c["groups"])   # drafter sidecar は出さない
+    # mmproj はエンジンの型優先 (BF16 > F32 > F16) で先頭 1 つを DL すればよい
+    c2 = classify_gguf_files([
+        {"path": "mmproj-F16.gguf", "size": 1}, {"path": "mmproj-BF16.gguf", "size": 1},
+        {"path": "mmproj-F32.gguf", "size": 1}])
+    assert [f["path"] for f in c2["mmproj"]] == [
+        "mmproj-BF16.gguf", "mmproj-F32.gguf", "mmproj-F16.gguf"]
+
+
+def test_scan_groups_split_gguf(tmp_path: Path):
+    from llm_launcher.models import group_gguf_splits
+    g = group_gguf_splits([
+        {"name": "M-Q8-00002-of-00002.gguf", "size": 5},
+        {"name": "M-Q8-00001-of-00002.gguf", "size": 5},
+        {"name": "M-Q4.gguf", "size": 4},
+    ])
+    assert g == [{"name": "M-Q4.gguf", "size": 4, "parts": 1},
+                 {"name": "M-Q8-00001-of-00002.gguf", "size": 10, "parts": 2}]
+
+
+def test_api_hf_repo_files_classifies(tmp_path, monkeypatch):
+    import asyncio
+
+    import huggingface_hub
+    from test_auth_users import Client
+    from llm_launcher import app as app_mod
+
+    class _Sib:
+        def __init__(self, p, s):
+            self.rfilename, self.size = p, s
+
+    class _Api:
+        def model_info(self, repo, files_metadata=False):
+            return type("Info", (), {"siblings": [
+                _Sib("Model-Q4_K_M.gguf", 4000), _Sib("mmproj-f16.gguf", 900)]})()
+    monkeypatch.setattr(huggingface_hub, "HfApi", _Api)
+    client = Client(app_mod.create_app(tmp_path))
+
+    async def go():
+        st, res = await client.get("/api/hf-repo-files?repo_id=org/repo")
+        assert st == 200 and res["ok"]
+        assert res["groups"][0]["name"] == "Model-Q4_K_M.gguf"
+        assert res["mmproj"][0]["path"] == "mmproj-f16.gguf"
+        st, _ = await client.get("/api/hf-repo-files?repo_id=not-a-repo")
+        assert st == 400
+    asyncio.run(go())
 
 
 def test_fork_spec_declares_model_data():
