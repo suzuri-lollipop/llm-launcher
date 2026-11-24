@@ -32,6 +32,7 @@ VIEWS.home = `
         <span id="home-par-rate" class="par-rate" aria-live="polite">-</span>
       </div>
       <div id="home-par"><span class="muted"><span class="spin"></span> 読み込み中…</span></div>
+      <div id="home-par-daily"></div>
     </div>
     <div class="dash-2col" style="margin-top:12px">
       <div class="card" style="margin:0">
@@ -99,7 +100,7 @@ function renderHomeNotices(){
     <div class="row"><b><svg class=ic aria-hidden=true><use href=#i-info /></svg> ようこそ</b><span class="grow"></span>
     <button class="primary" style="min-height:32px;padding:4px 12px;font-size:12.5px" onclick="openEditor()">＋ プロファイル作成</button></div>
     <div class="muted" style="margin-top:4px">まずプロファイルを作成して、起動するサーバーを設定しましょう。</div></div>`);
-  el.innerHTML = notes.join("");
+  setHtml(el, notes.join(""), "home-notices", renderHome);
 }
 function renderHomeTiles(){
   const live = liveSessions();
@@ -119,10 +120,11 @@ function renderHomeTiles(){
     {k: recentFails?"err":"", ic:"<svg class=ic aria-hidden=true><use href=#i-block /></svg>", v:`${recentFails}`, s:"異常終了履歴", t:"セッション履歴", go:"history"},
     {k:"", ic:"<svg class=ic aria-hidden=true><use href=#i-speed /></svg>", v: h&&h.uptime?upHuman(h.uptime):"-", s:"ホスト稼働時間", t:"", go:""},
   ];
-  $("#home-tiles").innerHTML = tiles.map(t=>
+  setHtml($("#home-tiles"), tiles.map(t=>
     `<button class="tile ${t.k}" ${t.go?`onclick="switchTab('${t.go}')"`:""} title="${esc(t.t||"")}">
       <div class="t-k">${t.ic} ${esc(t.s)}</div><div class="t-v">${esc(String(t.v))}</div>
-      ${t.go?`<div class="t-s">${esc(t.t)} へ →</div>`:`<div class="t-s">&nbsp;</div>`}</button>`).join("");
+      ${t.go?`<div class="t-s">${esc(t.t)} へ →</div>`:`<div class="t-s">&nbsp;</div>`}</button>`).join(""),
+    "home-tiles", renderHome);
 }
 function upHuman(sec){ sec=Math.floor(sec); const d=Math.floor(sec/86400),h=Math.floor(sec%86400/3600),m=Math.floor(sec%3600/60);
   return d?`${d}d${h}h`:h?`${h}h${m}m`:`${m}m`; }
@@ -136,15 +138,29 @@ function renderHomeHost(){
     ["プロジェクト", `<span class="mono" style="font-size:11px">${esc(sys.root)}</span>`],
   ];
   if (h){
-    rows.push(["CPU", `${h.cpu_count} cores · load ${(h.load||[]).map(x=>x.toFixed(2)).join(" ")||"-"}`]);
-    if (h.uptime!=null) rows.push(["稼働時間", upHuman(h.uptime)]);
+    rows.push(["CPU", `${h.cpu_count} cores · load <span data-f="load">${(h.load||[]).map(x=>x.toFixed(2)).join(" ")||"-"}</span>`]);
+    if (h.uptime!=null) rows.push(["稼働時間", `<span data-f="upt">${upHuman(h.uptime)}</span>`]);
   }
-  $("#home-host").innerHTML = rows.map(([k,v])=>`<span>${k}</span><span class="v">${v}</span>`).join("");
+  const el = $("#home-host");
+  const html = rows.map(([k,v])=>`<span>${k}</span><span class="v">${v}</span>`).join("");
+  /* 構造 (行 + 固定値) が変わらなければ変動値 (load / 稼働時間) だけ in-place で
+     書き換える。4 秒ごとに全体を組み直すと「この画面 ↗」リンクのホバーやテキスト
+     選択が飛ぶ。固定値 (IP 等) が変わったら普通に setHtml で差し替える。 */
+  const tpl = document.createElement("template"); tpl.innerHTML = html;
+  const norm = s => s.replace(/(<span data-f="[^"]*">)[\s\S]*?(<\/span>)/g, "$1F$2");
+  if (el.childElementCount && norm(el.innerHTML) === norm(tpl.innerHTML)) {
+    el.querySelectorAll("[data-f]").forEach(o => {
+      const n = tpl.content.querySelector(`[data-f="${o.dataset.f}"]`);
+      if (n && o.innerHTML !== n.innerHTML) o.innerHTML = n.innerHTML;
+    });
+    return;
+  }
+  setHtml(el, html, "home-host", renderHome);
 }
 function renderHomeMeters(){
   const el = $("#home-meters"); const s = S.sys;
-  if (s === undefined){ el.innerHTML = `<span class="muted"><span class="spin"></span> 読み込み中…</span>`; return; }
-  if (s === null){ el.innerHTML = `<span class="muted" style="color:var(--err)">システム統計を取得できません</span>`; return; }
+  if (s === undefined){ setHtml(el, `<span class="muted"><span class="spin"></span> 読み込み中…</span>`, "home-meters", renderHomeMeters); return; }
+  if (s === null){ setHtml(el, `<span class="muted" style="color:var(--err)">システム統計を取得できません</span>`, "home-meters", renderHomeMeters); return; }
   const h = s.host||{}; let html = "";
   if (h.memory){
     html += meter("メモリ", h.memory.used, h.memory.total, (u,t)=>`${fmtGB(u)} / ${fmtGB(t)}`);
@@ -164,7 +180,9 @@ function renderHomeMeters(){
     html += `<div class="meter"><div class="m-hd"><b>CPU負荷</b><span class="r">${h.load[0].toFixed(2)} / ${h.cpu_count} cores</span></div>
       <div class="mbar"><i class="${meterPct(pct)}" style="width:${pct}%"></i></div></div>`;
   }
-  el.innerHTML = html || `<span class="muted">計測項目なし</span>`;
+  const out = html || `<span class="muted">計測項目なし</span>`;
+  // 構造が変わらなければ数値だけ in-place → .mbar i の width トランジションが生きたまま
+  if (!meterPatch(el, out)) setHtml(el, out, "home-meters", renderHomeMeters);
 }
 /* ---------------- dashboard: GPU VRAM 割り当て (FreeToken /v1/meminfo 中継) ----------------
    Maya の GPU マップと同じ「カードに何が載っているか」: 重み / KV / SWA / MoE / GDN /
@@ -215,36 +233,60 @@ function vramAllocHtml(g){
     </div>`;
   }).join("");
 }
+function gpuCardHtml(g){
+  const memPct = g.mem_total_mib? (g.mem_used_mib/g.mem_total_mib*100):0;
+  return `<div data-gpu="${esc(g.uuid || g.index)}" style="border:1px solid var(--line);border-radius:var(--r2);padding:10px 12px">
+    <div class="row" style="gap:6px"><b style="font-size:13px">GPU ${esc(g.index)}</b>
+      <span class="grow ellip muted" style="font-size:11.5px">${esc(g.name)}</span></div>
+    <div class="meter" style="margin-top:8px"><div class="m-hd"><b>使用率</b><span class="r">${g.util??0}%</span></div>
+      <div class="mbar"><i class="${meterPct(g.util||0)}" style="width:${g.util||0}%"></i></div></div>
+    <div class="meter"><div class="m-hd"><b>VRAM</b><span class="r">${Math.round(memPct)}% · ${Math.round((g.mem_used_mib||0)/1024*10)/10}/${Math.round((g.mem_total_mib||0)/1024*10)/10}GB</span></div>
+      <div class="mbar"><i class="${meterPct(memPct)}" style="width:${memPct}%"></i></div></div>
+    <div class="row muted" style="gap:10px;margin-top:6px;font-size:11.5px">
+      <span><svg class=ic aria-hidden=true><use href=#i-thermo /></svg> <span data-f="temp">${g.temp??'-'}°C</span></span>
+      <span><svg class=ic aria-hidden=true><use href=#i-bolt /></svg> <span data-f="power">${g.power??'-'}${g.power_limit?'/'+g.power_limit:''}W</span></span>
+    </div><div data-vram>${vramAllocHtml(g)}</div></div>`;
+}
 function renderHomeGpus(){
   const el = $("#home-gpus"); const s = S.sys;
-  if (s === undefined){ el.innerHTML = `<span class="muted"><span class="spin"></span> GPU 検出中…</span>`; return; }
+  if (s === undefined){ setHtml(el, `<span class="muted"><span class="spin"></span> GPU 検出中…</span>`, "home-gpus", renderHomeGpus); return; }
   if (s === null || !s.gpus || !s.gpus.length){
-    el.innerHTML = `<span class="muted">${esc((s&&s.error)||"GPU がありません")}</span>`; return;
+    setHtml(el, `<span class="muted">${esc((s&&s.error)||"GPU がありません")}</span>`, "home-gpus", renderHomeGpus); return;
   }
-  el.innerHTML = `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">` + s.gpus.map(g=>{
-    const memPct = g.mem_total_mib? (g.mem_used_mib/g.mem_total_mib*100):0;
-    return `<div style="border:1px solid var(--line);border-radius:var(--r2);padding:10px 12px">
-      <div class="row" style="gap:6px"><b style="font-size:13px">GPU ${esc(g.index)}</b>
-        <span class="grow ellip muted" style="font-size:11.5px">${esc(g.name)}</span></div>
-      <div class="meter" style="margin-top:8px"><div class="m-hd"><b>使用率</b><span class="r">${g.util??0}%</span></div>
-        <div class="mbar"><i class="${meterPct(g.util||0)}" style="width:${g.util||0}%"></i></div></div>
-      <div class="meter"><div class="m-hd"><b>VRAM</b><span class="r">${Math.round(memPct)}% · ${Math.round((g.mem_used_mib||0)/1024*10)/10}/${Math.round((g.mem_total_mib||0)/1024*10)/10}GB</span></div>
-        <div class="mbar"><i class="${meterPct(memPct)}" style="width:${memPct}%"></i></div></div>
-      <div class="row muted" style="gap:10px;margin-top:6px;font-size:11.5px">
-        <span><svg class=ic aria-hidden=true><use href=#i-thermo /></svg> ${g.temp??'-'}°C</span>
-        <span><svg class=ic aria-hidden=true><use href=#i-bolt /></svg> ${g.power??'-'}${g.power_limit?'/'+g.power_limit:''}W</span>
-      </div>${vramAllocHtml(g)}</div>`;
-  }).join("") + `</div>`;
+  /* カードの顔ぶれ (UUID / index) が変わらない限り in-place 更新: メーターは幅と
+     数値だけ (width トランジション維持)、温度 / 電力はテキストだけ、VRAM 割り当て
+     内訳は変わったときだけ setHtml。4 秒ごとの全体組み直しでホバー / 選択 /
+     アニメーションが飛ぶのを防ぐ。 */
+  const cards = el.querySelectorAll("[data-gpu]");
+  if (cards.length === s.gpus.length &&
+      [...cards].every((c, i) => c.dataset.gpu === String(s.gpus[i].uuid || s.gpus[i].index))) {
+    s.gpus.forEach((g, i) => {
+      const tpl = document.createElement("template"); tpl.innerHTML = gpuCardHtml(g);
+      const nc = tpl.content.firstElementChild;
+      const om = cards[i].querySelectorAll(".meter"), nm = nc.querySelectorAll(".meter");
+      om.forEach((m, k) => { if (nm[k]) _meterValues(m, nm[k]); });
+      ["temp", "power"].forEach(f => {
+        const o = cards[i].querySelector(`[data-f="${f}"]`), n = nc.querySelector(`[data-f="${f}"]`);
+        if (o && n && o.textContent !== n.textContent) o.textContent = n.textContent;
+      });
+      const ov = cards[i].querySelector("[data-vram]"), nv = nc.querySelector("[data-vram]");
+      if (ov && nv) setHtml(ov, nv.innerHTML, "gpu-vram-" + cards[i].dataset.gpu, renderHomeGpus);
+    });
+    return;
+  }
+  setHtml(el, `<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(220px,1fr))">` +
+    s.gpus.map(gpuCardHtml).join("") + `</div>`, "home-gpus", renderHomeGpus);
 }
 function renderHomeLive(){
   const el = $("#home-live"); const live = liveSessions();
   const c = $("#home-live-count"); c.className = "badge " + (live.some(s=>s.ready)?"ok":"info");
-  c.innerHTML = `<span class="dot"></span>${live.length}`;
-  if (!live.length){ el.innerHTML = `<div class="empty" style="padding:16px 12px">起動中のサーバーはありません。<br>
-    <button class="primary" style="margin-top:10px" onclick="switchTab('launch')"><svg class=ic aria-hidden=true><use href=#i-play /></svg> 起動する</button></div>`; return; }
-  el.innerHTML = live.map(s=>{
+  const ch = `<span class="dot"></span>${live.length}`;
+  if (c.innerHTML !== ch) c.innerHTML = ch;
+  if (!live.length){ setHtml(el, `<div class="empty" style="padding:16px 12px">起動中のサーバーはありません。<br>
+    <button class="primary" style="margin-top:10px" onclick="switchTab('launch')"><svg class=ic aria-hidden=true><use href=#i-play /></svg> 起動する</button></div>`, "home-live", renderHome); return; }
+  const html = live.map(s=>{
     const url = s.port?`http://${esc(S.state.system.ip)}:${s.port}`:"";
-    return `<div class="mini">
+    return `<div class="mini" data-row="${s.id}">
       ${statusBadge(s)}
       <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
       <b class="grow ellip" style="font-size:13.5px">${esc(s.profile_name)}</b>
@@ -252,36 +294,39 @@ function renderHomeLive(){
         ${url?`<a class="btn" style="min-height:0;padding:4px 8px;font-size:12px" href="${url}" target="_blank" rel="noopener" title="OpenAI互換APIのルートを開く">:${s.port}↗</a>`:""}
         ${s.ready?`<button class="ghost" style="min-height:0;padding:4px 8px;font-size:12px" title="プレイグラウンドでチャット" onclick="openPlayground('${s.id}')"><svg class=ic aria-hidden=true><use href=#i-flask /></svg></button>`:""}
         ${s.ready?`<button class="ghost" style="min-height:0;padding:4px 8px;font-size:12px" title="ベンチマーク" onclick="openBench('${s.profile_id}')"><svg class=ic aria-hidden=true><use href=#i-chart /></svg></button>`:""}
-        <span class="muted upt mono" data-sid="${s.id}" data-pfx="稼働 " style="font-size:11.5px">稼働 ${fmtUp(s.uptime)}</span>
+        <span class="muted upt mono" data-sid="${s.id}" data-pfx="稼働 " style="font-size:11.5px"></span>
         <button class="danger" style="min-height:0;padding:4px 10px;font-size:12px" onclick="stopSession('${s.id}')"><svg class=ic aria-hidden=true><use href=#i-stop /></svg></button>
       </span>
     </div>`;
   }).join("");
+  patchRows(el, html, "home-live", renderHome);   // 状態が変わった行だけ
+  patchUptime(el, live);   // 稼働時間は in-place 更新 (毎秒の再構築理由にしない)
 }
 function renderHomeBackends(){
   const el = $("#home-backends");
-  el.innerHTML = (S.state.backends||[]).map(b=>{
+  patchRows(el, (S.state.backends||[]).map(b=>{
     const det=b.detection; const live=(S.state.sessions||[]).filter(s=>s.backend===b.id&&isLive(s)).length;
     const cls = det.installed?"ok":"err";
-    return `<div class="mini">
+    return `<div class="mini" data-row="${b.id}">
       <span class="chip ${esc(b.id)}">${esc(b.name)}</span>
       <span class="grow ellip muted" style="font-size:11.5px" title="${esc(det.python||det.detail||b.module_path)}">${esc(shortPath(det.python||det.detail||b.module_path))}</span>
       ${live?`<span class="badge info"><span class="dot"></span>稼働 ${live}</span>`:""}
       <span class="badge ${cls}"><span class="dot"></span>${det.installed?"検出":"未検出"}</span>
     </div>`;
-  }).join("");
+  }).join(""), "home-backends", renderHome);   // 検出 / 稼働数が変わった行だけ
 }
 function renderHomeRecent(){
   const el = $("#home-recent"); const ss = (S.state.sessions||[]).slice(0,6);
-  if (!ss.length){ el.innerHTML = `<div class="muted" style="padding:8px 2px">まだ起動履歴がありません。</div>`; return; }
-  el.innerHTML = ss.map(s=>`<div class="mini" style="cursor:pointer" title="このセッションを開く" onclick="gotoSession('${s.id}')">
+  if (!ss.length){ setHtml(el, `<div class="muted" style="padding:8px 2px">まだ起動履歴がありません。</div>`, "home-recent", renderHome); return; }
+  patchRows(el, ss.map(s=>`<div class="mini" data-row="${s.id}" style="cursor:pointer" title="このセッションを開く" onclick="gotoSession('${s.id}')">
     ${statusBadge(s)}
     <span class="grow ellip" style="font-size:13px">${esc(s.profile_name)}</span>
     <span class="chip ${esc(s.backend)}">${esc(s.backend_name)}</span>
     <span class="muted" style="font-size:11.5px">${
-      isLive(s)?("稼働 "+fmtUp(s.uptime)) : (s.finished_at? fmtAgo(s.finished_at)+" に"+(s.status==="failed"?"異常終了":"終了") : "-")
+      isLive(s)?`<span class="upt" data-sid="${s.id}" data-pfx="稼働 "></span>` : (s.finished_at? fmtAgo(s.finished_at)+" に"+(s.status==="failed"?"異常終了":"終了") : "-")
     }</span>
-  </div>`).join("");
+  </div>`).join(""), "home-recent", renderHome);   // 「N 分前」等が変わった行だけ
+  patchUptime(el, ss.filter(isLive));   // 稼働時間は in-place (行クリックのホバーを毎秒飛ばさない)
 }
 let clockInterval = null;
 function tickHomeClock(){ fmtClock(); if(!clockInterval) clockInterval=setInterval(fmtClock,1000); }
@@ -303,7 +348,7 @@ const PAR_SERVERS = new Set(["strata", "strata-fork", "maya", "basalt",
 function parInit(){
   if (!S.homePar) {
     S.homePar = { sid: "", samples: [], latest: null, error: "",
-                  busy: false, sig: "", timer: null, slotLast: {},
+                  busy: false, timer: null, slotLast: {},
                   daily: { data: null, error: "", busy: false, last: 0 } };
     setTimeout(parPoll, 0);
     S.homePar.timer = setInterval(parPoll, 1000);
@@ -529,29 +574,29 @@ function parSlotTable(latest, series, p){
   <div class="par-foot">${busyN} / ${slots.length} スロット稼働${parNum(latest.live && latest.live.queued) > 0 ? ` · 待ち ${parInt(latest.live.queued)}` : ""}</div>`;
 }
 function renderHomeParallel(){
-  const el = $("#home-par"), sel = $("#home-par-select");
+  const el = $("#home-par"), sel = $("#home-par-select"), dailyEl = $("#home-par-daily");
   if (!el || !sel) return;
   const p = parInit();
   const servers = parServers();
-  const sig = servers.map(s => `${s.id}|${s.profile_name}|${s.backend}|${s.port || ""}`).join("|");
-  if (p.sig !== sig) {
-    sel.innerHTML = servers.length
-      ? servers.map(s => `<option value="${esc(s.id)}">${esc(s.profile_name)} · ${esc(s.backend_name)} :${esc(s.port || "?")}</option>`).join("")
-      : `<option value="">— 対応サーバーなし —</option>`;
-    p.sig = sig;
-  }
+  /* 選択肢は setOptions = 顔ぶれが変わらなければ触らない / ドロップダウンを開いて
+     いる (フォーカスがある) 間は組み直さない。1 秒ポーリングで選択が飛ぶのを防ぐ。 */
+  setOptions(sel, servers.length
+    ? servers.map(s => `<option value="${esc(s.id)}">${esc(s.profile_name)} · ${esc(s.backend_name)} :${esc(s.port || "?")}</option>`).join("")
+    : `<option value="">— 対応サーバーなし —</option>`, "par-sel", renderHomeParallel);
   const stateEl = $("#home-par-state"), cntEl = $("#home-par-count"), rateEl = $("#home-par-rate");
   if (!servers.length){
     sel.value = "";
     stateEl.className = "badge info";
-    stateEl.innerHTML = `<span class="dot"></span>未検出`;
+    const sh = `<span class="dot"></span>未検出`;
+    if (stateEl.innerHTML !== sh) stateEl.innerHTML = sh;
     cntEl.textContent = "";
     rateEl.innerHTML = "-";
-    el.innerHTML = `<div class="par-empty">
+    setHtml(el, `<div class="par-empty">
       デコード速度 (/metrics / /v1/stats) を公開するサーバーが稼働していません。<br>
       グラフを描くには、起動タブからサーバーを起動してください。<br>
       <span class="muted">スロット毎の内訳は Strata / Basalt / FreeToken / llama.cpp (--slots)。SGLang は --enable-metrics、llama.cpp の合算は --metrics が必要です。</span>
-    </div>`;
+    </div>`, "home-par", renderHomeParallel);
+    if (dailyEl) setHtml(dailyEl, "", "par-daily", renderHomeParallel);
     return;
   }
   if (!p.sid || !servers.some(s => s.id === p.sid)) {
@@ -570,7 +615,8 @@ function renderHomeParallel(){
   };
   const [stateCls, stateLabel] = stateMap[state] || ["", state || "—"];
   stateEl.className = "badge " + stateCls;
-  stateEl.innerHTML = `<span class="dot"></span>${esc(stateLabel)}`;
+  const sh = `<span class="dot"></span>${esc(stateLabel)}`;
+  if (stateEl.innerHTML !== sh) stateEl.innerHTML = sh;
   const parallel = parNum(live.parallel), running = parNum(live.running);
   const bits = [];
   if (parallel != null && parallel > 1) bits.push(`並列 ${parInt(parallel)}`);
@@ -591,8 +637,11 @@ function renderHomeParallel(){
   rateEl.innerHTML = (nowTok != null
     ? `<b>${parF1(nowTok)}</b><span class="par-unit">tok/s</span><span class="par-sub">全スロット合算</span>`
     : `<span class="par-sub">-</span>`) + actHtml;
+  /* 1 日窓 (リセット時刻 input を含む) は別容器: 毎秒のチャート更新は入力欄に触らず、
+     入力中 / 未保存編集のある間は組み直さない (setHtml の formDirty / uiBusyIn)。 */
+  if (dailyEl) setHtml(dailyEl, parDailySection(p), "par-daily", renderHomeParallel);
   if (!latest && !p.error) {
-    el.innerHTML = `<span class="muted"><span class="spin"></span> サーバーの /metrics を待っています…</span>`;
+    setHtml(el, `<span class="muted"><span class="spin"></span> サーバーの /metrics を待っています…</span>`, "home-par", renderHomeParallel);
     return;
   }
   const slots = Array.isArray(latest && latest.slots) ? latest.slots : [];
@@ -617,9 +666,9 @@ function renderHomeParallel(){
     <span>max ${parInt(max)} tok/s</span>
     <span>${p.samples.length} 点 / ${PAR_HIST} 秒</span>
   </div>`;
-  el.innerHTML = `<div class="par-chart-wrap">${meta}${chart}
+  setHtml(el, `<div class="par-chart-wrap">${meta}${chart}
     <div class="par-axis"><span>60 秒前</span><span>30 秒</span><span>現在</span></div>
-  </div>${errNote}${parSlotTable(latest, slotSeries, p)}${parDailySection(p)}`;
+  </div>${errNote}${parSlotTable(latest, slotSeries, p)}`, "home-par", renderHomeParallel);
 }
 
 /* ---------------- dashboard: 平均アクティブ数 (1 日窓) ----------------
@@ -659,6 +708,7 @@ async function parDailyResetTime(v){
   try {
     await api("/api/parallel/daily/settings", {method: "PUT", body: {reset_time: v}});
     toast(`平均アクティブ数のリセット時刻を ${v} にしました`);
+    formReset($("#home-par-daily"));   // 保存済み = 入力値の巻き戻し許可 (dirty 解除)
   } catch (e) { toast(e.message || String(e)); }
   parDailyPoll(true);
 }

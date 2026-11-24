@@ -368,7 +368,7 @@ def test_frontend_models_tab_wiring():
     src = _frontend_src()
     assert 'data-tab="models" id="mi-models"' in src
     assert '<script src="/static/js/views/models.js"></script>' in src
-    assert '"users","playground","bench","calibrate","setup","models"]' in src
+    assert '"users","playground","bench","coding","calibrate","setup","models"]' in src
     assert 'models: "install"' in src                       # TAB_CAP
     assert '["#mi-models", "install"]' in src               # メニュー開示
     assert 'if (S.tab === "models") renderModels();' in src

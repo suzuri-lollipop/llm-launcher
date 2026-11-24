@@ -53,7 +53,7 @@ function pgInit() {
   S.pg = {
     sid: d.sid || "", model: d.model || "", convos: d.convos || {},
     models: [], modelsBusy: false, modelsErr: "",
-    streaming: false, ctrl: null, _mSig: "", _sSig: "", _modSig: "",
+    streaming: false, ctrl: null, _mSig: "",
   };
   // 送信中にページを閉じた等で localStorage に残った streaming フラグは実体なしなので片付ける
   for (const list of Object.values(d.convos || {}))
@@ -87,7 +87,7 @@ const pgMsgs = () => {
 function openPlayground(sid) {
   if (!S.pg) pgInit();
   if (S.pg.streaming) return toast("送信中です。停止してから切り替えてください");
-  S.pg.sid = sid; S.pg.model = ""; S.pg._modSig = "";
+  S.pg.sid = sid; S.pg.model = "";
   switchTab("playground");
   pgLoadModels();
 }
@@ -98,23 +98,19 @@ function renderPlayground() {
   const live = liveSessions();
   if (d.sid && !live.some(s => s.id === d.sid) && !d.streaming) d.sid = "";
   if (!d.sid && live.length && !d.streaming) { d.sid = live[0].id; d.model = ""; pgLoadModels(); }
+  /* サーバー / モデルの選択肢は setOptions = 顔ぶれが変わらなければ触らない /
+     ドロップダウンを開いている (フォーカスがある) 間は組み直さない。ポーリングや
+     配信状態の変化で選択が飛ぶのを防ぐ。 */
   const srv = $("#pg-srv");
-  const sSig = live.map(s => [s.id, s.profile_name, s.backend_name, s.port, s.ready ? 1 : 0].join(":")).join("|");
-  if (sSig !== d._sSig) {
-    d._sSig = sSig;
-    srv.innerHTML = live.length
-      ? live.map(s => `<option value="${s.id}" ${s.id === d.sid ? "selected" : ""}>${esc(s.profile_name)} · ${esc(s.backend_name)} · :${s.port || "-"}${s.ready ? "" : " (起動中)"}</option>`).join("")
-      : `<option value="">起動中のサーバーがありません</option>`;
-    srv.disabled = !live.length || d.streaming;
-  }
+  setOptions(srv, live.length
+    ? live.map(s => `<option value="${s.id}" ${s.id === d.sid ? "selected" : ""}>${esc(s.profile_name)} · ${esc(s.backend_name)} · :${s.port || "-"}${s.ready ? "" : " (起動中)"}</option>`).join("")
+    : `<option value="">起動中のサーバーがありません</option>`, "pg-srv", renderPlayground);
+  srv.disabled = !live.length || d.streaming;
   const mod = $("#pg-model");
-  const mSig = d.models.join("|") + "#" + d.model;
-  if (mSig !== d._modSig) {
-    d._modSig = mSig;
-    mod.innerHTML = d.models.length
-      ? d.models.map(m => `<option ${m === d.model ? "selected" : ""} value="${esc(m)}">${esc(m)}</option>`).join("")
-      : `<option value="">${d.modelsBusy ? "モデル読み込み中…" : (d.modelsErr ? "モデル取得失敗" : "モデル指定なし")}</option>`;
-  }
+  setOptions(mod, d.models.length
+    ? d.models.map(m => `<option ${m === d.model ? "selected" : ""} value="${esc(m)}">${esc(m)}</option>`).join("")
+    : `<option value="">${d.modelsBusy ? "モデル読み込み中…" : (d.modelsErr ? "モデル取得失敗" : "モデル指定なし")}</option>`,
+    "pg-model", renderPlayground);
   mod.disabled = d.streaming || !d.models.length;
   const s = pgSession();
   updatePgStatus();
@@ -126,7 +122,7 @@ function renderPlayground() {
 }
 function pgPickSession(sid) {
   if (S.pg.streaming) { toast("送信中です"); renderPlayground(); return; }
-  S.pg.sid = sid; S.pg.model = ""; S.pg._modSig = "";
+  S.pg.sid = sid; S.pg.model = "";
   pgLoadModels(); pgPersist();
 }
 function pgPickModel(m) { S.pg.model = m; pgPersist(); }
@@ -244,6 +240,8 @@ function pgRenderMsgs(force) {
   const sig = [pgPid(), msgs.length, (last.content || "").length + "/" + (last.reasoning || "").length,
                last.streaming ? "s" : "", last.error || ""].join("~");
   if (!force && sig === S.pg._mSig) return;
+  // メッセージを選択して読んでいる間は組み直しを後回し (sig は進めない = 取りこぼさない)
+  if (!force && uiBusyIn(el) && el.childElementCount) { deferRender("pg-msgs", () => pgRenderMsgs()); return; }
   S.pg._mSig = sig;
   const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
   if (!msgs.length) {
