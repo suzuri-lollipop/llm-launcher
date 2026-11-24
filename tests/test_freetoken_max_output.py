@@ -98,4 +98,4 @@ def test_wizard_has_output_question_with_codegen_recommendation():
     assert '["32768", "32K", ""]' in SETUP_JS
     assert "outFit.includes(32768)" in SETUP_JS
     # 描画/保存/ヒントの3ループとも out を通すこと。
-    assert SETUP_JS.count('["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"]') == 3
+    assert SETUP_JS.count('["ctx", "out", "kv", "moe", "ple", "kern", "tp", "par", "vis"]') == 3
