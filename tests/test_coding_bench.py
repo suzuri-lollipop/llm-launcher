@@ -720,8 +720,10 @@ def test_model_ids_and_pi_home_qwen_wiring(tmp_path, server):
 
 
 def test_thinking_capability_uses_server_effort_vocabulary():
-    """サーバーが "none" 含む effort 語彙を公開すればその段階を出す (Inkling-2)。
-    "none" の無い語彙や Qwen は従来の off/on (enable_thinking 配線)。"""
+    """サーバーが effort 語彙を公開すればファミリーを問わずその段階を出す。
+    語彙はサーバーがチェックポイントのテンプレートを probe した結果: Inkling-2 は
+    "none" 含む、Qwen3.8-Flash-Next は "none" 無しの xhigh/medium/low
+    (off は enable_thinking トグル)。語彙の無い Qwen3 は従来の off/on。"""
     eff = ["max", "xhigh", "high", "medium", "low", "minimal", "none"]
     cap = coding_mod.thinking_capability([], "Inkling-2-Mini", eff, "high")
     assert cap["capable"] and not cap["qwen"]
@@ -729,8 +731,13 @@ def test_thinking_capability_uses_server_effort_vocabulary():
     assert cap["default"] == "high"
     cap = coding_mod.thinking_capability(["--reasoning-parser", "glm"], "some-model",
                                          ["xhigh", "medium", "low"], "xhigh")
-    assert cap["capable"] and cap["levels"] == ["off", "on"]
-    cap = coding_mod.thinking_capability([], "Qwen3-30B", eff, "high")
+    assert cap["capable"] and cap["levels"] == ["off", "xhigh", "medium", "low"]
+    cap = coding_mod.thinking_capability([], "RadixArk--Qwen3.8-Flash-Next-NVFP4",
+                                         ["xhigh", "medium", "low"], "xhigh")
+    assert cap["capable"] and cap["qwen"]
+    assert cap["levels"] == ["off", "xhigh", "medium", "low"]
+    assert cap["default"] == "xhigh"
+    cap = coding_mod.thinking_capability([], "Qwen3-30B")
     assert cap["qwen"] and cap["levels"] == ["off", "on"]
 
 
@@ -766,6 +773,36 @@ def test_pi_home_effort_wiring(tmp_path, effort_server):
                          {"thinking": "max"}, eff)
     entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
     assert entry["maxTokens"] == 32768
+
+
+def test_pi_home_qwen_effort_wiring(tmp_path, server):
+    """Qwen3.8-Flash-Next: enable_thinking トグルと effort 段階の共存配線。
+    qwen-chat-template は enable_thinking しか送れないため chat-template で
+    chat_template_kwargs に両方を送る。off は reasoning_effort を omit
+    (テンプレート既定の xhigh が漏れないように)。"""
+    _, port = server
+    eff = ["xhigh", "medium", "low"]
+    mgr = _manager(tmp_path, _FakeManager(port))
+    rd = mgr.run_dir("cb_qe")
+    rd.mkdir(parents=True)
+    mgr._prepare_pi_home(rd, f"http://127.0.0.1:{port}", "Qwen3.8-Flash-Next-NVFP4", "",
+                         {"thinking": "xhigh"}, eff)
+    entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
+    assert entry["reasoning"] is True
+    assert entry["compat"]["thinkingFormat"] == "chat-template"
+    kw = entry["compat"]["chatTemplateKwargs"]
+    assert kw["enable_thinking"] == {"$var": "thinking.enabled"}
+    assert kw["reasoning_effort"] == {"$var": "thinking.effort", "omitWhenOff": True}
+    lm = entry["thinkingLevelMap"]
+    assert lm["xhigh"] == "xhigh" and lm["medium"] == "medium" and lm["low"] == "low"
+    assert lm["minimal"] is None and lm["max"] is None
+    assert lm["high"] == "xhigh"      # 旧 "on" の読み替え先 (サーバーの量子化と同じ)
+    assert "off" not in lm            # off は enable_thinking=false で送る (unsupported ではない)
+    assert entry["maxTokens"] == 32768
+    mgr._prepare_pi_home(rd, f"http://127.0.0.1:{port}", "Qwen3.8-Flash-Next-NVFP4", "",
+                         {"thinking": "off"}, eff)
+    entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
+    assert entry["maxTokens"] == 8192
 
 
 def test_api_model_options(tmp_path):

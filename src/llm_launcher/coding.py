@@ -1057,17 +1057,19 @@ def thinking_capability(argv: list[str], model_name: str,
       levels  … UI に出してよいレベル (off のみ / off+on / off+実 effort 段階)
       source  … 判定の根拠 (表示用)
 
-    サーバーが /v1/models で effort 語彙を公開し、かつその off 歯車 ("none") を
-    含むなら、その段階をそのまま出す (Inkling-2 の none/minimal/low/medium/high/
-    xhigh/max)。"none" を持たないモデル (Qwen3.8 の xhigh/medium/low 等) と Qwen の
-    enable_thinking 配線は従来どおり off/on に留める。"""
+    サーバーが /v1/models で effort 語彙を公開するなら、その段階をそのまま出す
+    (Inkling-2 の none/minimal/low/medium/high/xhigh/max、Qwen3.8-Flash-Next の
+    xhigh/medium/low)。語彙はサーバーがチェックポイントのテンプレートを probe した
+    結果なのでファミリーを問わず権威。"none" は effort 専用モデルの off 歯車、
+    Qwen は off が enable_thinking トグルなので語彙に "none" が無い — どちらでも
+    off + 段階を出す。qwen フラグは配線 (enable_thinking の要否) だけを決める。"""
     parser = argv_flag(argv, "--reasoning-parser")
     reasoning = argv_flag(argv, "--reasoning")
     name_hit = bool(THINKING_NAME_RE.search(model_name or ""))
     qwen = bool(QWEN_THINKING_RE.search(model_name or "")) or "qwen3" in parser
-    if efforts and "none" in efforts and not qwen:
+    if efforts:
         levels = ["off"] + [e for e in efforts if e != "none"]
-        return {"capable": True, "qwen": False, "levels": levels,
+        return {"capable": True, "qwen": qwen, "levels": levels,
                 "source": "サーバーの effort 語彙 (/v1/models)",
                 "efforts": list(efforts), "default": default_effort}
     if parser:
@@ -1480,6 +1482,12 @@ class CodingManager:
         qwen-chat-template に固定し、off で enable_thinking=false が送られるようにする
         (テンプレート既定の thinking ON を確実に切る)。レベルは off/high のみ提示。
 
+        effort 語彙を公開する Qwen (Qwen3.8-Flash-Next の xhigh/medium/low) は
+        トグルと段階が共存する: qwen-chat-template は enable_thinking しか送れない
+        ため chat-template に替え、chat_template_kwargs で enable_thinking と
+        reasoning_effort の両方を送る (off は enable_thinking=false かつ
+        reasoning_effort を omit — テンプレート既定の xhigh が漏れないように)。
+
         effort 語彙 ("none" 含む) を公開する非 Qwen モデル (Inkling-2) は pi 既定の
         reasoning_effort 配線を使う: thinkingLevelMap.off を "none" に割り当て、
         off でも reasoning=True にして pi が reasoning_effort="none" を送るようにする
@@ -1502,7 +1510,28 @@ class CodingManager:
             "maxTokens": 8192 if thinking == "off" else 32768,
             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
         }
-        if qwen:
+        if qwen and efforts:
+            # 語彙はサーバー probe 済み (例: xhigh/medium/low)。pi の extended
+            # レベル (xhigh/max) は明示 map が無いと unsupported 扱いなので、
+            # 語彙の名前は全部明示する。high は旧 "on" の読み替え先として
+            # 語彙に無ければ最大段階 (xhigh) へ繋ぐ (サーバーの量子化と同じ)。
+            level_map: dict[str, Any] = {
+                name: name for name in efforts
+                if name in ("minimal", "low", "medium", "high", "xhigh", "max")}
+            for name in ("minimal", "low", "medium", "high", "xhigh", "max"):
+                level_map.setdefault(name, None)
+            if level_map["high"] is None and level_map["xhigh"] is not None:
+                level_map["high"] = "xhigh"
+            entry["compat"] = {
+                "thinkingFormat": "chat-template",
+                "chatTemplateKwargs": {
+                    "enable_thinking": {"$var": "thinking.enabled"},
+                    "preserve_thinking": True,
+                    "reasoning_effort": {"$var": "thinking.effort", "omitWhenOff": True},
+                },
+            }
+            entry["thinkingLevelMap"] = level_map
+        elif qwen:
             entry["compat"] = {"thinkingFormat": "qwen-chat-template"}
             entry["thinkingLevelMap"] = {"minimal": None, "low": None, "medium": None}
         elif effort_wired:
