@@ -95,25 +95,41 @@ def test_restore_does_not_rewrite_unchanged_positions():
 
 
 # The panels that poll (bench / calibrate / setup, active card + history/compare lists)
-# and the assignment that resets nested scroll boxes in each of them. The bench history
+# and the write that resets nested scroll boxes in each of them. The bench history
 # pane is management-only (plain cards, no .bm-wrap) since the 3-tab split, so it left
 # this map; the compare pane carries the detail tables and inherited the duty.
+# 2026-11-24: active cards are built by bmActiveCard / calActiveCard and cached
+# (a finished card is not live), and the history lists write row-by-row via
+# patchRows (only changed rows are rebuilt; patchRows snaps/restores each row).
 SWAP_SITES = {
-    "renderBenchActive": "el.innerHTML = `<",
+    "renderBenchActive": "el.innerHTML = html;",
     "renderBenchCompare": "el.innerHTML = html;",
-    "renderCalActive": "el.innerHTML = `<",
-    "renderCalHistory": "el.innerHTML = html;",
+    "renderCalActive": "el.innerHTML = html;",
+    "renderCalHistory": "patchRows(",
     "renderInsActive": "el.innerHTML = html;",
-    "renderInsHistory": "el.innerHTML = html;",
+    "renderInsHistory": "patchRows(",
 }
 
 # ... and the slot that caches the last HTML written, so an identical poll is a no-op.
 HTML_CACHES = {
+    "renderBenchActive": "S.bench._ba",
     "renderBenchHistory": "S.bench._bh",
     "renderBenchCompare": "S.bench._bc",
+    "renderCalActive": "S.cal._ca",
     "renderCalHistory": "S.cal._ch",
     "renderInsHistory": "S.ins._ih",
     "renderInsActive": "S.ins._ia",
+}
+
+# The write site each cache must precede (row-level for the history lists).
+WRITE_SITES = {
+    "renderBenchActive": "el.innerHTML = html;",
+    "renderBenchHistory": "patchRows(",
+    "renderBenchCompare": "el.innerHTML = html;",
+    "renderCalActive": "el.innerHTML = html;",
+    "renderCalHistory": "patchRows(",
+    "renderInsHistory": "patchRows(",
+    "renderInsActive": "el.innerHTML = html;",
 }
 
 # One deferred-render slot per panel (deferRender keys must not collide either).
@@ -149,7 +165,7 @@ def test_poll_does_not_rebuild_identical_html():
         assert guard, fn
         assert src.index("const html =") < guard.start(), fn
         # the cache is only allowed to advance together with an actual write
-        assert src.index(f"{cache} = html;") < src.index("el.innerHTML = html;"), fn
+        assert src.index(f"{cache} = html;") < src.index(WRITE_SITES[fn]), fn
         assert src.count(f"{cache} = html;") == 1, fn
 
 
@@ -165,8 +181,9 @@ def test_empty_placeholder_is_written_once():
 
 def test_cache_keys_are_seeded_in_the_state_objects():
     """A missing key means `undefined !== html` forever, i.e. the skip silently never fires."""
-    for init, key in (("S.bench = {", "_bh"), ("S.cal = {", "_ch"), ("S.ins = {", "_ih"),
-                      ("S.ins = {", "_ia")):
+    for init, key in (("S.bench = {", "_bh"), ("S.bench = {", "_ba"),
+                      ("S.cal = {", "_ch"), ("S.cal = {", "_ca"),
+                      ("S.ins = {", "_ih"), ("S.ins = {", "_ia")):
         m = re.search(re.escape(init) + r"[\s\S]*?\};", SRC)
         assert m, init
         assert f'{key}: ""' in m.group(0), f"{key} missing from {init}"

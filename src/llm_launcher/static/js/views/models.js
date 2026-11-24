@@ -209,22 +209,28 @@ function renderModels() {
     && (r.status === "running" || r.status === "queued"));
   const actHtml = act ? insActiveCard(act) : "";
   if (actHtml !== S.mm._actSig) {
-    S.mm._actSig = actHtml;
     const el = $("#mm-active");
+    // 操作中 (ログの選択 / スクロール / アニメーション) は組み直しを後回し
+    if (uiBusyIn(el) && el.childElementCount) { deferRender("mm-act", renderModels); return; }
+    S.mm._actSig = actHtml;
     const _ls = logScrollSnap(el);
     el.innerHTML = actHtml;
     logScrollBack(el, _ls);
   }
-  // フィルタ (バックエンド / 置き場)
+  // フィルタ (バックエンド / 置き場): 顔ぶれが変わらなければ選択クラスだけ in-place
   const ms = mmModels();
   const cnt = bid => ms.filter(m => (m.backends || []).includes(bid)).length;
-  $("#mm-filters").innerHTML = [{id: "all", name: "すべて", n: ms.length},
-    ...mmBackends().map(b => ({id: b.id, name: b.name, n: cnt(b.id)}))]
-    .map(f => `<button class="fchip ${S.mm.backend === f.id ? "on" : ""}" onclick="S.mm.backend='${f.id}';renderModels()">${esc(f.name)} <span class="muted" style="color:inherit">${f.n}</span></button>`).join("");
+  const fchips = [{id: "all", name: "すべて", n: ms.length},
+    ...mmBackends().map(b => ({id: b.id, name: b.name, n: cnt(b.id)}))];
+  patchChips($("#mm-filters"), fchips, S.mm.backend, fchips.map(f =>
+    `<button class="fchip ${S.mm.backend === f.id ? "on" : ""}" onclick="S.mm.backend='${f.id}';renderModels()">${esc(f.name)} <span class="muted" style="color:inherit">${f.n}</span></button>`).join(""),
+    "mm-filters", renderModels);
   const srcs = [...new Set(ms.map(m => m.source))];
-  $("#mm-sources").innerHTML = [{id: "all", name: "すべての置き場"},
-    ...srcs.map(s => ({id: s, name: (MM_SRC[s] || ["", s])[1]}))]
-    .map(f => `<button class="fchip ${S.mm.source === f.id ? "on" : ""}" onclick="S.mm.source='${esc(f.id)}';renderModels()">${esc(f.name)}</button>`).join("");
+  const schips = [{id: "all", name: "すべての置き場"},
+    ...srcs.map(s => ({id: s, name: (MM_SRC[s] || ["", s])[1]}))];
+  patchChips($("#mm-sources"), schips, S.mm.source, schips.map(f =>
+    `<button class="fchip ${S.mm.source === f.id ? "on" : ""}" onclick="S.mm.source='${esc(f.id)}';renderModels()">${esc(f.name)}</button>`).join(""),
+    "mm-sources", renderModels);
   // 一覧 (中身が変わらなければ組み直さない)
   const list = mmFiltered();
   const html = !S.mm.data ? `<div class="empty">${S.mm.loading ? "スキャン中…" : "モデル一覧を取得できませんでした"}</div>`
@@ -234,14 +240,17 @@ function renderModels() {
   const sig = html.length + ":" + list.map(m => m.id + m.size_bytes + m.running + (m.used_by || []).length).join("|");
   const listEl = $("#mm-list");
   if (sig !== S.mm._sig) {
+    // 選択して読んでいる / 操作中は一覧の組み直しを後回し (sig は進めない = 取りこぼさない)
+    if (uiBusyIn(listEl) && listEl.childElementCount) { deferRender("mm-list", renderModels); return; }
     S.mm._sig = sig;
     listEl.innerHTML = html;
   }
   // 対応モデル表
   const cat = mmCatalogHtml();
   if (cat !== S.mm._catSig) {
-    S.mm._catSig = cat;
     const el = $("#mm-catalog");
+    if (uiBusyIn(el) && el.childElementCount) { deferRender("mm-cat", renderModels); return; }
+    S.mm._catSig = cat;
     const _ls = logScrollSnap(el);
     el.innerHTML = cat;
     logScrollBack(el, _ls);
