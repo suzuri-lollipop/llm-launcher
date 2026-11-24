@@ -49,7 +49,7 @@ const out = items.map(it => {
   const hw = it.sys ? hwFromSystem(it.sys) : null;
   const r = cfRecommend(it.backend, hw, it.sel, it.engine, it.ctxList, it.model);
   const rec = {}, why = {};
-  for (const k of ["ctx", "kv", "par", "out", "vis", "moe", "ple"]) {
+  for (const k of ["ctx", "kv", "par", "out", "vis", "moe", "ple", "kern", "tp"]) {
     rec[k] = r[k] ? r[k].v : null;
     why[k] = r[k] ? r[k].why : null;
   }
@@ -563,3 +563,26 @@ def test_inkling_kv_recommends_int8_over_fp8():
     assert got["ink_ampble"]["rec"]["kv"] == "int8"
     assert got["ink_no_gpu"]["rec"]["kv"] == "int8"
     assert got["qwen_tight"]["rec"]["kv"] == "fp8"   # 他家系の環境ベース推奨は不変
+
+
+def test_inkling_kernel_and_multi_gpu_recommendations():
+    """Inkling-2-Mini: GGML カーネルは CUDA 推奨 (NVIDIA)。2 枚以上なら複数 GPU 方式は
+    TP 推奨 (エキスパート分割で VRAM 節約)。1 枚 / 他家系にはこれらの推奨を出さない。"""
+    ink = {"inkling": True, "ple": False, "known": True}
+    got = _run([
+        {"kind": "rec", "name": "ink_2gpu", "backend": "freetoken-fork",
+         "sys": _hw([_gpu(24, cc=12.0), _gpu(24, cc=12.0, index="1")]),
+         "sel": _sel(), "engine": None, "model": ink},
+        {"kind": "rec", "name": "ink_1gpu", "backend": "freetoken-fork",
+         "sys": _hw([_gpu(24, cc=12.0)]), "sel": _sel(), "engine": None, "model": ink},
+        {"kind": "rec", "name": "qwen_2gpu", "backend": "freetoken-fork",
+         "sys": _hw([_gpu(24, cc=12.0), _gpu(24, cc=12.0, index="1")]),
+         "sel": _sel(), "engine": None, "model": {"inkling": False, "ple": True, "known": True}},
+    ])
+    assert got["ink_2gpu"]["rec"]["kern"] == "cuda"
+    assert got["ink_2gpu"]["rec"]["tp"] == "tp"
+    assert "分割" in got["ink_2gpu"]["why"]["tp"]
+    assert got["ink_1gpu"]["rec"]["kern"] == "cuda"
+    assert got["ink_1gpu"]["rec"]["tp"] is None      # 1 枚では複数 GPU 方式を推奨しない
+    assert got["qwen_2gpu"]["rec"]["kern"] is None
+    assert got["qwen_2gpu"]["rec"]["tp"] is None

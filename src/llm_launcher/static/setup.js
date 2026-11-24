@@ -1454,7 +1454,7 @@ const CF_OUT = [["8192", "8K", ""], ["16384", "16K", ""], ["32768", "32K", ""],
                 ["65536", "64K", ""], ["131072", "128K", ""]];
 /* 質問の固定順 (FreeToken 基準)。描画/補足/保存の 3 ループはリテラルのまま、
    推奨計算などの追加ループはこちらを使う。 */
-const CF_ORDER = ["ctx","out","kv","moe","ple","tp","par","vis"];
+const CF_ORDER = ["ctx","out","kv","moe","ple","kern","tp","par","vis"];
 
 /* ---------------------------------------------------------------- 環境適応の推奨 (純粋関数)
    色々な環境で使うため、「推奨」はコードに焼いた固定値ではなく、この PC の
@@ -1533,7 +1533,7 @@ function ftModelInfo(dlReq, job, mdList, modelPath, localList) {
    推奨は上限目安であり、最適値はキャリブレーション (⑤) が実測する。 */
 function cfRecommend(backend, hw, sel, engine, ctxList, model) {
   sel = sel || {};
-  const rec = { ctx: null, kv: null, par: null, out: null, vis: null, moe: null, ple: null };
+  const rec = { ctx: null, kv: null, par: null, out: null, vis: null, moe: null, ple: null, kern: null, tp: null };
   const ctxN = Number(sel.ctx) > 0 ? Number(sel.ctx) : 131072;
   /* out: コード生成既定 32K (workload 推奨・環境非依存)。選択 ctx は超えない。 */
   const outOpts = [8192, 16384, 32768, 65536, 131072];
@@ -1634,6 +1634,15 @@ function cfRecommend(backend, hw, sel, engine, ctxList, model) {
       : { v: "disk", why: "エンジン既定 — 約48GiBのテーブルを必要時にチェックポイントから読み、RAM/VRAMを節約" };
   }
 
+  /* Inkling-2-Mini: GGML カーネル (CUDA 既定 / Vulkan) と複数 GPU 方式 (TP / layer split)。
+     TP はエキスパートを分割 (VRAM 節約)。layer split は重みを両カードに複製して計算を分担
+     (tp2 専用・FREETOKEN_LAYER_SPLIT=1)。DSpark drafter は TP1 専用。 */
+  if (backend === "freetoken-fork" && model && model.inkling) {
+    rec.kern = { v: "cuda", why: "NVIDIA GPU → CUDA カーネル (高速・デコード CUDA graph 有効)" };
+    if (hw.gpus.length >= 2)
+      rec.tp = { v: "tp", why: "2枚: TP はエキスパートをカード間で分割 (VRAM 節約)。layer split は重みを両カードに複製して計算を分担" };
+  }
+
   /* Strata / Maya: エンジン自身が決めた値 (config の parallel / 純正公式の rec_context) が
      あれば、こちらの目安より優先する (純正の VRAM/RAM 計算が単一の源)。 */
   if ((backend === "strata" || backend === "maya") && engine) {
@@ -1673,19 +1682,28 @@ function cfSelFrom(curs, par) {
     }
     if (id === "ctx") sel.ctx = val;
     else if (id === "kv") sel.kv = val;
-    else if (id === "tp") { sel.tp = val; sel.gpu = val; }
+    else if (id === "tp") {
+      /* Inkling の GPU 方式 (1/tp/split) は予算計算用に枚数 (1/2) へ直す */
+      const t = sec.inkGpus ? (val === "tp" || val === "split" ? "2" : val) : val;
+      sel.tp = t; sel.gpu = t;
+    }
   }
   return sel;
 }
 /* フォームの現在の選択を読む (描画後の推奨再計算用) */
 function cfSelNow() {
+  const cfg = W.cfgRendered || RUNCFG[W.backend] || {};
   const sel = { par: cfParNow(), ctx: "", kv: "", tp: "", gpu: "" };
   for (const id of CF_ORDER) {
     const el = document.querySelector(`#cf-${id}`);
     if (!el) continue;
     if (id === "ctx") sel.ctx = el.value;
     else if (id === "kv") sel.kv = el.value;
-    else if (id === "tp") { sel.tp = el.value; sel.gpu = el.value; }
+    else if (id === "tp") {
+      const sec = cfg[id] || {};
+      const t = sec.inkGpus ? (el.value === "tp" || el.value === "split" ? "2" : el.value) : el.value;
+      sel.tp = t; sel.gpu = t;
+    }
   }
   return sel;
 }
@@ -1728,7 +1746,7 @@ function hwSummary(hw) {
 function cfSyncHints() {
   const cfg = W.cfgRendered || RUNCFG[W.backend] || {};
   const recs = cfApplyRec();
-  for (const id of ["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"]) {
+  for (const id of ["ctx", "out", "kv", "moe", "ple", "kern", "tp", "par", "vis"]) {
     const sec = cfg[id]; const hint = document.querySelector(`#cf-${id}-hint`);
     if (!sec || !hint) continue;
     let info = sec.hint || "";
@@ -1751,7 +1769,7 @@ function cfSyncHints() {
   }
 }
 /* 稼働設定 (③) の質問セット。画面の質問順は全バックエンド共通で
-   ctx → out → kv → moe → ple → tp → par → vis の固定順 (FreeToken のセットアップが基準)。
+   ctx → out → kv → moe → ple → kern → tp → par → vis の固定順 (FreeToken のセットアップが基準)。
    バックエンド追加時は実在するフラグの項目だけを入れる (順序は定義側に依存しない)。 */
 const RUNCFG = {
   "freetoken-fork": { regen: true, model: true,
@@ -1769,6 +1787,9 @@ const RUNCFG = {
     ple: { key: "ple_backend", label: "PLE配置", short: "PLE",
            hint: "PLE n-gramテーブルの置き場所です (Qwen3.8-Flash-Next系などのPLE搭載モデルのみ・テーブル約48GiB)。disk=必要時にチェックポイントから読む (既定・RAM/VRAM節約) / RAM=ピン留めRAMに一括ロード (取得が速い) / VRAM=VRAMに常駐 (最速・GPU1枚あたり約48GiBのVRAMを消費)。PLE非搭載モデルでは無視されます",
            opts: CF_PLE_FT, cur: v => v },
+    kern: { key: "ggml_backend", label: "GGMLカーネル", short: "カーネル", envKey: "FREETOKEN_GGML_BACKEND",
+            hint: "GGUF量子化重みの計算カーネルです (Inkling-2-Mini 向け)。CUDA=既定・高速 (デコードCUDA graph有効) / Vulkan=非NVIDIA GPU向け等。NVIDIAではデコードCUDA graphが無効になりCUDAより低速です (エンジンが memory_ratio を0.8に自動調整)。env FREETOKEN_GGML_BACKEND に書き込みます",
+            opts: [["cuda", "CUDA", "既定"], ["vulkan", "Vulkan", ""]], cur: v => v },
     tp: { key: "tp_size", label: "GPU分割数", short: "GPU分割",
           hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "max_running_requests", label: "並列推論数",
@@ -2081,6 +2102,15 @@ async function renderConfig() {
   if (W.backend === "freetoken-fork") {
     W.ftModel = ftModelInfo(W.dlReq, W.job, W.mdList, (p.values || {}).model_path, mdLocal);
     if (W.ftModel.known && !W.ftModel.ple) delete cfg.ple;
+    if (W.ftModel.inkling) {
+      /* Inkling: GGML カーネル質問 + 複数 GPU 方式 (2 枚以上で TP / layer split。
+         1 枚しか検出できなければ GPU 質問は出さない — Inkling は最大 2 枚) */
+      if ((W.sysGpus || []).length >= 2) {
+        cfg.tp = { key: "gpu_mode", label: "複数GPUの方式", short: "GPU", inkGpus: true,
+          hint: "2枚の使い方です。TP=エキスパートをカード間で分割 (VRAM節約・層ごとにallreduce) / layer split=各カードが半数の層を計算 (重みは両カードに複製・境界で活性を受け渡し、FREETOKEN_LAYER_SPLIT=1)。どちらも --tp-size 2 です。DSpark drafter は1枚専用",
+          opts: [["1", "1枚", ""], ["tp", "TP (2枚)", ""], ["split", "Layer split (2枚)", ""]], cur: v => v };
+      } else delete cfg.tp;
+    } else delete cfg.kern;
   }
   /* 実際に描画する質問セットを記録する: 保存 (cf-go) / 推奨タグ / 補足は
      この出し分け込みの定義を使う (RUNCFG の静的定義だと Maya GLM で
@@ -2104,6 +2134,13 @@ async function renderConfig() {
     curs[id] = String(v[sec.key] ?? "")
       || (sec.config ? String(W.cfgArgs[sec.flag] || "") : "");
   }
+  /* Inkling の GPU 方式 / カーネルは values でなく tp_size + env が正 — 現在値を復元 */
+  if (cfg.tp && cfg.tp.inkGpus) {
+    const t = String(v.tp_size || "");
+    curs.tp = t === "2" ? (((p.env || {}).FREETOKEN_LAYER_SPLIT === "1") ? "split" : "tp")
+              : (t === "1" ? "1" : "");
+  }
+  if (cfg.kern) curs.kern = (p.env || {}).FREETOKEN_GGML_BACKEND === "vulkan" ? "vulkan" : "cuda";
   /* 家系ホワイトリスト外の保存値 (③ 保存後に ② で家系を乗り換えた等) は
      セットアップジョブへ送れない — ② が控えた推奨へ戻してプリフィルする */
   if (ctxCs && curs.ctx && !ctxCs.includes(Number(curs.ctx)))
@@ -2126,7 +2163,7 @@ async function renderConfig() {
     return parseInt((r0.par || {}).v, 10) || parseInt((cfg.par.opts[0] || ["1"])[0], 10) || 1;
   })();
   const recs = cfRecommend(W.backend, W.hw, cfSelFrom(curs, parInit), W.cfgEngine, cfCtxList(), W.ftModel);
-  for (const id of ["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"]) {
+  for (const id of ["ctx", "out", "kv", "moe", "ple", "kern", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     if (sec.flag === "gpu" && (W.cfgArgs.gpus || []).length < 2) continue;  // 純正同じく2枚以上でだけ聞く
     if (sec.gpusFrom === "system" && (W.sysGpus || []).length < 2) continue;
@@ -2200,15 +2237,33 @@ $("#cf-go").addEventListener("click", async () => {
   err.classList.add("hidden");
   const vals = { ...(p.values || {}) };
   const on = p.on ? { ...p.on } : null;
+  const env = { ...(p.env || {}) };
   const chosen = [];
   const updates = {};   // config args への書き戻し (strata/maya の ctx/kv/tp)
   const par = cfParNow();   // 一人あたり項目が合計を書き込むときに使う並列数 (フォームの選択)
-  for (const id of ["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"]) {
+  for (const id of ["ctx", "out", "kv", "moe", "ple", "kern", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     const el = document.querySelector(`#cf-groups select#cf-${id}`);
     if (!el || !el.value) continue;
     const opt = el.selectedOptions[0];
     const raw = !!(opt && opt.dataset.raw === "1");
+    /* env 書き込み質問 (GGML カーネル): values でなくプロファイル env へ */
+    if (sec.envKey) {
+      env[sec.envKey] = el.value;
+      chosen.push((sec.short || sec.label.split(" ")[0]) + " "
+        + ((opt && opt.dataset.t1) || el.value));
+      continue;
+    }
+    /* Inkling 複数 GPU 方式: --tp-size と FREETOKEN_LAYER_SPLIT を導出 */
+    if (sec.inkGpus) {
+      vals.tp_size = el.value === "1" ? "1" : "2";
+      if (on) on.tp_size = true;
+      if (el.value === "split") env.FREETOKEN_LAYER_SPLIT = "1";
+      else delete env.FREETOKEN_LAYER_SPLIT;
+      chosen.push((sec.short || sec.label.split(" ")[0]) + " "
+        + ((opt && opt.dataset.t1) || el.value));
+      continue;
+    }
     // perUser (一人当たり設定) は JSON へ 合計 = 1人あたり × 並列数 を書く
     // (--num-tokens は全員で共有する KV 総量で、そのままだと 1 人あたりは並列数分で割れる)。
     // data-raw = 「現在の値をそのまま維持」を選ぶので掛けない
@@ -2291,7 +2346,7 @@ $("#cf-go").addEventListener("click", async () => {
   const nmEl = $("#cf-name");
   const newName = (nmEl && nmEl.value.trim()) || p.name;
   const body = { name: newName, backend: p.backend, values: vals, on,
-    extra_args: p.extra_args || "", env: p.env || {}, cwd: p.cwd || "", command: p.command || "",
+    extra_args: p.extra_args || "", env, cwd: p.cwd || "", command: p.command || "",
     custom_only: !!p.custom_only, note: p.note || "", simple_visible: !!p.simple_visible };
   const btn = $("#cf-go");
   btn.disabled = true;
