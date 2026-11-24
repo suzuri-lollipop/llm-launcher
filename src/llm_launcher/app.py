@@ -35,8 +35,9 @@ from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, Benc
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         cached_tags, clone_exists, current_ref, fork_tags, install_tool)
-from .models import (ModelError, build_inventory, delete_entry, hf_hub_cache_dir,
-                     profile_cache_misses, scan_data_models, scan_hf_cache)
+from .models import (ModelError, build_inventory, classify_gguf_files, delete_entry,
+                     hf_hub_cache_dir, profile_cache_misses, scan_data_models,
+                     scan_hf_cache)
 from . import maya_setup
 from . import oom
 from . import parallel_metrics as pm
@@ -2296,6 +2297,36 @@ def create_app(root: Path) -> FastAPI:
             hf_cache_state["data"] = await asyncio.to_thread(_scan)
             hf_cache_state["ts"] = time.monotonic()
         return hf_cache_state["data"]
+
+    # GGUF リポジトリは全量子化が 1 repo に入る (safetensors 配布と違う) ので、
+    # DL 前にファイル一覧を見せて量子化を選ばせる。レイアウトは配信者ごとに
+    # 違う (ルート直下 / サブフォルダ / .gguf_file / 分割) — 分類は models 側。
+    _repo_files_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+
+    @app.get("/api/hf-repo-files")
+    async def hf_repo_files(repo_id: str = "") -> dict[str, Any]:
+        repo = (repo_id or "").strip()
+        if not repo or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repo):
+            raise HTTPException(400, "repo_id が不正です (例: org/model-name)")
+        now = time.monotonic()
+        hit = _repo_files_cache.get(repo)
+        if hit and now - hit[0] < 600:
+            return hit[1]
+
+        def _fetch() -> list[dict[str, Any]]:
+            from huggingface_hub import HfApi
+            info = HfApi().model_info(repo, files_metadata=True)
+            return [{"path": s.rfilename, "size": int(s.size or 0)}
+                    for s in (info.siblings or [])]
+
+        try:
+            files = await asyncio.to_thread(_fetch)
+        except Exception as e:  # noqa: BLE001 — 一覧失敗は DL 全体 (repo 丸ごと) にフォールバック
+            return {"ok": False, "repo_id": repo, "error": str(e)[:200],
+                    "groups": [], "mmproj": [], "files": []}
+        out = {"ok": True, "repo_id": repo, "files": files, **classify_gguf_files(files)}
+        _repo_files_cache[repo] = (now, out)
+        return out
 
     # ------------------------------------------------------- モデル管理 (全バックエンド横断)
     # HF キャッシュ / model_data / Strata-data / Maya-data を 1 つの棚卸しに束ね、

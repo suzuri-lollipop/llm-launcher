@@ -278,7 +278,7 @@ class _FakeManager:
         v = profile.get("values") or {}
         argv = [sys.executable, "-m", "freetoken", "--port", str(v.get("port") or "1919")]
         mode = str(v.get("speculative_algorithm") or v.get("speculative") or "")
-        if mode in ("mtp", "dflash"):
+        if mode in ("mtp", "dflash", "dspark"):
             argv += ["--speculative-algorithm", mode]
         return argv
 
@@ -1681,6 +1681,77 @@ def test_freetoken_multi_moe_not_applied_keeps_launch_argv(tmp_path):
     assert argv[argv.index("--moe-strategy") + 1] == "offload"
 
 
+def test_freetoken_multi_spec_winner_replaces_launch_argv(tmp_path):
+    """投機勝者 (dspark 等) はツールのスクリプト契約どおり剥がしてから追記:
+    旧アルゴリズム / トークンマップ / ステップ数は残らず、無関係フラグは残る。"""
+    j = _write_launch_json(tmp_path, prof_id="p_ftm2",
+                           argv=["-m", "freetoken", "--port", "1919",
+                                 "--speculative-algorithm", "mtp",
+                                 "--speculative-token-map", "/t", "--spec-num-steps=3"])
+    prof = _ft_multi_profile()
+    prof["values"]["config"] = str(j)
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+
+    async def fake_step(job, step):
+        name, doc, env = _multi_doc(job["id"], "none")
+        doc["chosen"]["spec"] = {"algorithm": "dspark", "applied": True,
+                                 "argv": ["--speculative-algorithm", "dspark",
+                                          "--speculative-draft-model-path", "/mtp.safetensors"]}
+        (tmp_path / "data" / "calibrations" / name).write_text(json.dumps(doc))
+        return 0, ""
+    mgr._run_step = fake_step
+
+    async def go():
+        job = await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert job["report"]["spec"] == "dspark"
+    argv = json.loads(j.read_text())["argv"]
+    assert argv.count("--speculative-algorithm") == 1
+    assert argv[argv.index("--speculative-algorithm") + 1] == "dspark"
+    assert argv[argv.index("--speculative-draft-model-path") + 1] == "/mtp.safetensors"
+    assert "--speculative-token-map" not in argv and "--spec-num-steps=3" not in argv
+    assert "--port" in argv
+
+
+def test_freetoken_multi_spec_not_applied_clears_launch_spec(tmp_path):
+    """勝っても stack 検証で落ちた (applied=False) / none が最善の結論は、
+    プロファイルの古い投機フラグを起動 JSON から消す (ツールのスクリプトと同じ)。"""
+    j = _write_launch_json(tmp_path, prof_id="p_ftm2",
+                           argv=["-m", "freetoken", "--port", "1919",
+                                 "--speculative-algorithm", "dspark"])
+    prof = _ft_multi_profile()
+    prof["values"]["config"] = str(j)
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+
+    async def fake_step(job, step):
+        name, doc, env = _multi_doc(job["id"], "piped")
+        doc["chosen"]["spec"] = {"algorithm": "dspark", "applied": False,
+                                 "argv": ["--speculative-algorithm", "dspark"]}
+        (tmp_path / "data" / "calibrations" / name).write_text(json.dumps(doc))
+        return 0, ""
+    mgr._run_step = fake_step
+
+    async def go():
+        job = await mgr.start(prof, "freetoken-fork", cal_mode="multi")
+        while mgr.jobs[job["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[job["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert job["report"]["spec"] is None
+    argv = json.loads(j.read_text())["argv"]
+    assert "--speculative-algorithm" not in argv
+    assert "--port" in argv
+
+
 def test_freetoken_multi_none_winner_still_clears_stale_knobs(tmp_path):
     prof = _ft_multi_profile()
     _seed_profiles(tmp_path, prof)
@@ -1959,6 +2030,77 @@ def test_ft_grid_gates_chain_on_mtp():
     assert calibrate.ft_candidates("FREETOKEN_MTP_CHAIN_K", {}) == []
     assert calibrate.ft_candidates("FREETOKEN_MTP_CHAIN_K",
                                    {"FREETOKEN_MTP_LOOKUP_CHAIN": "1"}) == ["1", "3"]
+
+
+# ------------------------------------------------- FreeToken dspark (Inkling-2-Mini)
+#
+# fork は Inkling-2-Mini 公式の DSpark drafter (mtp.safetensors) を --speculative-algorithm
+# dspark で提供する (TP1 専用)。MTP ゲート env は dspark に存在しないため、sweep は
+# 基準のみ・auto は mtp の代わりに dspark を実測して none と比較する。
+
+def test_ft_grid_dspark_has_no_mtp_knobs():
+    assert calibrate.ft_grid("dspark") == []
+
+
+def test_with_spec_arms_dspark():
+    assert calibrate._with_spec(["--model-path", "/m"], "dspark") == [
+        "--model-path", "/m", "--speculative-algorithm", "dspark"]
+    # 旧綴り / = 形も剥がしてから dspark を立てる
+    assert calibrate._with_spec(["--speculative", "mtp", "--spec-algo=dflash"], "dspark") == [
+        "--speculative-algorithm", "dspark"]
+    # none / 空は off (フラグ値として書かない)
+    assert calibrate._with_spec(["--speculative-algorithm", "dspark"], "none") == []
+
+
+def test_cell_clone_legacy_keeps_dspark(tmp_path):
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    prof = {"id": "p", "backend": "freetoken",
+            "values": {"speculative_algorithm": "mtp"}, "env": {}}
+    clone, tmp_cfg = mgr._ft_cell_clone({"id": "c"}, prof, {}, "cell", {}, "dspark")
+    assert tmp_cfg is None
+    assert clone["values"]["speculative_algorithm"] == "dspark"
+
+
+def test_sweep_dspark_measures_baseline_only(tmp_path):
+    prof = {"id": "p_ft", "name": "ft", "backend": "freetoken",
+            "values": {"speculative_algorithm": "dspark"}, "on": {}, "env": {}}
+    _seed_profiles(tmp_path, prof)
+    (tmp_path / "module" / "freetoken").mkdir(parents=True)
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    seen = []
+
+    async def fake_cell(job, profile, base_env, label, overrides, copy=False, spec=None):
+        seen.append((label, spec, (profile.get("values") or {}).get("speculative_algorithm")))
+        return {"ok": True, "score": 10.0, "tokens": 128, "secs": 12.8, "latency": ""}
+    mgr._ft_run_cell = fake_cell
+
+    job = _run_ft_job(mgr, prof)
+    assert job["status"] == "done", job.get("error")
+    # 調整ノブ無し = 基準 1 セルだけ。セルはプロファイルの dspark をそのまま使う
+    assert seen == [("baseline", None, "dspark")]
+    assert job["report"]["settings"] == {}
+    # 死んだ MTP ノブを env に書き込まない
+    saved = json.loads((tmp_path / "profiles.json").read_text())[0]
+    assert not any(k.startswith("FREETOKEN_MTP_") for k in saved.get("env") or {})
+
+
+def test_phase_a_spec_reads_launch_json_and_checkpoint(tmp_path):
+    mgr = _mgr(tmp_path, tmp_path, _FakeManager())
+    cfg = tmp_path / "launch.json"
+    cfg.write_text(json.dumps({"argv": ["--model-path", "/m",
+                                        "--speculative-algorithm", "dspark"]}))
+    prof = {"id": "p", "backend": "freetoken-fork", "values": {"config": str(cfg)}}
+    assert mgr._ft_phase_a_spec(prof) == "dspark"
+    # 投機 off でも checkpoint の model_type が inkling2_loop なら dspark を実測する
+    mp = tmp_path / "inkling-model"
+    mp.mkdir()
+    (mp / "config.json").write_text(json.dumps({"model_type": "inkling2_loop",
+                                                "text_config": {"model_max_length": 1048576}}))
+    prof2 = {"id": "p2", "backend": "freetoken-fork", "values": {"model_path": str(mp)}}
+    assert mgr._ft_phase_a_spec(prof2) == "dspark"
+    # それ以外 (config 無し / 他アーキ) は mtp
+    prof3 = {"id": "p3", "backend": "freetoken-fork", "values": {}}
+    assert mgr._ft_phase_a_spec(prof3) == "mtp"
 
 
 def test_sweep_mtp_measures_chain_with_copy_probe(tmp_path):
@@ -2247,6 +2389,57 @@ def test_auto_mtp_winner_writes_mtp_env_and_mode(tmp_path):
     assert saved["env"]["FREETOKEN_MTP_MIN_P"] == "0.3"
 
 
+def test_auto_inkling_measures_dspark_instead_of_mtp(tmp_path):
+    # Inkling-2-Mini (投機現在値 dspark): フェーズ A は mtp ではなく dspark を実測し、
+    # 決勝で dspark が勝ったら --speculative-algorithm dspark を書き戻す
+    prof = _auto_prof(values={"max_running_requests": "4", "speculative_algorithm": "dspark"})
+    tour = {"final-none": (50.0, 88.0), "final-dspark": (70.0, 95.0),
+            "final-lookup": (66.0, 86.0), "final-lookup-mb": (66.0, 90.0)}
+    mgr, calls = _auto_setup(tmp_path, prof, tour, mtp_winner={})
+
+    async def go():
+        j = await mgr.start(prof, "freetoken", cal_mode="auto")
+        while mgr.jobs[j["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[j["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert calls["sweep"] == [(False, "dspark")]
+    assert [c[0] for c in calls["final"] if c[0].startswith("final-")] == [
+        "final-none", "final-dspark", "final-lookup", "final-lookup-mb"]
+    rep = job["report"]
+    assert rep["settings"]["--speculative-algorithm"] == "dspark"
+    detail = json.loads(next((tmp_path / "data" / "calibrations")
+                             .glob("calibration-cal_*.json")).read_text())
+    assert detail["spec_sweep_mode"] == "dspark"
+    saved = json.loads((tmp_path / "profiles.json").read_text())[0]
+    assert saved["values"]["speculative_algorithm"] == "dspark"
+
+
+def test_auto_inkling_detected_from_checkpoint_config(tmp_path):
+    # 投機 off の Inkling プロファイルでも checkpoint の model_type で dspark 腕を出す
+    mp = tmp_path / "inkling-model"
+    mp.mkdir()
+    (mp / "config.json").write_text(json.dumps({"model_type": "inkling2_loop"}))
+    prof = _auto_prof(values={"max_running_requests": "4", "model_path": str(mp)})
+    tour = {"final-none": (70.0, 95.0), "final-dspark": (50.0, 88.0),
+            "final-lookup": (66.0, 86.0), "final-lookup-mb": (66.0, 90.0)}
+    mgr, calls = _auto_setup(tmp_path, prof, tour, mtp_winner={})
+
+    async def go():
+        j = await mgr.start(prof, "freetoken", cal_mode="auto")
+        while mgr.jobs[j["id"]]["status"] in ("queued", "running"):
+            await asyncio.sleep(0.02)
+        return mgr.jobs[j["id"]]
+    job = asyncio.run(go())
+    assert job["status"] == "done", job.get("error")
+    assert calls["sweep"] == [(False, "dspark")]
+    # none が勝った構成では dspark を立てない (off のまま)
+    assert job["report"]["settings"]["--speculative-algorithm"] == "off"
+    saved = json.loads((tmp_path / "profiles.json").read_text())[0]
+    assert saved["values"]["speculative_algorithm"] == ""
+
+
 def test_auto_lookup_phase_failure_only_drops_lookup(tmp_path):
     prof = _auto_prof()
     tour = {"final-none": (50.0, 88.0), "final-mtp": (60.0, 92.0)}
@@ -2349,7 +2542,7 @@ def test_auto_mtp_phase_failure_only_drops_mtp(tmp_path):
     job = asyncio.run(go())
     assert job["status"] == "done", job.get("error")
     assert [c[0] for c in calls["final"] if c[0].startswith("final-")] == ["final-none", "final-lookup", "final-lookup-mb"]
-    assert any("MTP sweep 失敗" in ln for ln in job["logs"])
+    assert any("mtp sweep 失敗" in ln for ln in job["logs"])
     assert job["report"]["settings"]["--speculative-algorithm"] == "off"
 
 

@@ -66,6 +66,33 @@ WebUI のセットアップタブ (モデルダウンロード) でも同じ置�
 へ落とし (setup.sh と同一規則・同一 env)、完了後 `freetoken-launch.json` の
 `--model-path` / `model_name` だけを更新し、モデル欄のプルダウン (📦 表示) にも出ます。
 
+**Inkling-2-Mini**: fork の `docs/models.md` known-good 表に
+`thinkingmachines/Inkling-2-Mini` (NVFP4 experts・公式 DSpark drafter `mtp.safetensors` 同梱) と
+`unsloth/Inkling-2-Mini-GGUF` (Mainline_Support の `inkling2_loop` GGUF + `inkling2v` mmproj) が
+並び、セットアップ ② の対応モデル一覧から選べます。推測的デコードはプロファイル項目の
+`--speculative-algorithm dspark` (TP1 専用。drafter は checkpoint 同梱か
+`--speculative-draft-model-path`)。コンテキストは NoPE (rope 無し) なので YaRN は不要で、
+上限は checkpoint の 1M。キャリブレーションは single (auto) が DSpark vs none を自動選定、
+multi が並行 / MoE ノブ + DSpark 腕を校正します (MTP ゲート env の調整対象はありません)。
+
+**GGUF は量子化を選んでダウンロード** (ウィザード ②): GGUF リポジトリは
+safetensors 配布と違い全量子化が 1 repo に入る (数十〜百 GB 級) ので、repo を
+選ぶと HF のファイル一覧から量子化を選択する欄が出ます (サイズ・分割ファイル
+数つき)。選択した量子化 (+ mmproj 1 つ) だけを `allow_patterns` で取得します。
+レイアウトは配信者ごとに違います (bartowski 系はルート直下、unsloth は
+Mainline_Support サブフォルダ + `.gguf_file` 命名、分割 `-00001-of-0000N`) が、
+分類はランチャー側で吸収します。
+
+**GGUF の選択はファイル単位** (ウィザード ② / プロファイル編集の HF ピッカー):
+エンジンの `--model-path` は `.gguf` ファイル正体で、snapshot DIR を渡すと
+config.json を探して起動が落ちます。unsloth の `.gguf_file` にはランチャーが
+`.gguf` symlink を用意 (冪等・blob は不変更) し、ルートの mmproj もテキストの
+隣へ symlink します (エンジンはテキストの隣で mmproj を探す = 画像入力も有効)。
+mmproj が複数ある場合はエンジンの型優先 (BF16 > F32 > F16) で 1 つ取得。
+24GB カードには Inkling-2-Mini の Q4_K_XL (16.4GiB) が収まります。
+なお unsloth のルート直下 UD 量子化 (arch `inkling2`、独自ループレイアウト) は
+fork では served されません — Mainline_Support のファイルを選んでください。
+
 WebUI のバックエンド一覧には **FreeToken (fork)** として表示され、
 upstream submodule の `module/freetoken` (FreeToken) とは別々に起動できます。
 python のパスはバックエンド設定から明示指定も可能です

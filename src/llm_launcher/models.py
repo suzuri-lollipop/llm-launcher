@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -41,6 +42,89 @@ _WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt", ".gguf", ".strata")
 _WEIGHT_MIN = 1 << 20
 # サイズ計算の_walk_上限 (巨大なデータフォルダで API が固まらないための保険)
 _SIZE_MAX_FILES = 20000
+# GGUF の分割ファイル (llama.cpp 形式: name-00001-of-0000N.gguf)。1 量子化 = 1 グループ
+_GGUF_SPLIT_RE = re.compile(r"^(.*)-(\d{5})-of-(\d{5})\.gguf$")
+# ディレクトリ正体の重み (GGUF ファイル選択と併せて DIR 指定も出す判定)
+_DIR_WEIGHT_SUFFIXES = (".safetensors", ".bin", ".pt")
+
+
+def gguf_sidecar_kind(path: str) -> str | None:
+    """GGUF パスの「テキストモデルではない」種類: mmproj (ビジョン射影) /
+    mtp (ドラフト sidecar、unsloth の MTP/ 等)。テキスト量子化の選択に出さない。"""
+    base = os.path.basename(path).lower()
+    if not base.endswith((".gguf", ".gguf_file")):
+        return None
+    if "mmproj" in base:
+        return "mmproj"
+    if base.startswith("mtp-") or "/mtp/" in path.lower():
+        return "mtp"
+    return None
+
+
+def group_gguf_splits(gguf: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """スキャン済み GGUF 一覧 ({name, size}) の分割ファイルを 1 量子化にまとめる。
+    name は先頭パーツ (エンジンは先頭を渡せば兄弟を読む)、size は合算、parts は個数。"""
+    groups: dict[str, dict[str, Any]] = {}
+    for g in gguf:
+        m = _GGUF_SPLIT_RE.match(g["name"])
+        key = m.group(1) if m else g["name"]
+        e = groups.get(key)
+        if e is None:
+            groups[key] = {"name": g["name"], "size": g["size"], "parts": 1,
+                           "_first": g["name"]}
+        else:
+            e["size"] += g["size"]
+            e["parts"] += 1
+            if g["name"] < e["_first"]:
+                e["_first"] = g["name"]
+    out = []
+    for e in groups.values():
+        out.append({"name": e["_first"], "size": e["size"], "parts": e["parts"]})
+    out.sort(key=lambda g: g["name"])
+    return out
+
+
+def classify_gguf_files(files: list[dict[str, Any]]) -> dict[str, Any]:
+    """HF リポジトリのファイル一覧 ({path, size}) を GGUF 選択構造へ。
+    配信者ごとにレイアウトが違う (ルート直下 / サブフォルダ / .gguf_file 命名)
+    のでパス全体で判定する。テキスト量子化は分割をまとめて groups に、
+    mmproj は companions に。ダウンロードは選択パスだけ (allow_patterns)。"""
+    groups: dict[str, dict[str, Any]] = {}
+    mmproj: list[dict[str, Any]] = []
+    for f in files:
+        path = str(f.get("path") or "")
+        size = int(f.get("size") or 0)
+        kind = gguf_sidecar_kind(path)
+        if kind == "mmproj":
+            mmproj.append({"path": path, "size": size})
+            continue
+        if kind is not None or not path.lower().endswith((".gguf", ".gguf_file")):
+            continue
+        m = _GGUF_SPLIT_RE.match(path)
+        key = m.group(1) if m else path
+        e = groups.get(key)
+        if e is None:
+            # 表示名はエンジンが読む .gguf 形 (.gguf_file は DL 後に symlink 準備)
+            first = path[:-len(".gguf_file")] + ".gguf" if path.endswith(".gguf_file") else path
+            groups[key] = {"name": first, "paths": [path], "size": size, "parts": 1}
+        else:
+            e["paths"].append(path)
+            e["size"] += size
+            e["parts"] += 1
+    out = []
+    for e in groups.values():
+        e["paths"].sort()
+        out.append(e)
+    out.sort(key=lambda g: g["name"])
+
+    def _mmproj_rank(f: dict[str, Any]) -> tuple:
+        # エンジンの _TYPE_RANK (BF16 > F32 > F16) に合わせる。DL は先頭 1 つで十分
+        base = os.path.basename(f["path"]).lower()
+        t = 0 if "bf16" in base else 1 if "f32" in base else 2 if "f16" in base else 3
+        return (t, f["path"].count("/"), f["path"])
+
+    mmproj.sort(key=_mmproj_rank)
+    return {"groups": out, "mmproj": mmproj}
 
 
 class ModelError(Exception):
@@ -130,23 +214,45 @@ def _dir_weights(d: Path, max_files: int = 400) -> tuple[bool, list[dict[str, An
     return has_weights, gguf
 
 
-def _weights_in(d: Path, max_files: int = 400) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]]]:
-    """モデルディレクトリの重み判定 (汎用重み + GGUF + Basalt pack)。
+def _prepare_gguf_file(f: Path) -> Path:
+    """unsloth の Mainline_Support はテキスト GGUF を .gguf_file と名付ける。
+    エンジンは .gguf を読む (fork docs: rename) ので、隣に .gguf symlink を用意
+    (冪等・blob は触らない)。テキストがサブフォルダにある場合はルートの mmproj
+    もそのフォルダへ symlink する (エンジンはテキストの隣で mmproj を探す)。"""
+    alias = f.with_suffix(".gguf")
+    try:
+        if not alias.exists():
+            alias.symlink_to(f.name)
+        for mp in sorted(f.parent.parent.glob("*mmproj*.gguf")):
+            link = f.parent / mp.name
+            if not link.exists():
+                link.symlink_to(os.path.relpath(mp, f.parent))
+    except OSError:
+        pass
+    return alias
 
-    直下に重みが無ければ 1 階層だけ下も見る (GGUF のサブフォルダ / シャード
-    ディレクトリ等)。名前は d からの相対 (ネスト時は "sub/file" — ウィザードの
-    pack パス結合 snapshot + "/" + name がそのまま効く)。
+
+def _weights_in(d: Path, max_files: int = 400) -> tuple[bool, list[dict[str, Any]], list[dict[str, Any]], bool]:
+    """モデルディレクトリの重み判定 (汎用重み + GGUF + Basalt pack + DIR 正体重み)。
+
+    2 階層下まで見る (GGUF のサブフォルダは配信者ごとに違う: unsloth の
+    Mainline_Support はルートに mmproj だけを置きテキストをサブフォルダに置く)。
+    名前は d からの相対 (ネスト時は "sub/file" — ウィザードの pack パス結合
+    snapshot + "/" + name がそのまま効く)。
     has_weights は「汎用重み」の有無 — .basalt は Basalt 専用 pack で他バック
     エンドは読めないため含めない (含めると FreeToken 等の「ダウンロード済み
-    モデル」に basalt pack が漏れる)。
+    モデル」に basalt pack が漏れる)。mmproj / mtp sidecar はテキストモデル
+    ではないため重みにも GGUF 一覧にも数えない。dir_weights は safetensors 等
+    の DIR 正体重み (GGUF ファイル選択と併せて DIR 指定も出す判定)。
     hf 2.x の共有 blob (snapshots が hub/blobs への symlink) は is_file/stat が
     実体を辿るのでそのまま判定できる。"""
     has_weights = False
+    dir_weights = False
     gguf: list[dict[str, Any]] = []
     basalt: list[dict[str, Any]] = []
 
     def scan_dir(sd: Path, prefix: str) -> None:
-        nonlocal has_weights
+        nonlocal has_weights, dir_weights
         try:
             entries = sorted(sd.iterdir())
         except OSError:
@@ -158,9 +264,16 @@ def _weights_in(d: Path, max_files: int = 400) -> tuple[bool, list[dict[str, Any
                 size = f.stat().st_size
             except OSError:
                 continue
+            if gguf_sidecar_kind(f.name) is not None:
+                continue
             suf = f.suffix.lower()
+            if suf == ".gguf_file":
+                f = _prepare_gguf_file(f)
+                suf = ".gguf"
             if suf in _WEIGHT_SUFFIXES and size > _WEIGHT_MIN:
                 has_weights = True
+            if suf in _DIR_WEIGHT_SUFFIXES and size > _WEIGHT_MIN:
+                dir_weights = True
             if suf == ".gguf":
                 gguf.append({"name": prefix + f.name, "size": size})
             if suf == ".basalt":
@@ -168,15 +281,19 @@ def _weights_in(d: Path, max_files: int = 400) -> tuple[bool, list[dict[str, Any
             if len(gguf) + len(basalt) >= max_files:
                 return
 
-    scan_dir(d, "")
-    if not (has_weights or gguf or basalt):
+    def walk(sd: Path, prefix: str, depth: int) -> None:
+        scan_dir(sd, prefix)
+        if depth >= 2 or len(gguf) + len(basalt) >= max_files:
+            return
         try:
-            subs = sorted(c for c in d.iterdir() if c.is_dir())
+            subs = sorted(c for c in sd.iterdir() if c.is_dir() and not c.name.startswith("."))
         except OSError:
-            subs = []
-        for c in subs:
-            scan_dir(c, c.name + "/")
-    return has_weights, gguf, basalt
+            return
+        for c in subs[:64]:
+            walk(c, prefix + c.name + "/", depth + 1)
+
+    walk(d, "", 0)
+    return has_weights, gguf, basalt, dir_weights
 
 
 # Maya のモデル置き場で「モデルではない」構成要素ディレクトリ (drafter / vision エンコーダ)。
@@ -226,24 +343,88 @@ def scan_pack_dirs(droot: Path, *, skip_names: frozenset[str] = frozenset(),
 
 def scan_data_models(models_root: Path, max_files: int = 400) -> list[dict[str, Any]]:
     """setup.sh / UI が <data>/models/<org>--<name> へ置いたモデルを一覧化する。
-    scan_hf_cache と同じ形のレコード (snapshot はフォルダそのもの)。"""
+    scan_hf_cache と同じ形のレコード (snapshot はフォルダそのもの)。
+    HF キャッシュ形式 (models--org--name、hf download CLI 等が置く) が混在して
+    いたら snapshots を同じ規則で解決する (重みは snapshots/<rev>/ の下)。"""
     out: list[dict[str, Any]] = []
     if not models_root.is_dir():
         return out
     for d in models_root.iterdir():
         if not d.is_dir():
             continue
-        has_weights, gguf, basalt = _weights_in(d, max_files)
+        if d.name.startswith("models--"):
+            m = _hf_repo_entry(d, max_files)
+            if m is not None:
+                out.append({**m, "source": "data"})
+            continue
+        has_weights, gguf, basalt, dir_weights = _weights_in(d, max_files)
         try:
             mtime = d.stat().st_mtime
         except OSError:
             continue
         out.append({"repo_id": d.name.replace("--", "/", 1), "snapshot": str(d),
-                    "revision": "", "has_weights": has_weights, "gguf": gguf,
+                    "revision": "", "has_weights": has_weights,
+                    "gguf": group_gguf_splits(gguf), "dir_weights": dir_weights,
                     "basalt": basalt, "source": "data", "mtime": mtime,
                     "size_bytes": dir_size(d)})
     out.sort(key=lambda m: m["mtime"], reverse=True)
     return out
+
+
+def _hf_repo_entry(d: Path, max_files: int = 400) -> dict[str, Any] | None:
+    """HF キャッシュの models--org--name ディレクトリ 1 件 -> モデルレコード。
+    snapshots が無ければ None。scan_hf_cache と scan_data_models (データフォルダに
+    HF キャッシュ形式が混在するケース) の共通解決。"""
+    repo_id = d.name[len("models--"):].replace("--", "/", 1)
+    snaps_dir = d / "snapshots"
+    if not snaps_dir.is_dir():
+        return None
+    refs: dict[str, str] = {}
+    refs_dir = d / "refs"
+    if refs_dir.is_dir():
+        for rf in refs_dir.rglob("*"):        # refs/pr/1 のような入れ子ブランチにも対応
+            try:
+                if rf.is_file():
+                    refs[str(rf.relative_to(refs_dir))] = rf.read_text().strip()
+            except OSError:
+                continue
+    snaps = [s for s in snaps_dir.iterdir() if s.is_dir()]
+    if not snaps:
+        return None
+    def snap_mtime(s: Path) -> float:
+        try:
+            return s.stat().st_mtime
+        except OSError:
+            return 0
+    snaps.sort(key=snap_mtime, reverse=True)
+    wanted = refs.get("main") or refs.get("master")
+    preferred = next((s for s in snaps if wanted and s.name.startswith(wanted)), None)
+    # 全 snapshot を評価して「重みのあるもの」を選ぶ。refs/main が空 /
+    # config だけの snapshot を指していても、別 rev に重みがあればそちらを
+    # 出す — プロファイルが旧 rev の snapshot で稼働中なのに一覧に出ない
+    # (2026-11-18 報告) を防ぐ。重みがどこにも無ければ従来どおり
+    # refs/main 優先 / mtime 最新 (config だけの repo も一覧には残す)。
+    evaluated = [(s, *_weights_in(s, max_files)) for s in snaps]
+    with_weights = [t for t in evaluated if t[1] or t[2] or t[3]]
+    if with_weights:
+        chosen, has_weights, gguf, basalt, dir_weights = next(
+            (t for t in with_weights if preferred is not None and t[0] == preferred),
+            with_weights[0])
+    else:
+        chosen = preferred or snaps[0]
+        has_weights, gguf, basalt, dir_weights = next(t[1:] for t in evaluated if t[0] == chosen)
+    revision = next((k for k, v in refs.items() if chosen.name.startswith(v)), None) or chosen.name[:10] or "main"
+    return {
+        "repo_id": repo_id,
+        "snapshot": str(chosen),
+        "revision": revision,
+        "has_weights": has_weights,
+        "gguf": group_gguf_splits(gguf),
+        "dir_weights": dir_weights,
+        "basalt": basalt,
+        "size_bytes": dir_size(d),
+        "mtime": snap_mtime(chosen),
+    }
 
 
 def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, Any]:
@@ -256,55 +437,9 @@ def scan_hf_cache(base: Path | None = None, max_files: int = 400) -> dict[str, A
     for d in base.iterdir():
         if not d.is_dir() or not d.name.startswith("models--"):
             continue
-        repo_id = d.name[len("models--"):].replace("--", "/", 1)
-        snaps_dir = d / "snapshots"
-        if not snaps_dir.is_dir():
-            continue
-        refs: dict[str, str] = {}
-        refs_dir = d / "refs"
-        if refs_dir.is_dir():
-            for rf in refs_dir.rglob("*"):        # refs/pr/1 のような入れ子ブランチにも対応
-                try:
-                    if rf.is_file():
-                        refs[str(rf.relative_to(refs_dir))] = rf.read_text().strip()
-                except OSError:
-                    continue
-        snaps = [s for s in snaps_dir.iterdir() if s.is_dir()]
-        if not snaps:
-            continue
-        def snap_mtime(s: Path) -> float:
-            try:
-                return s.stat().st_mtime
-            except OSError:
-                return 0
-        snaps.sort(key=snap_mtime, reverse=True)
-        wanted = refs.get("main") or refs.get("master")
-        preferred = next((s for s in snaps if wanted and s.name.startswith(wanted)), None)
-        # 全 snapshot を評価して「重みのあるもの」を選ぶ。refs/main が空 /
-        # config だけの snapshot を指していても、別 rev に重みがあればそちらを
-        # 出す — プロファイルが旧 rev の snapshot で稼働中なのに一覧に出ない
-        # (2026-11-18 報告) を防ぐ。重みがどこにも無ければ従来どおり
-        # refs/main 優先 / mtime 最新 (config だけの repo も一覧には残す)。
-        evaluated = [(s, *_weights_in(s, max_files)) for s in snaps]
-        with_weights = [t for t in evaluated if t[1] or t[2] or t[3]]
-        if with_weights:
-            chosen, has_weights, gguf, basalt = next(
-                (t for t in with_weights if preferred is not None and t[0] == preferred),
-                with_weights[0])
-        else:
-            chosen = preferred or snaps[0]
-            has_weights, gguf, basalt = next(t[1:] for t in evaluated if t[0] == chosen)
-        revision = next((k for k, v in refs.items() if chosen.name.startswith(v)), None) or chosen.name[:10] or "main"
-        entries.append((snap_mtime(chosen), {
-            "repo_id": repo_id,
-            "snapshot": str(chosen),
-            "revision": revision,
-            "has_weights": has_weights,
-            "gguf": gguf,
-            "basalt": basalt,
-            "size_bytes": dir_size(d),
-            "mtime": snap_mtime(chosen),
-        }))
+        m = _hf_repo_entry(d, max_files)
+        if m is not None:
+            entries.append((m["mtime"], m))
     entries.sort(key=lambda t: t[0], reverse=True)
     result["models"] = [m for _, m in entries]
     return result
@@ -337,7 +472,7 @@ def profile_cache_misses(root: Path, profiles: list[dict[str, Any]],
                 continue
             if not rp.is_dir() or str(rp) in known_paths or str(rp) in seen:
                 continue
-            has_weights, gguf, basalt = _weights_in(rp)
+            has_weights, gguf, basalt, dir_weights = _weights_in(rp)
             if not (has_weights or gguf or basalt):
                 continue
             parts = rel.parts
@@ -353,7 +488,8 @@ def profile_cache_misses(root: Path, profiles: list[dict[str, Any]],
             except OSError:
                 mtime = 0
             out.append({"repo_id": repo_id, "snapshot": str(rp), "revision": "",
-                        "has_weights": has_weights, "gguf": gguf, "basalt": basalt,
+                        "has_weights": has_weights, "gguf": group_gguf_splits(gguf),
+                        "dir_weights": dir_weights, "basalt": basalt,
                         "source": "cache", "mtime": mtime, "size_bytes": dir_size(rp)})
     out.sort(key=lambda m: m["mtime"], reverse=True)
     return out
