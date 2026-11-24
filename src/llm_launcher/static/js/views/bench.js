@@ -79,7 +79,7 @@ function bmInit() {
   try { d = JSON.parse(localStorage.getItem(BM_KEY) || "{}") || {}; } catch { d = {}; }
   // cmp: 比較に選んだ run id (選択順 = 比較表の基準順), cmpMetric / cmpConc: 比較パネルの選択
   // tab: ページ内タブ (実行 / 履歴・管理 / 結果・比較) — 選択を localStorage で保つ
-  S.bench = { runs: [], active: null, busy: false, _pSig: "", _bh: "", _bc: "", _recv: 0,
+  S.bench = { runs: [], active: null, busy: false, _ba: "", _bh: "", _bc: "", _recv: 0,
               cmp: [], cmpMetric: "decode", cmpConc: null, moreCols: false,
               profiles: [], bpId: "",
               tab: BM_TABS.includes(d.tab) ? d.tab : "run" };
@@ -889,20 +889,17 @@ function renderBench() {
   if (!S.bench) bmInit();
   const ps = S.state?.profiles || [];
   const sel = $("#bm-profile");
-  const sig = ps.map(p => p.id + ":" + p.name).join("|");
   const cur = sel.value;
-  if (sig !== S.bench._pSig || ![...sel.options].some(o => o.value === cur)) {
-    S.bench._pSig = sig;
-    sel.innerHTML = ps.length
-      ? ps.map(p => `<option value="${p.id}">${esc(p.name)} · ${esc(backendById(p.backend)?.name || p.backend)}</option>`).join("")
-      : `<option value="">プロファイルがありません (作成してください)</option>`;
-    if (cur) sel.value = cur;
-  }
+  // setOptions = 顔ぶれが変わらなければ触らない / ドロップダウンを開いている間は組み直さない
+  setOptions(sel, ps.length
+    ? ps.map(p => `<option value="${p.id}">${esc(p.name)} · ${esc(backendById(p.backend)?.name || p.backend)}</option>`).join("")
+    : `<option value="">プロファイルがありません (作成してください)</option>`, "bm-profile", renderBench);
   const p = ps.find(x => x.id === cur) || null;
   const sess = p ? liveOf(p.id) : null;
   const st = $("#bm-prof-state");
   st.className = "badge " + (sess ? (sess.ready ? "ok" : "warn") : "");
-  st.innerHTML = `<span class="dot"></span>` + (sess ? (sess.ready ? `稼働中 :${sess.port || "-"}` : "起動中…") : "未起動");
+  const sth = `<span class="dot"></span>` + (sess ? (sess.ready ? `稼働中 :${sess.port || "-"}` : "起動中…") : "未起動");
+  if (st.innerHTML !== sth) st.innerHTML = sth;
   $("#bm-prof-note").textContent = !p ? "先にプロファイルを作成してください。"
     : sess ? "起動中サーバーをそのまま使用します (再起動はしません)。"
     : ($("#bm-autostart").checked ? "未起動 → ベンチ開始時に自動起動して API 応答を待ちます。"
@@ -938,10 +935,22 @@ function bmTabBar() {
 }
 function renderBenchActive(run) {
   const el = $("#bm-active");
-  if (!run) { el.innerHTML = ""; return; }
+  if (!run) { setHtml(el, "", "bm-act", () => renderBenchActive(S.bench.runs.find(r => r.id === S.bench.active) || null)); return; }
   // スクロール中は組み直しを後回し (結果表の横スクロールバーを掴んだままにできる)
   if (uiScrolling() && el.childElementCount) { deferRender("bm-act", () => renderBenchActive(run)); return; }
+  // テキスト選択して読んでいる間 / アニメーション中も後回し (操作中のオブジェクトを巻き込まない)
+  if (uiBusyIn(el) && el.childElementCount) { deferRender("bm-act", () => renderBenchActive(run)); return; }
+  const html = bmActiveCard(run);
+  // ライブ更新は実行中だけ。完了済みカードは内容が変わらない限り組み直さない
+  if (html === S.bench._ba && el.childElementCount) return;
+  S.bench._ba = html;
   const _ls = logScrollSnap(el);                // 2.5 秒ごとの再描画で表の横スクロールを保つ
+  el.innerHTML = html;
+  logScrollBack(el, _ls);
+}
+/* 実行中カードの HTML。実行中は進捗が毎ポーリング変わるのでライブ更新の対象、
+   完了後は内容が固定なので renderBenchActive のキャッシュが書き換えをスキップする。 */
+function bmActiveCard(run) {
   const pr = run.progress || {};
   const skew = run.status === "running" || run.status === "queued" ? (Date.now() / 1000) - (S.bench._recv || 0) : 0;
   const secs = (pr.elapsed || 0) + skew;
@@ -976,7 +985,7 @@ function renderBenchActive(run) {
     : dec != null ? ` · <svg class=ic aria-hidden=true><use href=#i-bolt /></svg> decode Σ <b>${bmTps(dec)}</b> tok/s (完了分・1 本あたり平均)`
     : tps != null ? ` · <svg class=ic aria-hidden=true><use href=#i-bolt /></svg> ${bmTps(tps)} tok/s 出力 (decode Σ は最初のトークンから)` : "";
   const modelNote = run.model ? `model: ${run.model}` : bmParamsSummary(run.params || {});
-  el.innerHTML = `<div class="card" style="border-color:#c6dafc">
+  return `<div class="card" style="border-color:#c6dafc">
     <div class="row">
       ${bmStatusBadge(run)}
       <b class="grow ellip" style="font-size:15px">${esc(run.profile_name)}</b>
@@ -994,7 +1003,6 @@ function renderBenchActive(run) {
     ${(run.stages || []).map(st => bmTextBlock(`デコード出力 (${st.concurrency}${ulab})`, st.reqs, `a:${run.id}:s${st.concurrency}`, run.params)).join("")}
     ${(pr.reqs || []).some(q => q && q.tx != null) ? bmTextBlock("デコード出力 (ライブ)", pr.reqs, `a:${run.id}:live`, run.params) : ""}
   </div>`;
-  logScrollBack(el, _ls);
 }
 /* 履歴・管理タブ: 結果の一覧と管理操作だけ (結果を見る / 設定再実行 / 保存 / 削除 /
    一括クリア)。結果の表示・比較は「結果・比較」タブの役目なのでここに置かない */
@@ -1008,14 +1016,15 @@ function renderBenchHistory() {
   }
   // スクロール中は組み直しを後回し (摘まみを離してしまう)。枠が空のときは必ず描く
   if (uiScrolling() && el.childElementCount) { deferRender("bm-hist", renderBenchHistory); return; }
-  const html = `<div class="row" style="margin-top:14px;align-items:center;flex-wrap:wrap">
+  if (uiBusyIn(el) && el.childElementCount) { deferRender("bm-hist", renderBenchHistory); return; }
+  const head = `<div class="row" style="margin-top:14px;align-items:center;flex-wrap:wrap">
       <h2 class="view-title" style="margin:0">履歴 (${runs.length})</h2>
       <span class="muted" style="font-size:11.5px">一覧と管理。結果の表示・比較は「結果・比較」タブへ</span><span class="grow"></span>
       <button class="ghost danger" title="完了済みの履歴をまとめて消します (実行中は残りません)" onclick="bmClearAll()"><svg class=ic aria-hidden=true><use href=#i-trash /></svg> 履歴をクリア</button>
-    </div>` +
-    runs.map(r => {
+    </div>`;
+  const rowsHtml = runs.map(r => {
       const pk = bmPeakOf(r);
-      return `<div class="card bm-run" data-run="${esc(r.id)}">
+      return `<div class="card bm-run" data-run="${esc(r.id)}" data-row="${esc(r.id)}">
       <div class="row">
         ${bmStatusBadge(r)}
         <b class="grow ellip" style="font-size:14.5px">${esc(r.profile_name)}</b>
@@ -1034,11 +1043,15 @@ function renderBenchHistory() {
       </div>
     </div>`;
     }).join("");
+  const html = head + rowsHtml;
   // 中身が変わらなければ組み直さない (履歴は fmtAgo のラベルしか変わらないので、
   // これで再構築は分単位に 1 回になる)
   if (html === S.bench._bh && el.childElementCount) return;
   S.bench._bh = html;
-  el.innerHTML = html;
+  // 見出しと行を分離: 「N 分前」等が変わった行だけ組み直す (patchRows)
+  if (!el.querySelector("[data-rows]")) el.innerHTML = `<div data-head></div><div data-rows></div>`;
+  setHtml(el.querySelector("[data-head]"), head, "bm-hist-head", renderBenchHistory);
+  patchRows(el.querySelector("[data-rows]"), rowsHtml, "bm-hist", renderBenchHistory);
 }
 /* 結果・比較タブ: 実行を選んで表示 — 1 件 = 結果の詳細 (経時チャート・段表・フェーズ
    スイムレーン)、2 件以上 = 経時カーブ / 並列度カーブ / 指標表で比較。
@@ -1053,6 +1066,7 @@ function renderBenchCompare() {
     return;
   }
   if (uiScrolling() && el.childElementCount) { deferRender("bm-cmp", renderBenchCompare); return; }
+  if (uiBusyIn(el) && el.childElementCount) { deferRender("bm-cmp", renderBenchCompare); return; }
   const picks = runs.map(r => {
     const on = (d.cmp || []).includes(r.id);
     const pk = bmPeakOf(r);

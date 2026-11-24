@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
@@ -33,6 +33,8 @@ from .process import VIA_SIMPLE, VIA_UI, ProcessManager, port_in_use
 from .store import JsonStore, new_id, now
 from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
+from .coding import (CodingAssets, CodingError, CodingManager, PiTool,
+                     PROXY_BODY_MAX, guess_type, safe_join, sandbox_info)
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         cached_tags, clone_exists, current_ref, fork_tags, install_tool)
 from .models import (ModelError, build_inventory, classify_gguf_files, delete_entry,
@@ -215,6 +217,40 @@ class BenchProfileBody(BaseModel):
     """保存するベンチマークプロファイル (名前 + BenchBody の params)。"""
     name: str = Field(min_length=1, max_length=80)
     params: dict[str, Any]
+
+
+class CodingBody(BaseModel):
+    """コーディングベンチマーク設定。pi ハーネスに profile_id のサーバーで
+    バックエンド / フロントエンドを順番に作らせる (サンドボックス内で実行)。
+
+    空文字の資材 (skills_dir / agents_path / 各プロンプト) は data/coding/defaults/
+    の既定値で補完する。"""
+    profile_id: str = Field(min_length=1)
+    name: str = Field(default="", max_length=120)
+    model: str = ""                       # 空 = /v1/models の先頭 id を自動使用
+    skills_dir: str = ""                  # 空 = デフォルトのスキル群フォルダ
+    agents_path: str = ""                 # 空 = デフォルトの AGENTS.md
+    backend_prompt: str = ""              # 空 = デフォルトプロンプト
+    frontend_prompt: str = ""
+    thinking: str = "off"                 # off | minimal | low | medium | high
+    phase_timeout: int = Field(default=1800, ge=30, le=14400)   # pi 1 フェーズの上限秒
+    ready_timeout: int = Field(default=600, ge=10, le=3600)
+    auto_start: bool = True
+    stop_after: bool = False
+    sandbox: bool = True                  # bubblewrap サンドボックス (既定 ON)
+
+    @model_validator(mode="after")
+    def _normalize(self) -> "CodingBody":
+        if self.thinking not in ("off", "minimal", "low", "medium", "high"):
+            raise ValueError("thinking は off / minimal / low / medium / high です")
+        if len(self.backend_prompt) > 32000 or len(self.frontend_prompt) > 32000:
+            raise ValueError("プロンプトは 32000 文字までです")
+        return self
+
+
+class CodingPreviewBody(BaseModel):
+    """プレビュー起動の上書きコマンド (空 = 自動検出したエントリを python3 で実行)。"""
+    command: str = Field(default="", max_length=500)
 
 
 class CalibrateBody(BaseModel):
@@ -496,6 +532,12 @@ def create_app(root: Path) -> FastAPI:
     # キャリブレーションは同じプロファイルのサーバーを止めてエンジンを起動するので、
     # ベンチと重なると双方の結果が壊れる (ロックは bench 側が持つ)。
     calibrate.attach_exclusive(bench.exclusive)
+    # コーディングベンチマーク (pi ハーネスでバックエンド / フロントエンドを作らせる)
+    coding_assets = CodingAssets(root)
+    coding_pi = PiTool(settings_store, data_dir / "coding" / "pi-install.log")
+    coding = CodingManager(root, JsonStore(data_dir / "coding.json", []),
+                           profiles_store, manager, coding_assets, coding_pi)
+    coding.attach_exclusive(bench.exclusive)
     installs_store = JsonStore(data_dir / "installs.json", [])
     installs = InstallManager(root, installs_store, manager)
     auth = AuthManager(users_store, sessions_store)
@@ -641,6 +683,13 @@ def create_app(root: Path) -> FastAPI:
             print(f"data レイアウト移行に失敗 (起動は続行): {type(e).__name__}: {e}",
                   file=sys.stderr)
         bench.on_startup()
+        # コーディングベンチのデフォルト資材 (スキル / AGENTS.md / プロンプト) を保証し、
+        # 再起動で死んだ実行中ジョブを lost に回復する
+        coding_assets.ensure_defaults()
+        lost_cb = coding.on_startup()
+        if lost_cb:
+            print(f"coding bench recovery: {len(lost_cb)} 件の中断ジョブを lost にしました "
+                  f"({', '.join(lost_cb[:4])})", file=sys.stderr)
         # キャリブレーションは 10-40 分の fire-and-forget ジョブ。launcher が OOM kill / restart されると
         # task は死ぬがファイル上の status は "running" のまま残るので、起動時に "lost" へ回復する。
         lost = calibrate.on_startup()
@@ -667,6 +716,7 @@ def create_app(root: Path) -> FastAPI:
                 await t
         daily_active_store.save()
         await bench.shutdown()
+        await coding.shutdown()
         await manager.shutdown(kill=False)
 
     # ---------------------------------------------------------------- auth
@@ -2632,6 +2682,233 @@ def create_app(root: Path) -> FastAPI:
         if not bench_profiles.delete(pid):
             raise HTTPException(404, "ベンチプロファイルが見つかりません")
         return {"ok": True}
+
+    # ---------------------------------------------------------- coding benchmark
+    # pi ハーネス (https://github.com/earendil-works/pi) にプロファイルのサーバーで
+    # バックエンド / フロントエンドを作らせるコーディングベンチマーク。
+    # 実行はサンドボックス (bubblewrap) 内。履歴から 2 件選んでプレビューを
+    # 並べるビューアー用のファイル参照 / プレビュー起動 / 中継もここに出す。
+
+    def _coding_params(body: CodingBody) -> dict[str, Any]:
+        """空の資材指定をデフォルト値で補完し、パスの存在を検証する。"""
+        d = coding_assets.defaults_info()
+        skills_dir = body.skills_dir.strip() or d["skills_dir"]
+        agents_path = body.agents_path.strip() or d["agents_path"]
+        if not Path(skills_dir).is_dir():
+            raise HTTPException(422, f"スキルフォルダが見つかりません: {skills_dir}")
+        if not Path(agents_path).is_file():
+            raise HTTPException(422, f"AGENTS.md が見つかりません: {agents_path}")
+        return {
+            "model": body.model.strip(),
+            "name": body.name.strip(),
+            "skills_dir": skills_dir,
+            "agents_path": agents_path,
+            "backend_prompt": body.backend_prompt.strip() or d["backend_prompt"],
+            "frontend_prompt": body.frontend_prompt.strip() or d["frontend_prompt"],
+            "thinking": body.thinking,
+            "phase_timeout": body.phase_timeout,
+            "ready_timeout": body.ready_timeout,
+            "auto_start": body.auto_start,
+            "stop_after": body.stop_after,
+            "sandbox": body.sandbox,
+        }
+
+    @app.get("/api/coding/assets")
+    async def coding_assets_info() -> dict[str, Any]:
+        """デフォルト資材 (スキル群 / AGENTS.md / プロンプト) の参照。"""
+        return coding_assets.defaults_info()
+
+    @app.get("/api/coding/status")
+    async def coding_status() -> dict[str, Any]:
+        return {"pi": await coding_pi.info(), "sandbox": sandbox_info(settings_store.load()),
+                "active": coding.active_id, "exclusive_owner": coding.exclusive_owner}
+
+    @app.post("/api/coding/pi/install")
+    async def coding_pi_install() -> dict[str, Any]:
+        try:
+            return coding_pi.start_install()
+        except CodingError as e:
+            raise HTTPException(409, str(e))
+
+    @app.get("/api/coding/runs")
+    async def list_coding_runs() -> dict[str, Any]:
+        runs = coding.list_runs()
+        for r in runs:
+            live = coding.preview_info(r["id"])
+            if live:
+                r["preview"] = live
+        return {"runs": runs, "active": coding.active_id,
+                "exclusive_owner": coding.exclusive_owner}
+
+    @app.post("/api/coding/runs", status_code=201)
+    async def start_coding_run(body: CodingBody) -> dict[str, Any]:
+        profile = manager.find_profile(body.profile_id)
+        if not profile:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        bid = profile.get("backend")
+        if bid not in BACKENDS:
+            raise HTTPException(400, "このプロファイルにバックエンドが設定されていません")
+        if not body.auto_start and not any(
+                s["profile_id"] == body.profile_id and s["status"] in ("running", "starting")
+                for s in manager.sessions.values()):
+            raise HTTPException(409, "プロファイルが起動していません。"
+                                     "起動タブでスタートするか、auto_start を ON にしてください")
+        params = _coding_params(body)
+        try:
+            return await coding.start(profile, params, BACKENDS[bid]["name"])
+        except CodingError as e:
+            raise HTTPException(409, str(e))
+
+    @app.get("/api/coding/runs/{rid}")
+    async def get_coding_run(rid: str) -> dict[str, Any]:
+        run = coding.get(rid)
+        if not run:
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        live = coding.preview_info(rid)
+        if live:
+            run["preview"] = live
+        return run
+
+    @app.post("/api/coding/runs/{rid}/cancel")
+    async def cancel_coding_run(rid: str) -> dict[str, Any]:
+        try:
+            coding.cancel(rid)
+        except KeyError:
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        except CodingError as e:
+            raise HTTPException(409, str(e))
+        return coding.get(rid) or {"ok": True}
+
+    @app.delete("/api/coding/runs")
+    async def clear_coding_runs() -> dict[str, Any]:
+        return {"ok": True, "removed": coding.clear_all()}
+
+    @app.delete("/api/coding/runs/{rid}")
+    async def delete_coding_run(rid: str) -> dict[str, Any]:
+        try:
+            coding.delete(rid)
+        except KeyError:
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        except CodingError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
+
+    @app.get("/api/coding/runs/{rid}/files")
+    async def coding_files(rid: str) -> dict[str, Any]:
+        if not coding.get(rid):
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        try:
+            return {"files": coding.files(rid)}
+        except CodingError as e:
+            raise HTTPException(404, str(e))
+
+    @app.get("/api/coding/runs/{rid}/file")
+    async def coding_file(rid: str, path: str = "") -> dict[str, Any]:
+        if not coding.get(rid):
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        try:
+            return coding.read_file(rid, path)
+        except CodingError as e:
+            raise HTTPException(404, str(e))
+
+    @app.get("/api/coding/runs/{rid}/log")
+    async def coding_log(rid: str, phase: str = "backend") -> dict[str, Any]:
+        if not coding.get(rid):
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        try:
+            return coding.log_tail(rid, phase)
+        except CodingError as e:
+            raise HTTPException(422, str(e))
+
+    # ------------------------------------------------------------ preview / viewer
+
+    @app.post("/api/coding/runs/{rid}/preview")
+    async def coding_preview_start(rid: str, body: CodingPreviewBody | None = None) -> dict[str, Any]:
+        try:
+            return await coding.preview_start(rid, (body.command if body else "").strip())
+        except KeyError:
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        except CodingError as e:
+            raise HTTPException(409, str(e))
+
+    @app.delete("/api/coding/runs/{rid}/preview")
+    async def coding_preview_stop(rid: str) -> dict[str, Any]:
+        if not coding.get(rid):
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        await coding.preview_stop(rid)
+        return {"ok": True}
+
+    def _coding_static_root(rid: str) -> Path:
+        """静的配信のルート: frontend/ があればそこ、無ければ workspace 直下。"""
+        ws = coding.run_dir(rid) / "workspace"
+        if (ws / "frontend" / "index.html").is_file():
+            return ws / "frontend"
+        return ws
+
+    @app.get("/api/coding/runs/{rid}/static/{path:path}")
+    async def coding_static(rid: str, path: str) -> Any:
+        """frontend/ の静的配信 (バックエンドが無い実装のプレビュー用)。"""
+        run = coding.get(rid)
+        if not run:
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        root = _coding_static_root(rid)
+        try:
+            p = safe_join(root, path or "index.html")
+        except CodingError as e:
+            raise HTTPException(403, str(e))
+        if p.is_dir():
+            p = p / "index.html"
+        if not p.is_file():
+            raise HTTPException(404, "ファイルが見つかりません: " + path)
+        return FileResponse(p, media_type=guess_type(p.name),
+                            headers={"Cache-Control": "no-cache"})
+
+    @app.api_route("/api/coding/runs/{rid}/proxy/{path:path}",
+                   methods=["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"])
+    async def coding_proxy(rid: str, path: str, request: Request) -> Any:
+        """起動中プレビューアプリ (127.0.0.1:<port>) への透過中継。
+
+        iframe を launcher 同一オリジンに保つことで LAN のスマホからも見え、
+        生成アプリの相対 URL (fetch("api/tasks") 等) がそのままこのプレフィックス
+        配下に解決される。"""
+        info = coding.preview_info(rid)
+        if not info:
+            raise HTTPException(409, "プレビューが起動していません。ビューアーで「起動」を押してください")
+        port = info["port"]
+        qs = request.url.query
+        url = f"http://127.0.0.1:{port}/{path}" + (f"?{qs}" if qs else "")
+        body = await request.body()
+        headers = {}
+        if request.headers.get("content-type"):
+            headers["Content-Type"] = request.headers["content-type"]
+        if request.headers.get("accept"):
+            headers["Accept"] = request.headers["accept"]
+
+        def _fetch() -> tuple[int, dict[str, str], bytes]:
+            req = urllib.request.Request(url, data=body if body else None,
+                                         headers=headers, method=request.method)
+            try:
+                resp = urllib.request.urlopen(req, timeout=60)
+            except urllib.error.HTTPError as e:
+                resp = e
+            except OSError as e:
+                raise HTTPException(502, f"プレビューアプリに接続できません: {e}")
+            with resp:
+                raw = resp.read(PROXY_BODY_MAX + 1)
+                if len(raw) > PROXY_BODY_MAX:
+                    raise HTTPException(502, "プレビュー応答が大きすぎます (32MB 超)")
+                out_headers = {}
+                ctype = resp.headers.get("Content-Type")
+                if ctype:
+                    out_headers["Content-Type"] = ctype
+                loc = resp.headers.get("Location")
+                if loc and loc.startswith("/"):
+                    # アプリの絶対パスリダイレクトをプロキシ配下へ付け替える
+                    out_headers["Location"] = f"/api/coding/runs/{rid}/proxy{loc}"
+                return resp.status, out_headers, raw
+        status, out_headers, raw = await asyncio.to_thread(_fetch)
+        return Response(content=raw, status_code=status, headers=out_headers,
+                        media_type=out_headers.get("Content-Type"))
 
     # ------------------------------------------------------------- 簡易画面
     # ロール user が使える唯一の API 群。プロファイル名と起動 / 停止だけを

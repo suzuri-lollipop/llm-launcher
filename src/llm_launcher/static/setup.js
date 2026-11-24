@@ -507,15 +507,18 @@ function renderProgress() {
   const r = W.job || {};
   const steps = r.steps || [];
   const idx = steps.indexOf(r.step);
-  $("#pg-steps").innerHTML = steps.map((name, i) => {
+  const stepsHtml = steps.map((name, i) => {
     const cur = r.step === name && (r.status === "running" || r.status === "queued");
     const done = (idx >= 0 && idx > i) || r.status === "done";
     const bad = r.status === "failed" && cur;
     const cls = cur && !bad ? "now" : done ? "ok" : bad ? "bad" : "wait";
     return `<li class="${cls}"><span class="ic">${cur && !bad ? '<span class="spin"></span>' : ""}</span>${esc(stepLabel(name, W.kind))}</li>`;
   }).join("");
+  const psEl = $("#pg-steps");
+  if (psEl._html !== stepsHtml) { psEl._html = stepsHtml; psEl.innerHTML = stepsHtml; }   // 変更なしの組み直しは選択を壊す
   $("#pg-cancel").style.display = (r.status === "running" || r.status === "queued") ? "" : "none";
-  $("#pg-log").textContent = W.logText || "(ログ待ち…)";
+  const pgTxt = W.logText || "(ログ待ち…)";
+  if ($("#pg-log").textContent !== pgTxt) $("#pg-log").textContent = pgTxt;
   const err = $("#pg-err");
   err.classList.toggle("hidden", !r.error);
   if (r.error) err.textContent = r.error;
@@ -535,8 +538,11 @@ async function pullLog(ep) {
     if (r.start < W.logCursor || r.start === 0) W.logText = lines.join("\n");
     else if (lines.length) W.logText = (W.logText ? W.logText + "\n" : "") + lines.join("\n");
     W.logCursor = (r.start || 0) + lines.length;
-    if (curStep === "s-progress" || curStep === "s-download")
-      (curStep === "s-download" ? $("#dl-log") : $("#pg-log")).textContent = W.logText || "(ログ待ち…)";
+    if (curStep === "s-progress" || curStep === "s-download") {
+      const el = curStep === "s-download" ? $("#dl-log") : $("#pg-log");
+      const txt = W.logText || "(ログ待ち…)";
+      if (el.textContent !== txt) el.textContent = txt;   // 変化なしの書き込みでログの選択を解除しない
+    }
   } catch { /* ログは取れなくても進捗に影響しない */ }
 }
 async function pollTick() {
@@ -1327,7 +1333,8 @@ function renderDownload() {
       + "「中断」してからもう一度ダウンロードすると、続きから再開できます。";
     err.classList.remove("hidden");
   } else if (!bad) err.classList.add("hidden");
-  $("#dl-log").textContent = W.logText || "(ログ待ち…)";
+  const dlTxt = W.logText || "(ログ待ち…)";
+  if ($("#dl-log").textContent !== dlTxt) $("#dl-log").textContent = dlTxt;   // 選択中のログを毎ポーリング書き換えない
   const canceling = running && !!W.cancelAt;
   const cbtn = $("#dl-cancel");
   cbtn.style.display = running ? "" : "none";

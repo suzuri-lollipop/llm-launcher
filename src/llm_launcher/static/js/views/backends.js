@@ -14,7 +14,7 @@ VIEWS.backends = `
 function renderOomCard(){
   const el = $("#oom-card"); if (!el) return;
   const o = S.sys && S.sys.oom;
-  if (!o){ el.innerHTML = `<div class="muted"><span class="spin"></span> OOM 対策の状態を読み込み中…</div>`; return; }
+  if (!o){ setHtml(el, `<div class="muted"><span class="spin"></span> OOM 対策の状態を読み込み中…</div>`, "oom-card", renderOomCard); return; }
   if (document.activeElement && document.activeElement.matches("input,select,textarea")
       && el.contains(document.activeElement)) return;   // 入力中に書き換えない
   const badge = o.level === "ok" ? `<span class="badge ok"><span class="dot"></span>保護適用中</span>`
@@ -22,7 +22,7 @@ function renderOomCard(){
               : `<span class="badge"><span class="dot"></span>無効</span>`;
   const cls = o.state === "crit" ? "err" : o.state === "warn" ? "warn" : "ok";
   const vcol = o.level === "off" ? "var(--sub)" : `var(--${o.level === "ok" ? "acc" : o.level})`;
-  el.innerHTML = `
+  const html = `
     <div class="row"><b style="font-size:15px"><svg class=ic aria-hidden=true><use href=#i-shield /></svg> OOM 対策</b>
       <span class="muted" style="font-size:12px">重い CLI と同居する環境でモデルが最初に kill されるのを防ぐ</span>
       <span class="grow"></span>${badge}</div>
@@ -51,6 +51,8 @@ function renderOomCard(){
     <div class="muted" style="font-size:11.5px;margin-top:8px">負の score_adj はカーネル特権 (CAP_SYS_RESOURCE) が必要で、一般ユーザーでは直接書けません。
       下のコマンドで「そのパスだけ」を許可する sudo ヘルパーを導入すると、起動ツリー全体 (モデル本体 + 後から湧く worker + launcher 自身) に適用されます。</div>
     <pre class="cmdprev" style="max-height:none">${esc(o.install_hint || "")}</pre>`;
+  // 未保存の編集 (formDirty) / 選択 / アニメーション中は組み直さない (setHtml)
+  setHtml(el, html, "oom-card", renderOomCard);
 }
 async function saveOom(){
   const body = {
@@ -62,14 +64,12 @@ async function saveOom(){
     const o = await api("/api/oom", {method:"POST", body});
     if (!S.sys) S.sys = {};
     S.sys.oom = o;
+    stampForm($("#oom-card"));   // 保存済み = 今の入力値を基準に (dirty 解除)
     renderOomCard();
     toast(o.level === "ok" ? "OOM 設定を適用しました" : "保存しました (権限が足りず未適用): " + o.verdict.split("\n")[0]);
   } catch (e) { toast("保存失敗: " + e.message); }
 }
-function renderBackends() {
-  renderOomCard();
-  const g = $("#backends-grid");
-  g.innerHTML = S.state.backends.map(b => {
+function bkCardInner(b) {
     const det = b.detection;
     const inst = det.installed
       ? `<span class="badge ok"><span class="dot"></span>インストール済み</span>`
@@ -77,7 +77,7 @@ function renderBackends() {
     const mod = det.module_exists
       ? `<span class="badge ok"><span class="dot"></span>submodule ✓</span>`
       : `<span class="badge warn"><span class="dot"></span>module/ 未取得</span>`;
-    return `<div class="card">
+    return `
       <div class="row">
         <span class="chip ${esc(b.id)}">${esc(b.name)}</span>
         <b class="grow ellip" style="font-size:15px">${esc(b.name)}</b>
@@ -104,9 +104,24 @@ function renderBackends() {
         <button class="ghost need-backend" onclick="resetBackend('${b.id}')">リセット</button>
         <span class="grow"></span>
         <button class="ghost need-edit" onclick="newProfileFor('${b.id}')">このバックエンドで新規プロファイル</button>
-      </div>
-    </div>`;
-  }).join("");
+      </div>`;
+}
+function renderBackends() {
+  renderOomCard();
+  const g = $("#backends-grid");
+  const bs = S.state.backends;
+  /* カードの顔ぶれが変わらなければカード単位の setHtml (中身が変わらなければ触らない /
+     入力中・未保存編集のあるカードは組み直さない)。グリッドごと組み直すと、1 枚の
+     保存・再検出のたびに他のカードの入力途中の値までサーバー値へ巻き戻っていた。 */
+  let cards = g.querySelectorAll("[data-bk]");
+  if (cards.length !== bs.length || [...cards].some((c, i) => c.dataset.bk !== bs[i].id)) {
+    // 顔ぶれ変更: 骨格だけ先に組み直してからカード単位で埋める (空カードは後回しに
+    //ならない)。未保存編集があれば骨格自体も後回し = 入力を巻き戻さない。
+    setHtml(g, bs.map(b => `<div class="card" data-bk="${esc(b.id)}"></div>`).join(""), "backends-grid", renderBackends);
+    cards = g.querySelectorAll("[data-bk]");
+    if (cards.length !== bs.length || [...cards].some((c, i) => c.dataset.bk !== bs[i].id)) return;   // 後回し中: 次のポーリングで再試行
+  }
+  bs.forEach((b, i) => setHtml(cards[i], bkCardInner(b), "bk-" + b.id, renderBackends));
 }
 async function saveBackend(bid) {
   const b = backendById(bid);
@@ -115,13 +130,19 @@ async function saveBackend(bid) {
     python: b.kind === "python" ? (inputVal(`#bk-py-${bid}`) || "") : null,
     command_binary: b.kind !== "python" ? (inputVal(`#bk-py-${bid}`) || "") : null,
   };
-  try { await api(`/api/backends/${bid}`, {method:"PUT", body}); toast("保存しました"); refresh(false); }
-  catch (e) { toast("失敗: " + e.message); }
+  try {
+    await api(`/api/backends/${bid}`, {method:"PUT", body});
+    const card = $(`#backends-grid [data-bk="${bid}"]`); if (card) stampForm(card);   // 保存済み = dirty 解除
+    toast("保存しました"); refresh(false);
+  } catch (e) { toast("失敗: " + e.message); }
 }
 async function resetBackend(bid) {
   if (!confirm("このバックエンドの上書き設定を初期化しますか?")) return;
-  try { await api(`/api/backends/${bid}`, {method:"PUT", body:{reset:true}}); toast("初期化しました"); refresh(false); }
-  catch (e) { toast("失敗: " + e.message); }
+  try {
+    await api(`/api/backends/${bid}`, {method:"PUT", body:{reset:true}});
+    const card = $(`#backends-grid [data-bk="${bid}"]`); if (card) formReset(card);   // 既定値へ巻き戻してよい
+    toast("初期化しました"); refresh(false);
+  } catch (e) { toast("失敗: " + e.message); }
 }
 async function redetect(bid) {
   try { await api(`/api/backends/${bid}/detect`, {method:"POST"}); refresh(false); }

@@ -44,8 +44,8 @@ const calBusy = () => calUiOn() && !!(S.cal && (S.cal.active || S.cal.busy));
 const insBusy = () => !!(S.ins && (S.ins.active || S.ins.busy));
 function insInit() {
   if (S.ins) return;                        // 何度呼ばれても状態を失わない (jobs / logs)
-  S.ins = { jobs: [], active: null, installable: [], cacheDir: "", busy: false, _bSig: "",
-            _rSig: "", _mSig: "", _ia: "", _ih: "", refPick: {}, tool: "uv", calAfter: null, scPick: "",
+  S.ins = { jobs: [], active: null, installable: [], cacheDir: "", busy: false,
+            _ia: "", _ih: "", refPick: {}, tool: "uv", calAfter: null, scPick: "",
             logs: {}, logCursor: {}, open: "", notified: {} };
 }
 async function insPoll(force) {
@@ -280,17 +280,16 @@ function renderSetupCal(busy) {
   card.classList.remove("hidden");
   if (!S.cal) calInit();
   const sel = $("#sc-profile"), ps = scProfiles();
-  const sig = ps.map(p => p.id + ":" + p.name).join("|");
-  if (sig !== S.cal.scSig || ![...sel.options].some(o => o.value === sel.value)) {
-    S.cal.scSig = sig;
-    const keep = S.ins.scPick || sel.value || calSaved().profile || "";
-    sel.innerHTML = ps.length
+  /* setOptions = 顔ぶれが変わらなければ触らない / ドロップダウンを開いている間は
+     組み直さない。記憶していた選択 (scPick) を pick で渡して復元する。 */
+  const keep = S.ins.scPick || sel.value || calSaved().profile || "";
+  const want = ps.some(p => p.id === keep) ? keep
+    : (ps.find(p => p.backend === $("#ins-backend").value) || ps[0] || {}).id || "";
+  if (setOptions(sel, ps.length
       ? ps.map(p => `<option value="${p.id}">${esc(p.name)} · ${esc(backendById(p.backend)?.name || p.backend)}</option>`).join("")
-      : `<option value="">対象プロファイルがありません (Maya / Strata / FreeToken 系)</option>`;
-    const want = ps.some(p => p.id === keep) ? keep
-      : (ps.find(p => p.backend === $("#ins-backend").value) || ps[0] || {}).id || "";
-    sel.value = want;
-    if (want) S.ins.scPick = want;
+      : `<option value="">対象プロファイルがありません (Maya / Strata / FreeToken 系)</option>`,
+      "sc-profile", renderSetup, want) && want) {
+    S.ins.scPick = want;
   }
   const p = ps.find(x => x.id === sel.value) || null;
   const calOn = !!S.cal.active;
@@ -300,7 +299,7 @@ function renderSetupCal(busy) {
     : (calOn ? "キャリブレーション実行中です (同時に 1 件)"
       : (busy ? "インストール / ダウンロード実行中…" : ""));
   const sess = p ? liveOf(p.id) : null;
-  $("#sc-state").innerHTML = !ps.length
+  setHtml($("#sc-state"), !ps.length
     ? `キャリブレーション対応のプロファイルがまだありません。`
       + `インストール → <b>プロファイル作成</b> → モデルダウンロード の順に揃うと キャリブレーション が使えるようになります`
       + ` <button class="ghost" style="min-height:26px;padding:2px 9px;font-size:12px" onclick="switchTab('profiles')"><svg class=ic aria-hidden=true><use href=#i-clipboard /></svg> プロファイルへ</button>`
@@ -308,7 +307,7 @@ function renderSetupCal(busy) {
       : (sess ? `このプロファイルのサーバーは稼働中 (:${sess.port || "-"}) — 実行中に停止して GPU を独占します`
         : ($("#sc-restart").checked ? "未起動 → 調整後に自動起動します"
                                     : "未起動 → 調整のみ実行します (完了後は起動タブから開始)"))
-        + (busy ? " / 他のジョブが終わり次第実行できます" : ""));
+        + (busy ? " / 他のジョブが終わり次第実行できます" : "")), "sc-state", renderSetup);
   $("#sc-preview").textContent = calPreview(p);
 }
 function renderSetup() {
@@ -321,25 +320,16 @@ function renderSetup() {
     return;
   }
   const specs = S.ins.installable || [];
-  const ids = specs.map(e => e.id);
-  if (ids.join("|") !== S.ins._bSig || ![...sel.options].some(o => o.value === sel.value)) {
-    S.ins._bSig = ids.join("|");
-    const cur = sel.value;
-    sel.innerHTML = specs.length
-      ? specs.map(e => `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.module_path)}</option>`).join("")
-      : `<option value="">UI インストール可能なバックエンドがありません</option>`;
-    if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
-  }
+  // 各 select は setOptions = 変更なしなら触らない / 開いている間は組み直さない
+  setOptions(sel, specs.length
+    ? specs.map(e => `<option value="${esc(e.id)}">${esc(e.name)} · ${esc(e.module_path)}</option>`).join("")
+    : `<option value="">UI インストール可能なバックエンドがありません</option>`, "ins-backend", renderSetup);
   const sp = insSpec(sel.value);
   // ブランチ選択: refs を持つバックエンドだけ出す (選択はバックエンドごとに記憶)
   const rs = $("#ins-ref");
   const refs = (sp && sp.refs) || [];
-  const rSig = sel.value + "|" + refs.map(r => r.ref).join(",") + "|" + ((sp && sp.current_ref) || "") + (sp && sp.cloned ? "C" : "");
-  if (rSig !== S.ins._rSig) {
-    S.ins._rSig = rSig;
-    rs.innerHTML = refs.map(r => `<option value="${esc(r.ref)}">${esc(r.label)} (${esc(r.ref)})</option>`).join("");
-    rs.value = insRef(sel.value);
-  }
+  setOptions(rs, refs.map(r => `<option value="${esc(r.ref)}">${esc(r.label)} (${esc(r.ref)})</option>`).join(""),
+    "ins-ref", renderSetup, insRef(sel.value));
   rs.style.display = refs.length ? "" : "none";
   const ref = insRef(sel.value);
   $("#ins-hfdir").textContent = S.ins.cacheDir || "(HF キャッシュ)";
@@ -347,26 +337,17 @@ function renderSetup() {
   const dd = $("#dl-dest");
   const dOpts = [{v: "", l: "HF キャッシュ"}].concat(
     specs.filter(e => e.model_data).map(e => ({v: e.id, l: `${e.name} のデータフォルダ`})));
-  const dSig = dOpts.map(o => o.v).join("|");
-  if (dSig !== S.ins._dSig) {
-    S.ins._dSig = dSig;
-    const cur = dd.value;
-    dd.innerHTML = dOpts.map(o => `<option value="${esc(o.v)}">${esc(o.l)}</option>`).join("");
-    if ([...dd.options].some(o => o.value === cur)) dd.value = cur;
-  }
+  setOptions(dd, dOpts.map(o => `<option value="${esc(o.v)}">${esc(o.l)}</option>`).join(""), "dl-dest", renderSetup);
   const dSp = insSpec(dd.value);
   // 対応モデルドロップダウン: 保存先 (なければ ①) のバックエンドが docs/models.md の
   // known-good 表を持つときだけ出す。選ぶと repo id に入り、model_data 系なら保存先も従う
   const ms = $("#dl-model");
   const mListOwner = (dSp && dSp.supported_models && dSp.supported_models.length) ? dSp : sp;
   const mlist = (mListOwner && mListOwner.supported_models) || [];
-  const mSig = ((mListOwner && mListOwner.id) || "") + "|" + mlist.map(m => m.repo_id).join(",");
-  if (mSig !== S.ins._mSig) {
-    S.ins._mSig = mSig;
-    ms.innerHTML = `<option value="">対応モデルから選択 (${mlist.length})</option>`
-      + mlist.map(m => `<optgroup label="${esc(m.name)}">`
-                   + `<option value="${esc(m.repo_id)}">${esc(m.repo_id)}</option></optgroup>`).join("");
-  }
+  setOptions(ms, `<option value="">対応モデルから選択 (${mlist.length})</option>`
+    + mlist.map(m => `<optgroup label="${esc(m.name)}">`
+                 + `<option value="${esc(m.repo_id)}">${esc(m.repo_id)}</option></optgroup>`).join(""),
+    "dl-model", renderSetup);
   ms.hidden = !mlist.length;
   const calLock = calBusy(), insLock = !!S.ins.active;
   $("#ins-tool").textContent = insToolLabel(S.ins.tool);
@@ -420,6 +401,8 @@ function renderInsActive(run) {
   if (html === S.ins._ia && el.childElementCount) return;
   // スクロール中は組み直しを後回し (表やログ欄を掴んだままにできる)
   if (uiScrolling() && el.childElementCount) { deferRender("ins-act", () => renderInsActive(run)); return; }
+  // ログを選択して読んでいる間 / アニメーション中も後回し
+  if (uiBusyIn(el) && el.childElementCount) { deferRender("ins-act", () => renderInsActive(run)); return; }
   S.ins._ia = html;
   const _ls = logScrollSnap(el);
   el.innerHTML = html;
@@ -486,7 +469,9 @@ function renderInsHistory(active) {
   }
   // スクロール中は組み直しを後回し (ログ欄・表を掴んだままにできる)
   if (uiScrolling() && el.childElementCount) { deferRender("ins-hist", () => renderInsHistory(active)); return; }
-  const html = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
+  if (uiBusyIn(el) && el.childElementCount) { deferRender("ins-hist", () => renderInsHistory(active)); return; }
+  const head = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>`;
+  const rowsHtml = runs.map(r => {
     const open = S.ins.open === r.id;
     const tail = (S.ins.logs[r.id] || "").split("\n").filter(Boolean).slice(-120).join("\n");
     const detail = r._k === "download"
@@ -494,7 +479,7 @@ function renderInsHistory(active) {
       : r._k === "calibrate"
         ? esc((r.steps || []).map(calStepLabel).join(" → ")) + (r.mode ? ` · ${esc(r.mode)}` : "")
         : esc((r.steps || []).map(s => insStepName(s, r)).join(" → "));
-    return `<div class="card">
+    return `<div class="card" data-row="${esc(r.id)}">
       <div class="row">
         ${insStatusBadge(r)}
         <b class="grow ellip" style="font-size:14.5px;cursor:pointer" onclick="insToggle('${r.id}')">${insTitle(r)}</b>
@@ -513,11 +498,15 @@ function renderInsHistory(active) {
       ${open ? `<div class="logwrap" style="padding:0"><pre class="logbox" data-logkey="k:${esc(r.id)}" style="max-height:320px;margin-top:6px">${esc(tail || "(ログ無し)")}</pre></div>` : ""}
     </div>`;
   }).join("");
+  const html = head + rowsHtml;
   // 中身が変わらなければ組み直さない (開いたログ欄の高さが飛ぶのもこれで消える)
   if (html === S.ins._ih && el.childElementCount) return;
   S.ins._ih = html;
   const _ls = logScrollSnap(el);                // 組み直したときだけ位置・開閉を復元
-  el.innerHTML = html;
+  // 見出しと行を分離: 変わった行だけ組み直す (patchRows が行のログ位置も復元)
+  if (!el.querySelector("[data-rows]")) el.innerHTML = `<div data-head></div><div data-rows></div>`;
+  setHtml(el.querySelector("[data-head]"), head, "ins-hist-head", () => renderInsHistory(active));
+  patchRows(el.querySelector("[data-rows]"), rowsHtml, "ins-hist", () => renderInsHistory(active));
   logScrollBack(el, _ls);
 }
 

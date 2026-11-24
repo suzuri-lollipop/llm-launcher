@@ -40,8 +40,11 @@ function renderRunning(force) {
     patchUptime(list, live);
     return;
   }
+  // ログを選択して読んでいる間 / 操作中は組み直しを後回し (sig は進めない = 取りこぼさない)
+  if (!force && uiBusyIn(list) && list.childElementCount) { deferRender("run-list", () => renderRunning()); return; }
   S._ssSig = sig;
-  list.innerHTML = live.map(sessionCard).join("");
+  // 行単位: 状態が変わったセッションのカードだけ組み直す (他のカードのログ選択等を守)
+  patchRows(list, live.map(sessionCard).join(""), "run-list", () => renderRunning());
   restoreLogBuffers();
 }
 function sessionCard(s) {
@@ -58,7 +61,7 @@ function sessionCard(s) {
         : `<span class="muted">保護 未適用 / 設定オフ</span>`;
   const memTxt = (s.mem_state && s.mem_state !== "ok")
     ? ` <span style="color:${s.mem_state === "crit" ? "var(--err)" : "var(--warn)"}">· 空き ${esc(s.mem_available_gb)}GB</span>` : "";
-  return `<div class="card" data-sid="${s.id}">
+  return `<div class="card" data-sid="${s.id}" data-row="${s.id}">
     <div class="row">
       ${statusBadge(s)}
       <b class="grow ellip" style="font-size:15px">${esc(s.profile_name)}</b>
@@ -84,9 +87,13 @@ function sessionCard(s) {
   </div>`;
 }
 function patchUptime(root, ss) {
+  if (!root) return;
   for (const s of ss) {
     const u = root.querySelector(`.upt[data-sid="${s.id}"]`);
-    if (u) u.textContent = (u.dataset.pfx || "") + fmtUp(s.uptime);
+    if (u) {
+      const t = (u.dataset.pfx || "") + fmtUp(s.uptime);
+      if (u.textContent !== t) u.textContent = t;
+    }
   }
 }
 

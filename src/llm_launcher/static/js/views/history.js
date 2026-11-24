@@ -36,10 +36,12 @@ function histSig() {
 function renderHistory(force) {
   const list = $("#history-list");
   const all = deadSessions();
-  const fh = HIST_FILTERS.map(f =>
-    `<button class="fchip ${S.hist.status===f.id?"on":""}" onclick="setHistStatus('${f.id}')">${f.n} <span class="muted" style="color:inherit">${all.filter(f.f).length}</span></button>`).join("");
   const fel = $("#hist-filters");
-  if (fel.innerHTML !== fh) fel.innerHTML = fh;   // ポーリング毎の作り直し (フォーカス喪失) を避ける
+  // 顔ぶれ + 件数が変わらない限り選択クラスだけ in-place (クリック毎の作り直しでフォーカスが飛ぶのを避ける)
+  const chips = HIST_FILTERS.map(f => ({id: f.id, name: f.n, n: all.filter(f.f).length}));
+  patchChips(fel, chips, S.hist.status, chips.map(f =>
+    `<button class="fchip ${S.hist.status===f.id?"on":""}" onclick="setHistStatus('${f.id}')">${f.name} <span class="muted" style="color:inherit">${f.n}</span></button>`).join(""),
+    "hist-filters", () => renderHistory());
   const rows = histFiltered();
   const shown = rows.slice(0, S.hist.limit);
   $("#hist-count").textContent = all.length
@@ -63,11 +65,14 @@ function renderHistory(force) {
   // 構造が変わらなければフル再構築をスキップ (ログの選択解除を防ぐ)
   const sig = histSig();
   if (!force && sig === S._hsSig && list.childElementCount) return;
+  // ログを選択して読んでいる間 / 操作中は組み直しを後回し (sig は進めない = 取りこぼさない)
+  if (!force && uiBusyIn(list) && list.childElementCount) { deferRender("hist-list", () => renderHistory()); return; }
   S._hsSig = sig;
-  list.innerHTML = shown.map(histRow).join("") +
+  // 行単位: 変わった行だけ組み直す (他の行のログ選択 / スクロールを守)
+  patchRows(list, shown.map(histRow).join("") +
     (rows.length > shown.length
-      ? `<button class="ghost" style="width:100%" onclick="S.hist.limit+=30;renderHistory(true)">さらに表示 (残り ${rows.length - shown.length} 件)</button>`
-      : "");
+      ? `<button class="ghost" data-row="more" style="width:100%" onclick="S.hist.limit+=30;renderHistory(true)">さらに表示 (残り ${rows.length - shown.length} 件)</button>`
+      : ""), "hist-list", () => renderHistory());
   restoreLogBuffers();
 }
 function clearHistFilter() {
@@ -79,7 +84,7 @@ function setHistStatus(id) { S.hist.status = id; S.hist.limit = 30; renderHistor
 function histRow(s) {
   const open = S.openLogs.has(s.id);
   const span = s.finished_at && s.started_at ? s.finished_at - s.started_at : null;
-  return `<div class="hrow" data-sid="${s.id}">
+  return `<div class="hrow" data-sid="${s.id}" data-row="${s.id}">
     <div class="hrow-hd" onclick="toggleLog('${s.id}')">
       ${statusBadge(s)}
       <span class="grow" style="min-width:0">
