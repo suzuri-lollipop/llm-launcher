@@ -289,7 +289,17 @@ function renderCalibrate() {
 }
 function renderCalActive(run) {
   const el = $("#cal-active");
-  if (!run) { setHtml(el, "", "cal-act", () => renderCalActive((S.cal.jobs || []).find(r => r.id === S.cal.active) || null)); return; }
+  if (!run) {
+    /* 完了で active が null になったらカードを消す。setHtml のキャッシュは使わない:
+       ライブカードは innerHTML 直書きでキャッシュと同期していないため、setHtml("") が
+       「変更なし」と誤認して完了済みカードが残る (手動更新まで実行タブに残る事故)。 */
+    const redo = () => renderCalActive((S.cal.jobs || []).find(r => r.id === S.cal.active) || null);
+    if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) { deferRender("cal-act", redo); return; }
+    if (el.childElementCount) { el.innerHTML = ""; S.cal._ca = ""; }
+    return;
+  }
+  // ホールド中もライブ数値 (経過 / 段チップ / 状態) だけは in-place で進める
+  if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) patchFields(el, calActiveCard(run));
   // スクロール中は組み直しを後回し (調整値表の横スクロールバーを掴んだままにできる)
   if (uiScrolling() && el.childElementCount) { deferRender("cal-act", () => renderCalActive(run)); return; }
   // テキスト選択して読んでいる間 / アニメーション中も後回し (操作中のオブジェクトを巻き込まない)
@@ -310,18 +320,18 @@ function calActiveCard(run) {
   const tail = logs.split("\n").filter(Boolean).slice(-25).join("\n");
   return `<div class="card" style="border-color:#c6dafc">
     <div class="row">
-      ${calStatusBadge(run)}
+      <span data-f="badge">${calStatusBadge(run)}</span>
       <b class="grow ellip" style="font-size:15px">${esc(run.profile_name)}</b>
       <span class="chip ${esc(run.backend)}">${esc(run.backend_name)}</span>
       ${run.status === "running" || run.status === "queued"
         ? `<button class="danger" style="min-height:34px;font-size:12.5px" onclick="calCancel('${run.id}')"><svg class=ic aria-hidden=true><use href=#i-stop /></svg> 中断</button>`
         : `<button class="ghost" style="min-height:34px;font-size:12.5px" onclick="calPoll(true)"><svg class=ic aria-hidden=true><use href=#i-refresh /></svg></button>`}
     </div>
-    <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">&nbsp;${calStepChips(run)}</div>
+    <div class="row" data-f="chips" style="gap:6px;margin-top:8px;flex-wrap:wrap">&nbsp;${calStepChips(run)}</div>
     <div class="row" style="gap:8px;margin-top:8px">
-      <span class="muted">${{queued: "待機中…", running: "実行中", done: "完了",
+      <span class="muted" data-f="state">${{queued: "待機中…", running: "実行中", done: "完了",
         failed: "失敗", cancelled: "中断", lost: "中断 (launcher 再起動)"}[run.status] || run.status}</span>
-      <span class="muted mono">${fmtUp(secs)}</span>
+      <span class="muted mono" data-f="elapsed">${fmtUp(secs)}</span>
       ${run.error ? `· <span style="color:var(--err)">${esc(String(run.error).slice(0, 160))}</span>` : ""}
       ${run.restart_after && run.status === "done" ? `· <span style="color:var(--ok)">再起動済み</span>` : ""}
     </div>

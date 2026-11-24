@@ -399,6 +399,8 @@ function renderInsActive(run) {
   const html = (run ? insActiveCard(run) : "") + (cal ? calActiveCardSetup(cal) : "");
   // 中身が変わらなければ組み直さない (ログ末尾が変わったときだけ位置を復元すればいい)
   if (html === S.ins._ia && el.childElementCount) return;
+  // ホールド中もライブ数値 (経過 / 段チップ) だけは in-place で進める
+  if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) patchFields(el, html);
   // スクロール中は組み直しを後回し (表やログ欄を掴んだままにできる)
   if (uiScrolling() && el.childElementCount) { deferRender("ins-act", () => renderInsActive(run)); return; }
   // ログを選択して読んでいる間 / アニメーション中も後回し
@@ -419,10 +421,10 @@ function insActiveCard(run) {
       ${live ? `<button class="danger" style="min-height:34px;font-size:12.5px" onclick="insCancel('${run.id}')"><svg class=ic aria-hidden=true><use href=#i-stop /></svg> 中断</button>`
              : `<button class="ghost" style="min-height:34px;font-size:12.5px" onclick="insPoll(true)"><svg class=ic aria-hidden=true><use href=#i-refresh /></svg> 最新化</button>`}
     </div>
-    ${run.kind === "install" ? `<div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">${insStepChips(run)}</div>`
+    ${run.kind === "install" ? `<div class="row" data-f="chips" style="gap:6px;margin-top:8px;flex-wrap:wrap">${insStepChips(run)}</div>`
     : run.kind === "download" ? insProg(run) : ""}
     <div class="row" style="gap:8px;margin-top:8px">
-      <span class="muted mono">${fmtUp(secs)}</span>
+      <span class="muted mono" data-f="elapsed">${fmtUp(secs)}</span>
       ${run.error ? `<span style="color:var(--err);font-size:12px">${esc(String(run.error).slice(0, 200))}</span>` : ""}
     </div>
     <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
@@ -439,9 +441,9 @@ function calActiveCardSetup(run) {
       ${live ? `<button class="danger" style="min-height:34px;font-size:12.5px" onclick="calCancel('${run.id}')"><svg class=ic aria-hidden=true><use href=#i-stop /></svg> 中断</button>`
              : `<button class="ghost" style="min-height:34px;font-size:12.5px" onclick="calPoll(true)"><svg class=ic aria-hidden=true><use href=#i-refresh /></svg> 最新化</button>`}
     </div>
-    <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">${calStepChips(run)}</div>
+    <div class="row" data-f="chips" style="gap:6px;margin-top:8px;flex-wrap:wrap">${calStepChips(run)}</div>
     <div class="row" style="gap:8px;margin-top:8px">
-      <span class="muted mono">${fmtUp(secs)}</span>
+      <span class="muted mono" data-f="elapsed">${fmtUp(secs)}</span>
       ${run.error ? `<span style="color:var(--err);font-size:12px">${esc(String(run.error).slice(0, 200))}</span>` : ""}
     </div>
     <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>

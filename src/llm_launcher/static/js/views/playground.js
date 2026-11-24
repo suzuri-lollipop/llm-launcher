@@ -23,7 +23,8 @@ VIEWS.playground = `
             <div><label class="f" for="pg-topp">top_p</label><input type="number" id="pg-topp" step="0.01" min="0" max="1" placeholder="0.95" style="width:96px"></div>
             <div><label class="f" for="pg-mtok">max_tokens</label><input type="number" id="pg-mtok" min="1" placeholder="(既定)" style="width:96px"></div>
             <label class="switch" style="align-self:flex-end"><input type="checkbox" id="pg-stream" checked><span class="track"></span><span class="lab" style="font-size:12.5px">ストリーム</span></label>
-            <label class="switch" style="align-self:flex-end" title="オフにすると思考 (reasoning) を省略し、本文の生成をすぐ開始します"><input type="checkbox" id="pg-think" checked><span class="track"></span><span class="lab" style="font-size:12.5px">思考</span></label>
+            <div style="align-self:flex-end" title="off で思考 (reasoning) を省略し本文生成をすぐ開始。effort 段階を持つモデル (Inkling-2 等) は段階も選べます"><label class="f" for="pg-think">思考</label>
+              <select id="pg-think" style="width:104px" onchange="pgPickThink(this.value)"><option value="on">on</option><option value="off">off</option></select></div>
           </div>
         </div>
       </details>
@@ -50,9 +51,14 @@ const PG_KEY = "llm-laun…d.v1";
 function pgInit() {
   let d = {};
   try { d = JSON.parse(localStorage.getItem(PG_KEY) || "{}") || {}; } catch { d = {}; }
+  // 旧版は思考が bool (checkbox) だった: on/off 文字列に読み替えて復元する
+  let think = d.thinking;
+  if (think === true) think = "on";
+  if (think === false) think = "off";
   S.pg = {
     sid: d.sid || "", model: d.model || "", convos: d.convos || {},
-    models: [], modelsBusy: false, modelsErr: "",
+    models: [], modelEfforts: {}, modelsBusy: false, modelsErr: "",
+    think: typeof think === "string" ? think : "",
     streaming: false, ctrl: null, _mSig: "",
   };
   // 送信中にページを閉じた等で localStorage に残った streaming フラグは実体なしなので片付ける
@@ -61,7 +67,6 @@ function pgInit() {
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") el.value = v; };
   set("#pg-sys", d.sys); set("#pg-temp", d.temp); set("#pg-topp", d.topp); set("#pg-mtok", d.mtok);
   if (d.stream === false) $("#pg-stream").checked = false;
-  if (d.thinking === false) $("#pg-think").checked = false;
 }
 function pgPersist() {
   if (!S.pg) return;
@@ -73,7 +78,7 @@ function pgPersist() {
       sid: S.pg.sid, model: S.pg.model, convos,
       sys: v("#pg-sys"), temp: v("#pg-temp"), topp: v("#pg-topp"), mtok: v("#pg-mtok"),
       stream: $("#pg-stream") ? $("#pg-stream").checked : true,
-      thinking: $("#pg-think") ? $("#pg-think").checked : true,
+      thinking: $("#pg-think") ? $("#pg-think").value : "on",
     }));
   } catch { /* 保存容量超過などは無視 */ }
 }
@@ -112,6 +117,14 @@ function renderPlayground() {
     : `<option value="">${d.modelsBusy ? "モデル読み込み中…" : (d.modelsErr ? "モデル取得失敗" : "モデル指定なし")}</option>`,
     "pg-model", renderPlayground);
   mod.disabled = d.streaming || !d.models.length;
+  /* 思考セレクタ: effort 語彙を持つモデルは 既定/off/段階、無いモデルは on/off
+     (enable_thinking)。setOptions は顔ぶれが変わらなければ選択を維持する。 */
+  const efforts = (d.modelEfforts && d.modelEfforts[d.model]) || [];
+  const thinkHtml = efforts.length
+    ? `<option value="default">既定</option><option value="off">off</option>`
+      + efforts.filter(e => e !== "none").map(l => `<option value="${esc(l)}">${esc(l)}</option>`).join("")
+    : `<option value="on">on</option><option value="off">off</option>`;
+  setOptions($("#pg-think"), thinkHtml, "pg-think", renderPlayground, d.think);
   const s = pgSession();
   updatePgStatus();
   if (d.modelsErr) $("#pg-status").innerHTML += ` <span class="pg-err">· ${esc(d.modelsErr)}</span>`;
@@ -125,18 +138,26 @@ function pgPickSession(sid) {
   S.pg.sid = sid; S.pg.model = "";
   pgLoadModels(); pgPersist();
 }
-function pgPickModel(m) { S.pg.model = m; pgPersist(); }
+function pgPickModel(m) { S.pg.model = m; pgPersist(); renderPlayground(); }
+function pgPickThink(v) { if (S.pg) { S.pg.think = v; pgPersist(); } }
 async function pgLoadModels() {
   const d = S.pg;
-  if (!d.sid) { d.models = []; d.modelsErr = ""; renderPlayground(); return; }
+  if (!d.sid) { d.models = []; d.modelEfforts = {}; d.modelsErr = ""; renderPlayground(); return; }
   if (d.modelsBusy) return;
   d.modelsBusy = true; d.modelsErr = ""; renderPlayground();
   try {
     const j = await api(`/api/playground/${d.sid}/models`);
-    d.models = (j.data || []).map(m => m.id || m.model).filter(Boolean);
+    const cards = j.data || [];
+    d.models = cards.map(m => m.id || m.model).filter(Boolean);
+    // モデル毎の effort 語彙 (FreeToken が /v1/models で公開)。無いサーバーは []
+    d.modelEfforts = {};
+    for (const c of cards) {
+      const id = c.id || c.model;
+      if (id) d.modelEfforts[id] = c.supported_reasoning_efforts || [];
+    }
     if (!d.models.includes(d.model)) d.model = d.models[0] || "";
   } catch (e) {
-    d.models = []; d.model = ""; d.modelsErr = e.message;
+    d.models = []; d.model = ""; d.modelEfforts = {}; d.modelsErr = e.message;
   } finally {
     d.modelsBusy = false; pgPersist(); renderPlayground();
   }
@@ -240,8 +261,18 @@ function pgRenderMsgs(force) {
   const sig = [pgPid(), msgs.length, (last.content || "").length + "/" + (last.reasoning || "").length,
                last.streaming ? "s" : "", last.error || ""].join("~");
   if (!force && sig === S.pg._mSig) return;
-  // メッセージを選択して読んでいる間は組み直しを後回し (sig は進めない = 取りこぼさない)
-  if (!force && uiBusyIn(el) && el.childElementCount) { deferRender("pg-msgs", () => pgRenderMsgs()); return; }
+  // 選択して読んでいる間は全体組み直しを後回し。ただし配信中の末尾だけは
+  // in-place で進める (過去のメッセージの選択を守りつつライブ表示は止まらない)
+  if (!force && uiBusyIn(el) && el.childElementCount) {
+    if (S.pg.streaming && msgs.length && el.lastElementChild) {
+      const tpl = document.createElement("template");
+      tpl.innerHTML = pgMsgHtml(last, msgs.length - 1);
+      const nb = tpl.content.querySelector(".pg-body"), ob = el.lastElementChild.querySelector(".pg-body");
+      if (nb && ob && ob.innerHTML !== nb.innerHTML) ob.innerHTML = nb.innerHTML;
+    }
+    deferRender("pg-msgs", () => pgRenderMsgs());
+    return;
+  }
   S.pg._mSig = sig;
   const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 140;
   if (!msgs.length) {
@@ -299,8 +330,13 @@ async function pgSend() {
   inp.value = "";
   d.streaming = true; d.ctrl = new AbortController();
   renderPlayground(); pgPersist();
-  const body = {messages: history, stream: $("#pg-stream").checked,
-                enable_thinking: $("#pg-think").checked};
+  const body = {messages: history, stream: $("#pg-stream").checked};
+  // off は enable_thinking=false + reasoning_effort="none" (Inkling-2 の off 歯車)。
+  // 段階指定は reasoning_effort、on/off のみのモデルは enable_thinking で配線
+  const think = $("#pg-think").value;
+  if (think === "off") { body.enable_thinking = false; body.reasoning_effort = "none"; }
+  else if (think === "on") { body.enable_thinking = true; }
+  else if (think && think !== "default") { body.enable_thinking = true; body.reasoning_effort = think; }
   if (d.model) body.model = d.model;
   const num = id => { const v = $(id).value.trim(); return v === "" ? null : parseFloat(v); };
   const temp = num("#pg-temp"), topp = num("#pg-topp"), mtok = num("#pg-mtok");

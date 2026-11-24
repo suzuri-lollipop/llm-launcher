@@ -44,12 +44,14 @@ def test_usage_counts_are_number_normalised():
 
 
 def test_playground_thinking_toggle_is_forwarded():
-    """思考トグルがエンジンへ届くこと: Qwen3 系は既定で本文より先に思考が流れ、
-    オフにできないとプレイグラウンドは生成開始が遅く見える (プロキシが
-    chat_template_kwargs を捨てていた回帰)。"""
+    """思考設定がエンジンへ届くこと: off は enable_thinking=false に加え
+    reasoning_effort="none" (Inkling-2 の off 歯車) を送り、effort 段階を持つ
+    モデルは段階を reasoning_effort で送る (プロキシが chat_template_kwargs を
+    捨てていた回帰 + effort 語彙を on/off に潰していた回帰)。"""
     assert 'id="pg-think"' in SRC
-    assert 'enable_thinking: $("#pg-think").checked' in SRC
-    assert 'thinking: $("#pg-think") ? $("#pg-think").checked : true' in SRC
+    assert 'body.enable_thinking = false; body.reasoning_effort = "none";' in SRC
+    assert 'body.reasoning_effort = think;' in SRC
+    assert 'thinking: $("#pg-think") ? $("#pg-think").value : "on"' in SRC
 
 
 def test_playground_thinking_phase_shows_reasoning_live():
