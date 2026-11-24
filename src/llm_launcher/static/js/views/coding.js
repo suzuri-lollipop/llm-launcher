@@ -198,8 +198,13 @@ async function cbLoadModelOptions(refresh) {
   }
   // thinking: 非思考モデルは off のみ / 思考モデルは off+on / effort 語彙があれば off+段階
   const levels = (o.thinking && o.thinking.levels) || ["off"];
-  // 旧保存値 "on" は effort 段階モデルでは high に読み替える (qwen は on のまま)
-  if (wantThink === "on" && !levels.includes("on") && levels.includes("high")) wantThink = "high";
+  // 旧保存値 "on"/"high" は high があれば high、無ければサーバー既定段階へ読み替える
+  // (Qwen3.8 の語彙は xhigh/medium/low で high が無く、放置すると off に落ちる)
+  if (["on", "high"].includes(wantThink) && !levels.includes(wantThink) && levels.length > 1) {
+    const cap0 = o.thinking || {};
+    wantThink = levels.includes("high") ? "high"
+      : (cap0.default && levels.includes(cap0.default)) ? cap0.default : levels[1];
+  }
   tsel.innerHTML = levels.map(l => `<option value="${l}">${l}</option>`).join("");
   tsel.value = levels.includes(wantThink) ? wantThink : levels[0];
   tsel.disabled = levels.length <= 1;
