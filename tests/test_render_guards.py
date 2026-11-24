@@ -223,6 +223,10 @@ def test_coding_select_history_viewer_guarded():
     assert 'deferRender("cb-pane" + side, renderCodingViewer)' in v
     # ペインの sig はガードを通過してから進める (後回しにした更新を取りこぼさない)
     assert v.index("uiBusyIn(paneEl)") < v.index('d["_psig" + side] = sig')
+    # AI 評価タブも同じガード (judge フォーム入力中にポーリングで組み直さない)
+    e = body("renderCodingEval")
+    assert 'deferRender("cb-eval", renderCodingEval)' in e
+    assert "if (html === d._eval && el.childElementCount) return;" in e
 
 
 def test_bench_calibrate_setup_selects_use_setOptions():
