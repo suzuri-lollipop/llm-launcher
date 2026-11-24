@@ -926,8 +926,9 @@ _BACKEND_META: dict[str, dict[str, Any]] = {
         "ready_markers": ["Uvicorn running", "Application startup complete"],
         "default_port": "1919",
         "launch_json": True,
-        # fork の setup.sh と同じモデル置き場 (clone 隣接の Freetoken-data)。
-        # UI ダウンロードの保存先候補と、完了後の起動 JSON への記入に使われる
+        # モデル置き場は data/Freetoken-data (gitignore 済み。フォルダ名は
+        # fork の setup.sh と同じ規約)。UI ダウンロードの保存先候補と、
+        # 完了後の起動 JSON への記入に使われる
         "model_data": "Freetoken-data",
         # セットアップ画面 ② に出す対応モデル一覧 (fork docs/models.md の known-good 表)
         "model_list_doc": "docs/models.md",
@@ -1128,16 +1129,17 @@ TRUTHY = {"1", "true", "yes", "on", "はい"}
 
 
 def fork_model_root(root: Path, backend: dict[str, Any]) -> Path | None:
-    """model_data バックエンドのモデル置き場。fork の setup.sh と同じ規則で
-    clone 隣接の <data>/models (Strata-data / Maya-data 方式)。
-    FREETOKEN_DATA_DIR 環境変数があればそれが最優先 (setup.sh も読む同じ env)。"""
+    """model_data バックエンドのモデル置き場。リポジトリの data/ (gitignore 済み)
+    配下の <data>/models (Freetoken-data 等。フォルダ名は fork の setup.sh と同じ規約)。
+    FREETOKEN_DATA_DIR 環境変数があればそれが最優先 (setup.sh も読む同じ env)。
+    旧置き場 (clone 隣接) からの移行は datadir.migrate_data_layout。"""
     rel = backend.get("model_data")
     if not rel:
         return None
     env = os.environ.get("FREETOKEN_DATA_DIR", "").strip()
     if env:
         return Path(env).expanduser() / "models"
-    return (root / str(backend.get("module_path", ""))).parent / str(rel) / "models"
+    return root / "data" / str(rel) / "models"
 
 
 # ---------------------------------------------------------------------------

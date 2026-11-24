@@ -9,7 +9,9 @@ wheels/
 # Virtual environments
 .venv
 
-# llm-launcher 実行データ (プロファイル・起動履歴・ログ)
+# llm-launcher 実行データ (プロファイル・起動 JSON/sh・モデル重み・HF キャッシュ・履歴・ログ)
+# 旧置き場 (clone 隣接の *-data / module 内の起動 JSON・sh / ~/.cache/huggingface)
+# からは起動時に datadir.migrate_data_layout が自動移行する
 /data/
 # モジュール内ビルド成果物
 module/*/build/
