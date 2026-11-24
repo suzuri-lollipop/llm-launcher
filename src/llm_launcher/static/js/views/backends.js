@@ -26,10 +26,10 @@ function renderOomCard(){
     <div class="row"><b style="font-size:15px"><svg class=ic aria-hidden=true><use href=#i-shield /></svg> OOM 対策</b>
       <span class="muted" style="font-size:12px">重い CLI と同居する環境でモデルが最初に kill されるのを防ぐ</span>
       <span class="grow"></span>${badge}</div>
-    <div class="mono" style="margin-top:8px;white-space:pre-wrap;word-break:break-all;font-size:12.5px;color:${vcol}">${esc(o.verdict)}</div>
+    <div class="mono" data-f="verdict" style="margin-top:8px;white-space:pre-wrap;word-break:break-all;font-size:12.5px;color:${vcol}">${esc(o.verdict)}</div>
     <div class="meter" style="margin-top:10px"><div class="m-hd"><b>空きメモリ (MemAvailable)</b>
-      <span class="r">${fmtGB(o.available)} 空き / 予約 ${fmtGB(o.reserve)} · 使用 ${esc(o.used_pct)}%</span></div>
-      <div class="mbar"><i class="${cls}" style="width:${Math.min(100,o.used_pct)}%"></i></div></div>
+      <span class="r" data-f="prog">${fmtGB(o.available)} 空き / 予約 ${fmtGB(o.reserve)} · 使用 ${esc(o.used_pct)}%</span></div>
+      <div class="mbar"><i class="${cls}" data-f="bar" style="width:${Math.min(100,o.used_pct)}%"></i></div></div>
     <div class="kvs" style="margin-top:10px">
       <span>oom_score_adj</span><span class="v mono">${esc(o.score_adj)}${o.self_applied ? "" : " (未適用)"} / 実測 ${esc(o.self_score ?? "-")}${o.self_via ? (o.self_via === "helper" ? " · sudo 経由" : " · 直接") : ""}</span>
       <span>権限 (CAP_SYS_RESOURCE)</span><span class="v">${o.can_lower ? "あり — 直接書き込み可" : "なし — sudo ヘルパーが必要"}</span>
@@ -51,6 +51,8 @@ function renderOomCard(){
     <div class="muted" style="font-size:11.5px;margin-top:8px">負の score_adj はカーネル特権 (CAP_SYS_RESOURCE) が必要で、一般ユーザーでは直接書けません。
       下のコマンドで「そのパスだけ」を許可する sudo ヘルパーを導入すると、起動ツリー全体 (モデル本体 + 後から湧く worker + launcher 自身) に適用されます。</div>
     <pre class="cmdprev" style="max-height:none">${esc(o.install_hint || "")}</pre>`;
+  // ホールド中 (入力 / 選択) もライブ数値 (判定文 / メーター) だけは in-place で進める
+  if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) patchFields(el, html);
   // 未保存の編集 (formDirty) / 選択 / アニメーション中は組み直さない (setHtml)
   setHtml(el, html, "oom-card", renderOomCard);
 }

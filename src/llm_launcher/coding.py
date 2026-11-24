@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import time
+import urllib.request
 from pathlib import Path
 from typing import Any
 
@@ -48,10 +49,10 @@ MAX_RUNS = 50            # 履歴として保持する最大件数 (完了分の
 SAVE_THROTTLE = 2.0      # 進行状況の永続化間隔 (秒)
 PI_PKG = "@earendil-works/pi-coding-agent"
 PI_PROVIDER = "launcher"  # models.json に作るプロバイダ ID
-SESSION_ID = "coding"     # backend / frontend で継続する pi セッション ID
 FILE_SCAN_MAX = 4000      # workspace 走査のファイル数上限
 FILE_READ_MAX = 512 * 1024        # コードビューアーの 1 ファイル読み込み上限
 LOG_TAIL_MAX = 64 * 1024          # ライブログ API が返す末尾バイト数
+TRANSCRIPT_MAX_BYTES = 4 * 1024 * 1024  # 出力履歴 API が返す本文の総上限
 PROXY_BODY_MAX = 32 * 1024 * 1024  # プレビュー中継の応答上限
 SKIP_DIRS = {"node_modules", ".git", "__pycache__", ".venv", ".pi", ".pytest_cache"}
 PREVIEW_CANDIDATES = ("backend/server.py", "backend/app.py", "backend/main.py",
@@ -195,6 +196,369 @@ description: 実装の完了前に自分で動作確認をする手順。サー�
 }
 
 
+# pi に持たせる DeepSeek Harness 風のファイルツール群 (拡張 = TypeScript)。
+# pi 組み込みの read / edit / write / grep を同名登録で置き換え、glob を追加する
+# (pi は拡張ツールを組み込みより優先する)。意味論は DSH に合わせる:
+#   read  … 行番号付き / offset・limit (既定・上限 2000 行) / 1 行 2000 文字・
+#           出力 50KB の打ち切り / 続きは offset で
+#   edit  … リテラル置換 / replace_all=false のとき old_string はちょうど 1 回
+#   write … 全文書き込み (親ディレクトリ自動作成)
+#   grep  … 正規表現検索 / ファイルごとにグルーピング + 行番号 / 250 件上限
+#   glob  … パターンでファイル探索 / 更新時刻順 / 100 件上限
+# bash は pi 組み込みのまま (自己検証のサーバー起動等に必要)。
+# typebox / pi-coding-agent の import は pi のローダが本体側へ alias するので
+# サンドボックス内に node_modules を持ち込む必要は無い。
+DEFAULT_PI_EXTENSION = r'''/**
+ * dsh-tools: DeepSeek Harness 風のファイル編集 / 検索 / 閲覧ツールを pi に持たせる。
+ * read / edit / write / grep は pi 組み込みを同名で置き換え、glob を追加する。
+ * (launcher が生成する既定資材。data/coding/defaults/extensions/dsh-tools.ts)
+ */
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+
+const READ_LIMIT = 2000;          // 1 回に返す行数の既定かつ上限
+const READ_MAX_LINE = 2000;       // 1 行の最大文字数
+const READ_MAX_BYTES = 50 * 1024; // 出力ウィンドウの最大バイト数
+const GREP_MAX_MATCHES = 250;     // インラインに残すマッチ数
+const GREP_MAX_LINE_BYTES = 2000; // マッチ行プレビューの最大バイト数
+const GREP_SCAN_BUDGET = 10000;   // 走査の打ち切り (これ以上は数えない)
+const GLOB_MAX_RESULTS = 100;     // glob が返すパス数
+const FILE_READ_MAX = 8 * 1024 * 1024; // grep / glob 走査で読むファイル上限
+const SKIP_DIRS = new Set(["node_modules", ".git", "__pycache__", ".venv", ".pi", ".pytest_cache"]);
+
+/** モデルが @ 付きで渡してくるパスを正規化し、cwd 基準で解決する。 */
+function resolvePath(cwd: string, p: string): string {
+  const cleaned = String(p ?? "").trim().replace(/^@+/, "");
+  if (!cleaned) throw new Error("path must be a non-empty string");
+  return path.resolve(cwd, cleaned);
+}
+
+function truncateLine(line: string): string {
+  return line.length > READ_MAX_LINE
+    ? line.substring(0, READ_MAX_LINE) + `... (line truncated to ${READ_MAX_LINE} chars)`
+    : line;
+}
+
+function previewLine(line: string): string {
+  if (Buffer.byteLength(line, "utf8") <= GREP_MAX_LINE_BYTES) return line;
+  return Buffer.from(line, "utf8").subarray(0, GREP_MAX_LINE_BYTES).toString("utf8") + "… (line truncated)";
+}
+
+/** glob → 正規表現 (** / * / ? / {a,b} / [abc] 対応)。 */
+function globToRegex(pat: string): RegExp {
+  let re = "";
+  let i = 0;
+  while (i < pat.length) {
+    const c = pat[i];
+    if (c === "*") {
+      if (pat[i + 1] === "*") {
+        if (pat[i + 2] === "/") { re += "(?:.*/)?"; i += 3; }
+        else { re += ".*"; i += 2; }
+      } else { re += "[^/]*"; i++; }
+    } else if (c === "?") { re += "[^/]"; i++; }
+    else if (c === "{") {
+      let depth = 1, j = i + 1, cur = "";
+      const parts: string[] = [];
+      while (j < pat.length && depth > 0) {
+        const d = pat[j];
+        if (d === "{") depth++;
+        else if (d === "}") { depth--; if (depth === 0) break; }
+        if (depth === 1 && d === ",") { parts.push(cur); cur = ""; }
+        else cur += d;
+        j++;
+      }
+      parts.push(cur);
+      re += "(?:" + parts.map((p) => globToRegex(p).source).join("|") + ")";
+      i = j + 1;
+    } else if (c === "[") {
+      let j = i + 1, cls = "[";
+      if (pat[j] === "!" || pat[j] === "^") { cls += "^"; j++; }
+      while (j < pat.length && pat[j] !== "]") { cls += pat[j]; j++; }
+      re += cls + "]";
+      i = j + 1;
+    } else {
+      re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+      i++;
+    }
+  }
+  return new RegExp("^" + re + "$");
+}
+
+/** include / glob のマッチ: "/" を含まないパターンは任意深さの basename に効く。 */
+function globMatch(pat: string, rel: string): boolean {
+  const rx = globToRegex(pat);
+  const target = pat.includes("/") ? rel.split(path.sep).join("/") : path.basename(rel);
+  return rx.test(target);
+}
+
+async function* walkFiles(root: string): AsyncGenerator<{ abs: string; rel: string }> {
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop()!;
+    let entries;
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); }
+    catch { continue; }
+    for (const e of entries) {
+      const abs = path.join(dir, e.name);
+      if (e.isDirectory()) { if (!SKIP_DIRS.has(e.name)) stack.push(abs); }
+      else if (e.isFile()) yield { abs, rel: path.relative(root, abs) };
+    }
+  }
+}
+
+function textResult(text: string) {
+  return { content: [{ type: "text" as const, text }], details: {} };
+}
+
+export default function (pi: ExtensionAPI) {
+  /* ------------------------------------------------------------ read (閲覧) */
+  pi.registerTool({
+    name: "read",
+    label: "Read",
+    description: "Read a UTF-8 text file and return line-numbered content. "
+      + "Use offset and limit to read a line range or continue a large file.",
+    promptSnippet: "read: Read a UTF-8 text file with line numbers (offset/limit)",
+    promptGuidelines: [
+      "Use the read tool — not shell commands like cat, sed, head, or tail — to inspect text files. "
+      + "Use offset and limit to read a line range or continue a large file.",
+    ],
+    parameters: Type.Object({
+      file_path: Type.String({ description: "Path to read (absolute or relative to the working directory)." }),
+      offset: Type.Optional(Type.Number({ description: "1-based first line to return. Defaults to 1." })),
+      limit: Type.Optional(Type.Number({ description: `Maximum number of lines to return. Defaults to ${READ_LIMIT}.` })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const p = resolvePath(ctx.cwd, params.file_path);
+      const offset = params.offset ?? 1;
+      const limit = params.limit ?? READ_LIMIT;
+      for (const [v, name] of [[offset, "offset"], [limit, "limit"]] as const) {
+        if (!Number.isInteger(v) || v < 1) throw new Error(`${name} must be a positive integer`);
+      }
+      if (limit > READ_LIMIT) throw new Error(`limit must be less than or equal to ${READ_LIMIT}`);
+      const st = await fs.stat(p).catch(() => null);
+      if (!st) throw new Error(`File not found: ${p}`);
+      if (st.isDirectory()) throw new Error(`${p} is a directory, not a file`);
+      const raw = await fs.readFile(p, "utf8");
+      if (raw.includes("\0")) throw new Error(`Cannot read as text (binary file): ${p}`);
+      let lines = raw.length ? raw.split("\n") : [];
+      if (raw.endsWith("\n")) lines = lines.slice(0, -1);
+      const totalLines = lines.length;
+      if (offset > totalLines && !(totalLines === 0 && offset === 1)) {
+        throw new Error(`offset ${offset} is out of range for "${p}" (${totalLines} lines)`);
+      }
+      const out: string[] = [];
+      let bytes = 0, capped = false, endLine = offset - 1;
+      for (let n = offset; n <= Math.min(totalLines, offset + limit - 1); n++) {
+        let text = lines[n - 1];
+        if (text.endsWith("\r")) text = text.slice(0, -1);
+        text = truncateLine(text);
+        const size = Buffer.byteLength(text, "utf8") + (out.length ? 1 : 0);
+        if (bytes + size > READ_MAX_BYTES) { capped = true; break; }
+        bytes += size;
+        out.push(`${n}: ${text}`);
+        endLine = n;
+      }
+      const footer = capped
+        ? `(Output capped. Showing lines ${offset}-${endLine}. Use offset=${endLine + 1} to continue.)`
+        : endLine < totalLines
+          ? `(Showing lines ${offset}-${endLine} of ${totalLines}. Use offset=${endLine + 1} to continue.)`
+          : `(End of file - total ${totalLines} lines)`;
+      const body = out.length ? out.join("\n") + "\n\n" + footer : footer;
+      return textResult(`<path>${p}</path>\n<type>file</type>\n<content>\n${body}\n</content>`);
+    },
+  });
+
+  /* ------------------------------------------------------------ edit (編集) */
+  pi.registerTool({
+    name: "edit",
+    label: "Edit",
+    description: "Edit an existing UTF-8 text file by replacing literal text. "
+      + "When replace_all is false (default), old_string must appear exactly once.",
+    promptSnippet: "edit: Replace literal text in a file (old_string/new_string, replace_all)",
+    promptGuidelines: [
+      "Use the edit tool for targeted changes to existing files. old_string must match the file "
+      + "exactly, including whitespace; read the file first if unsure. When replace_all is false, "
+      + "old_string must appear exactly once — add surrounding context to make it unique.",
+    ],
+    parameters: Type.Object({
+      file_path: Type.String({ description: "Path to edit (absolute or relative to the working directory)." }),
+      old_string: Type.String({ description: "Literal text to replace." }),
+      new_string: Type.String({ description: "Literal replacement text. Use an empty string to delete the match." }),
+      replace_all: Type.Optional(Type.Boolean({ description: "Replace all matches. Defaults to false; when false, old_string must appear exactly once." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const p = resolvePath(ctx.cwd, params.file_path);
+      const oldS = params.old_string, newS = params.new_string;
+      const all = params.replace_all ?? false;
+      if (!oldS.length) throw new Error("old_string must be a non-empty string");
+      if (oldS === newS) throw new Error("old_string and new_string must differ");
+      return withFileMutationQueue(p, async () => {
+        const content = await fs.readFile(p, "utf8").catch(() => null);
+        if (content === null) throw new Error(`File not found: ${p}. Use write to create new files.`);
+        const count = content.split(oldS).length - 1;
+        if (count === 0) {
+          throw new Error(`old_string not found in ${p}. Read the file and copy the exact text (including whitespace and indentation).`);
+        }
+        if (!all && count > 1) {
+          throw new Error(`old_string appears ${count} times in ${p}; when replace_all is false it must appear exactly once. `
+            + "Add surrounding context to make it unique, or set replace_all=true.");
+        }
+        const next = all ? content.split(oldS).join(newS) : content.replace(oldS, newS);
+        await fs.writeFile(p, next, "utf8");
+        const n = all ? count : 1;
+        return textResult(`The file ${p} has been updated (${n} replacement${n === 1 ? "" : "s"}).`);
+      });
+    },
+  });
+
+  /* ------------------------------------------------------------ write (作成 / 全置換) */
+  pi.registerTool({
+    name: "write",
+    label: "Write",
+    description: "Create or fully replace a UTF-8 text file. Parent directories are created automatically.",
+    promptSnippet: "write: Create or fully replace a text file (file_path, content)",
+    promptGuidelines: [
+      "Use the write tool to create new files or fully replace a file's content; "
+      + "prefer the edit tool for small changes to existing files.",
+    ],
+    parameters: Type.Object({
+      file_path: Type.String({ description: "Path to write (absolute or relative to the working directory)." }),
+      content: Type.String({ description: "Full UTF-8 text content to write." }),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const p = resolvePath(ctx.cwd, params.file_path);
+      return withFileMutationQueue(p, async () => {
+        await fs.mkdir(path.dirname(p), { recursive: true });
+        await fs.writeFile(p, params.content, "utf8");
+        return textResult(`Wrote ${Buffer.byteLength(params.content, "utf8")} bytes to ${p}.`);
+      });
+    },
+  });
+
+  /* ------------------------------------------------------------ grep (内容検索) */
+  pi.registerTool({
+    name: "grep",
+    label: "Grep",
+    description: "Search file contents with a regular expression (ripgrep-style syntax). "
+      + "Returns matching lines with line numbers, grouped by file. "
+      + "Use include (one glob like \"*.py\" or \"*.{ts,tsx}\") to filter files.",
+    promptSnippet: "grep: Search file contents by regex (pattern, path, include)",
+    promptGuidelines: [
+      "Use the grep tool to search file contents by regular expression instead of bash grep/rg. "
+      + "include must be one positive glob (use {a,b} alternation, not a comma-separated list).",
+    ],
+    parameters: Type.Object({
+      pattern: Type.String({ description: "Regular expression to search for (ripgrep syntax)." }),
+      path: Type.Optional(Type.String({ description: "File or directory to search in. Defaults to the working directory." })),
+      include: Type.Optional(Type.String({ description: "One glob filter for which files to search (e.g. \"*.ts\"). Negation is not supported." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!params.pattern.length) throw new Error("pattern must be a non-empty string");
+      const include = params.include === "" ? undefined : params.include;
+      if (include !== undefined) {
+        if (!include.trim().length) throw new Error("include must be a non-empty glob when given");
+        if (include.startsWith("!")) throw new Error('include must be a positive glob filter; negated patterns ("!…") are not supported');
+        let depth = 0;
+        for (const ch of include) {
+          if (ch === "{") depth++;
+          else if (ch === "}") depth = Math.max(0, depth - 1);
+          else if (ch === "," && depth === 0) {
+            throw new Error("include must be one glob, not a comma-separated list (use {a,b} alternation instead)");
+          }
+        }
+      }
+      let rx: RegExp;
+      try { rx = new RegExp(params.pattern); }
+      catch (e) { throw new Error(`Invalid regular expression: ${(e as Error).message}`); }
+      const base = params.path ? resolvePath(ctx.cwd, params.path) : ctx.cwd;
+      const st = await fs.stat(base).catch(() => null);
+      if (!st) throw new Error(`Path not found: ${base}`);
+      const files: { abs: string; rel: string }[] = [];
+      if (st.isFile()) files.push({ abs: base, rel: path.basename(base) });
+      else for await (const f of walkFiles(base)) files.push(f);
+      const groups = new Map<string, string[]>();
+      let seen = 0, kept = 0, budgetHit = false;
+      outer:
+      for (const f of files) {
+        if (include !== undefined && !globMatch(include, f.rel)) continue;
+        let raw: string;
+        try {
+          const fst = await fs.stat(f.abs);
+          if (fst.size > FILE_READ_MAX) continue;
+          const buf = await fs.readFile(f.abs);
+          if (buf.subarray(0, 8192).includes(0)) continue;   // バイナリはスキップ
+          raw = buf.toString("utf8");
+        } catch { continue; }
+        const lines = raw.split("\n");
+        const rel = path.relative(ctx.cwd, f.abs);
+        for (let i = 0; i < lines.length; i++) {
+          if (!rx.test(lines[i])) continue;
+          seen++;
+          if (seen > GREP_SCAN_BUDGET) { budgetHit = true; break outer; }
+          if (kept < GREP_MAX_MATCHES) {
+            kept++;
+            let line = lines[i];
+            if (line.endsWith("\r")) line = line.slice(0, -1);
+            const g = groups.get(rel) ?? [];
+            g.push(`Line ${i + 1}: ${previewLine(line)}`);
+            groups.set(rel, g);
+          }
+        }
+      }
+      if (!seen) return textResult("No matches found");
+      const body = [...groups.entries()].map(([p, ls]) => `${p}\n${ls.join("\n")}`).join("\n\n");
+      const header = kept < seen || budgetHit
+        ? `Found ${kept} of ${budgetHit ? GREP_SCAN_BUDGET + "+" : seen} matches`
+        : `Found ${seen} ${seen === 1 ? "match" : "matches"}`;
+      const footer = kept < seen || budgetHit
+        ? "\n\n(Narrow pattern, path, or include to see more.)" : "";
+      return textResult(`${header}\n\n${body}${footer}`);
+    },
+  });
+
+  /* ------------------------------------------------------------ glob (パス探索) */
+  pi.registerTool({
+    name: "glob",
+    label: "Glob",
+    description: "Find files whose paths match a glob pattern (e.g. \"**/*.ts\", \"src/**/*.py\"). "
+      + "A pattern with no \"/\" matches the basename at any depth. "
+      + `Returns up to ${GLOB_MAX_RESULTS} file paths sorted by modification time (newest first).`,
+    promptSnippet: "glob: Find files by path pattern, sorted by modification time",
+    promptGuidelines: [
+      "Use the glob tool to discover files by path pattern instead of bash find or ls. "
+      + "Patterns support **, *, ?, {a,b} alternation and [abc] classes.",
+    ],
+    parameters: Type.Object({
+      pattern: Type.String({ description: "Glob pattern to match file paths against (e.g. \"**/*.ts\")." }),
+      path: Type.Optional(Type.String({ description: "Directory to search in. Defaults to the working directory." })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (!params.pattern.length) throw new Error("pattern must be a non-empty string");
+      const base = params.path ? resolvePath(ctx.cwd, params.path) : ctx.cwd;
+      const st = await fs.stat(base).catch(() => null);
+      if (!st || !st.isDirectory()) throw new Error(`Directory not found: ${base}`);
+      const found: { rel: string; mtime: number }[] = [];
+      for await (const f of walkFiles(base)) {
+        if (!globMatch(params.pattern, f.rel)) continue;
+        try { found.push({ rel: f.rel, mtime: (await fs.stat(f.abs)).mtimeMs }); }
+        catch { /* 消えたファイルは無視 */ }
+      }
+      if (!found.length) return textResult(`No files found matching pattern: ${params.pattern}`);
+      found.sort((a, b) => b.mtime - a.mtime);
+      const shown = found.slice(0, GLOB_MAX_RESULTS).map((f) => f.rel);
+      const footer = found.length > shown.length
+        ? `\n\n(Showing ${shown.length} of ${found.length} paths in modification-time order. Narrow the pattern to see more.)`
+        : "";
+      return textResult(shown.join("\n") + footer);
+    },
+  });
+}
+'''
+
+
 def _skill_meta(text: str) -> tuple[str, str]:
     """SKILL.md の frontmatter から name / description を取り出す (簡易パーサ)。"""
     name = desc = ""
@@ -233,6 +597,7 @@ class CodingAssets:
         self.skills_dir = self.defaults_dir / "skills"
         self.agents_path = self.defaults_dir / "AGENTS.md"
         self.prompts_path = self.defaults_dir / "prompts.json"
+        self.extension_path = self.defaults_dir / "extensions" / "dsh-tools.ts"
 
     def ensure_defaults(self) -> None:
         self.skills_dir.mkdir(parents=True, exist_ok=True)
@@ -248,6 +613,9 @@ class CodingAssets:
                 {"backend_prompt": DEFAULT_BACKEND_PROMPT,
                  "frontend_prompt": DEFAULT_FRONTEND_PROMPT},
                 ensure_ascii=False, indent=2), encoding="utf-8")
+        if not self.extension_path.exists():
+            self.extension_path.parent.mkdir(parents=True, exist_ok=True)
+            self.extension_path.write_text(DEFAULT_PI_EXTENSION, encoding="utf-8")
 
     def default_prompts(self) -> dict[str, str]:
         self.ensure_defaults()
@@ -285,6 +653,7 @@ class CodingAssets:
         return {
             "skills_dir": str(self.skills_dir),
             "agents_path": str(self.agents_path),
+            "extension_path": str(self.extension_path),
             "backend_prompt": prompts["backend_prompt"],
             "frontend_prompt": prompts["frontend_prompt"],
             "skills": self.list_skills(),
@@ -655,6 +1024,99 @@ def guess_type(path: str) -> str:
     return ctype or "application/octet-stream"
 
 
+# ------------------------------------------------------------------ モデル能力の検出
+# thinking は「モデルで設定できるものだけ」出すための単一の源。
+# 判定材料: (1) サーバーが /v1/models で公開する effort 語彙 (あればその段階)、
+# (2) プロファイルの argv に reasoning パーサが設定されているか
+# (サーバーが reasoning_content を分離する = 思考対応の明示設定)、
+# (3) モデル名が既知の思考ファミリーか。語彙が無ければテンプレート由来の
+# ON/OFF が基本なので off/on の 2 値にする。
+
+THINKING_NAME_RE = re.compile(
+    r"qwen3|deepseek[-_]?r1|deepseek[-_]?v3|glm[-_]?4|inkling|gpt[-_]?oss", re.I)
+QWEN_THINKING_RE = re.compile(r"qwen3", re.I)
+
+
+def argv_flag(argv: list[str], name: str) -> str:
+    """argv から --name <value> / --name=<value> の値を取る (無ければ "")。"""
+    for i, tok in enumerate(argv):
+        if tok == name and i + 1 < len(argv):
+            return argv[i + 1]
+        if tok.startswith(name + "="):
+            return tok.split("=", 1)[1]
+    return ""
+
+
+def thinking_capability(argv: list[str], model_name: str,
+                        efforts: list[str] | None = None,
+                        default_effort: str | None = None) -> dict[str, Any]:
+    """(プロファイル argv, モデル名, サーバー effort 語彙) → thinking 設定の出せる範囲。
+
+    戻り値: {capable, qwen, levels, source}
+      capable … 思考に対応しているか / qwen … enable_thinking 配線が必要か
+      levels  … UI に出してよいレベル (off のみ / off+on / off+実 effort 段階)
+      source  … 判定の根拠 (表示用)
+
+    サーバーが /v1/models で effort 語彙を公開し、かつその off 歯車 ("none") を
+    含むなら、その段階をそのまま出す (Inkling-2 の none/minimal/low/medium/high/
+    xhigh/max)。"none" を持たないモデル (Qwen3.8 の xhigh/medium/low 等) と Qwen の
+    enable_thinking 配線は従来どおり off/on に留める。"""
+    parser = argv_flag(argv, "--reasoning-parser")
+    reasoning = argv_flag(argv, "--reasoning")
+    name_hit = bool(THINKING_NAME_RE.search(model_name or ""))
+    qwen = bool(QWEN_THINKING_RE.search(model_name or "")) or "qwen3" in parser
+    if efforts and "none" in efforts and not qwen:
+        levels = ["off"] + [e for e in efforts if e != "none"]
+        return {"capable": True, "qwen": False, "levels": levels,
+                "source": "サーバーの effort 語彙 (/v1/models)",
+                "efforts": list(efforts), "default": default_effort}
+    if parser:
+        capable, source = True, "プロファイルの reasoning-parser"
+    elif reasoning in ("on", "auto"):
+        capable, source = True, "プロファイルの reasoning 設定"
+    elif name_hit:
+        capable, source = True, "モデル名 (思考ファミリー)"
+    else:
+        capable, source = False, ""
+    return {"capable": capable, "qwen": qwen,
+            "levels": ["off", "on"] if capable else ["off"],
+            "source": source}
+
+
+def model_efforts(base: str, auth: dict[str, str] | None = None) -> tuple[list[str], str | None]:
+    """サーバーの /v1/models から (supported_reasoning_efforts, default_reasoning_effort)。
+    未取得・非対応サーバーは ([], None)。"""
+    try:
+        req = urllib.request.Request(f"{base}/v1/models", headers=auth or {})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return [], None
+    for it in (data.get("data") or []):
+        if isinstance(it, dict):
+            eff = it.get("supported_reasoning_efforts")
+            if isinstance(eff, list) and eff:
+                return [str(e) for e in eff], it.get("default_reasoning_effort")
+    return [], None
+
+
+def model_ids(base: str, auth: dict[str, str] | None = None) -> list[str]:
+    """サーバーの /v1/models からモデル id 一覧を取得 (失敗は [])。"""
+    try:
+        req = urllib.request.Request(f"{base}/v1/models", headers=auth or {})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    out = []
+    for it in (data.get("data") or []):
+        if isinstance(it, dict):
+            mid = it.get("id") or it.get("model") or it.get("name")
+            if mid:
+                out.append(str(mid))
+    return out
+
+
 # ------------------------------------------------------------------ マネージャー
 
 
@@ -917,13 +1379,14 @@ class CodingManager:
                               "モデル名を明示指定してください")
         run["model"] = model
         key = api_key_from_argv(sess.get("argv") or [])
+        efforts, _ = await asyncio.to_thread(model_efforts, base, auth)
         rd = self.run_dir(run["id"])
         ws = rd / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
         (rd / "home").mkdir(exist_ok=True)
         (rd / "sessions").mkdir(exist_ok=True)
         (rd / "logs").mkdir(exist_ok=True)
-        self._prepare_pi_home(rd, base, model, key, params)
+        self._prepare_pi_home(rd, base, model, key, params, efforts)
         # 選択された AGENTS.md を workspace にコピー (pi が cwd から自動発見する)
         agents_src = Path(params["agents_path"])
         shutil.copyfile(agents_src, ws / "AGENTS.md")
@@ -1010,11 +1473,48 @@ class CodingManager:
         return ""
 
     def _prepare_pi_home(self, rd: Path, base: str, model: str, key: str,
-                         params: dict[str, Any]) -> None:
-        """pi の models.json: launcher が起動したサーバーを OpenAI 互換プロバイダとして登録。"""
+                         params: dict[str, Any], efforts: list[str] | None = None) -> None:
+        """pi の models.json: launcher が起動したサーバーを OpenAI 互換プロバイダとして登録。
+
+        Qwen3 系は enable_thinking の ON/OFF が実体なので、thinkingFormat を
+        qwen-chat-template に固定し、off で enable_thinking=false が送られるようにする
+        (テンプレート既定の thinking ON を確実に切る)。レベルは off/high のみ提示。
+
+        effort 語彙 ("none" 含む) を公開する非 Qwen モデル (Inkling-2) は pi 既定の
+        reasoning_effort 配線を使う: thinkingLevelMap.off を "none" に割り当て、
+        off でも reasoning=True にして pi が reasoning_effort="none" を送るようにする
+        (テンプレート既定の effort 0.9 を確実に切る)。"""
         pi_home = rd / "pi-home"
         pi_home.mkdir(exist_ok=True)
         thinking = str(params.get("thinking") or "off")
+        qwen = bool(QWEN_THINKING_RE.search(model or ""))
+        effort_wired = bool(efforts) and "none" in efforts and not qwen
+        entry: dict[str, Any] = {
+            "id": model,
+            "name": model,
+            "reasoning": True if (qwen or effort_wired) else thinking != "off",
+            "input": ["text"],
+            "contextWindow": 128000,
+            # 思考 ON では thinking が出力枠を食う。8192 固定だと thinking=max で
+            # 思考だけで枠を使い切り length 打ち切り → ツール呼び出しの無いターンで
+            # pi が終了し、ファイルが 1 つも生成されない (2026-11-24 Inkling 実測)。
+            # 思考時はエンジンの既定 max_output_tokens (32768) まで枠を広げる。
+            "maxTokens": 8192 if thinking == "off" else 32768,
+            "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
+        }
+        if qwen:
+            entry["compat"] = {"thinkingFormat": "qwen-chat-template"}
+            entry["thinkingLevelMap"] = {"minimal": None, "low": None, "medium": None}
+        elif effort_wired:
+            level_map: dict[str, Any] = {"off": "none"}
+            for name in efforts:
+                if name in ("minimal", "low", "medium", "high", "xhigh", "max"):
+                    level_map[name] = name
+            # supportsDeveloperRole=False: pi は reasoning=True だと系統プロンプトを
+            # developer ロールで送るが、Inkling-2 のテンプレートは system しか知らず
+            # 400 (Unknown message role: developer) になるため system に固定する
+            entry["compat"] = {"supportsReasoningEffort": True, "supportsDeveloperRole": False}
+            entry["thinkingLevelMap"] = level_map
         cfg = {
             "providers": {
                 PI_PROVIDER: {
@@ -1023,15 +1523,7 @@ class CodingManager:
                     "api": "openai-completions",
                     "apiKey": key or "local",
                     "authHeader": True,
-                    "models": [{
-                        "id": model,
-                        "name": model,
-                        "reasoning": thinking != "off",
-                        "input": ["text"],
-                        "contextWindow": 128000,
-                        "maxTokens": 8192,
-                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-                    }],
+                    "models": [entry],
                 },
             },
         }
@@ -1049,22 +1541,39 @@ class CodingManager:
     def _pi_argv(self, run: dict[str, Any], phase: str, prompt: str, rd: Path,
                  ws: Path, skill_dirs: list[Path], params: dict[str, Any]
                  ) -> tuple[list[str], dict[str, str], str]:
-        """(実行 argv, CLI に渡す環境, docker コンテナ名 or "") を組み立てる。"""
+        """(実行 argv, CLI に渡す環境, docker コンテナ名 or "") を組み立てる。
+
+        DSH 風ツール拡張 (dsh-tools.ts) があれば -e で明示ロードし、read / edit /
+        write / grep / glob を拡張版に差し替える (--no-extensions は自動発見だけを
+        止め、明示 -e は有効)。無いときは pi 組み込みツールにフォールバック。"""
         pi_cmd = self.pi.command()
+        ext = self.assets.extension_path
+        use_ext = ext.is_file()
+        tools = "read,bash,edit,write,grep,glob" if use_ext \
+            else "read,bash,edit,write,grep,find,ls"
         inner = [pi_cmd, "--mode", "json",
                  "--model", f"{PI_PROVIDER}/{run['model']}",
                  "--thinking", str(params.get("thinking") or "off"),
-                 "--tools", "read,bash,edit,write,grep,find,ls",
+                 "--tools", tools,
                  "--no-skills", "--no-extensions",
                  "--no-prompt-templates", "--no-themes", "--approve",
-                 "--session-id", SESSION_ID,
                  "--session-dir", str(rd / "sessions"),
                  "--name", run["name"]]
+        # backend は新規セッションを id 指定なしで作る。--session-id を渡すと pi が
+        # 既存セッションを見つけられず "No project session found with id 'coding';
+        # creating a new session with that id." を毎回 stderr に出すため (2026-11-24)。
+        # frontend は --continue で backend のセッションを継続 (同一 cwd / session-dir)。
+        if phase == "frontend":
+            inner += ["--continue"]
+        if use_ext:
+            inner += ["--extension", str(ext)]
         for d in skill_dirs:
             inner += ["--skill", str(d)]
         inner += ["--", prompt]
         env = sandbox_env(rd / "home", rd / "pi-home", rd / "sessions")
         ro_binds = skill_dirs + [Path(params["agents_path"])]
+        if use_ext:
+            ro_binds.append(ext)
         if not params.get("sandbox", True):
             return inner, env, ""
         backend = sandbox_backend(self.pi.settings.load())
@@ -1459,3 +1968,84 @@ class CodingManager:
         return {"phase": phase, "log": tail(logs / f"{phase}.log"),
                 "stderr": tail(logs / f"{phase}.stderr"),
                 "preview": tail(logs / "preview.log") if phase == "preview" else ""}
+
+    def transcript(self, rid: str, phase: str) -> dict[str, Any]:
+        """モデル出力履歴: pi の生 JSONL からアシスタントの確定出力を取り出す。
+
+        message_end の content (text / thinking / toolCall) がモデルが実際に出力した
+        トークン内容。ツール呼び出しの引数 (write の本文など) も出力の一部なので含める。
+        本文の総量が TRANSCRIPT_MAX_BYTES を超えたら打ち切り (件数は最後まで数える)。
+        実行中のフェーズでもその時点までの出力を返す (ライブ閲覧)。"""
+        if phase not in ("backend", "frontend"):
+            raise CodingError("phase は backend / frontend です")
+        p = self.run_dir(rid) / "logs" / f"{phase}.jsonl"
+        messages: list[dict[str, Any]] = []
+        total = 0
+        truncated = False
+        budget = TRANSCRIPT_MAX_BYTES
+        try:
+            fh = open(p, "rb")
+        except OSError:
+            return {"phase": phase, "messages": [], "total": 0,
+                    "truncated": False, "missing": True}
+        with fh:
+            for line in fh:
+                try:
+                    ev = json.loads(line.decode("utf-8", "replace"))
+                except json.JSONDecodeError:
+                    continue
+                if ev.get("type") != "message_end":
+                    continue
+                msg = ev.get("message") or {}
+                if msg.get("role") != "assistant":
+                    continue
+                total += 1
+                texts: list[str] = []
+                thinking: list[str] = []
+                tools: list[dict[str, Any]] = []
+                content = msg.get("content")
+                if isinstance(content, str):
+                    texts = [content]
+                elif isinstance(content, list):
+                    for b in content:
+                        if not isinstance(b, dict):
+                            continue
+                        bt = b.get("type")
+                        if bt == "text" and b.get("text"):
+                            texts.append(str(b["text"]))
+                        elif bt == "thinking" and b.get("thinking"):
+                            thinking.append(str(b["thinking"]))
+                        elif bt == "toolCall":
+                            tools.append({"name": str(b.get("name") or ""),
+                                          "args": b.get("arguments")})
+                usage = msg.get("usage") or {}
+                item: dict[str, Any] = {
+                    "i": total,
+                    "ts": msg.get("timestamp"),
+                    "text": "\n".join(texts),
+                    "thinking": "\n".join(thinking),
+                    "tools": tools,
+                    "tokens_in": int(usage.get("input") or 0),
+                    "tokens_out": int(usage.get("output") or 0),
+                    "stop_reason": str(msg.get("stopReason") or ""),
+                    "error": str(msg.get("errorMessage") or ""),
+                }
+                size = (len(item["text"].encode("utf-8"))
+                        + len(item["thinking"].encode("utf-8"))
+                        + sum(len(json.dumps(t["args"], ensure_ascii=False).encode("utf-8"))
+                              for t in tools))
+                if size <= budget:
+                    budget -= size
+                    messages.append(item)
+                else:
+                    truncated = True
+                    if not messages:      # 先頭 1 件が巨大でも冒頭だけは見せる
+                        item["text"] = item["text"].encode("utf-8")[:TRANSCRIPT_MAX_BYTES] \
+                            .decode("utf-8", "ignore")
+                        item["thinking"] = ""
+                        item["tools"] = []
+                        item["clipped"] = True
+                        messages.append(item)
+                        budget = 0
+        return {"phase": phase, "messages": messages, "total": total,
+                "truncated": truncated, "missing": False}

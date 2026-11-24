@@ -64,3 +64,30 @@ def test_enable_thinking_true_is_forwarded_too(tmp_path, monkeypatch):
 def test_omitted_thinking_keeps_server_default(tmp_path, monkeypatch):
     body = _chat(tmp_path, monkeypatch, {})
     assert "chat_template_kwargs" not in body
+
+
+def test_reasoning_effort_none_reaches_engine_as_template_kwarg(tmp_path, monkeypatch):
+    # Inkling-2 の off 歯車は reasoning_effort="none" (enable_thinking は無視される)
+    body = _chat(tmp_path, monkeypatch, {"enable_thinking": False, "reasoning_effort": "none"})
+    assert body["chat_template_kwargs"] == {"enable_thinking": False, "reasoning_effort": "none"}
+
+
+def test_reasoning_effort_level_is_forwarded(tmp_path, monkeypatch):
+    body = _chat(tmp_path, monkeypatch, {"reasoning_effort": "medium"})
+    assert body["chat_template_kwargs"] == {"reasoning_effort": "medium"}
+
+
+def test_unknown_reasoning_effort_is_rejected(tmp_path, monkeypatch):
+    app = make_app(tmp_path)
+    inject_session(app, {"id": "p1", "name": "ft", "backend": "freetoken-fork"},
+                   "sid1", "running")
+    monkeypatch.setattr(urllib.request, "urlopen", lambda req, timeout=None: _FakeResp())
+    client = Client(app)
+
+    async def go():
+        st, _ = await client.post("/api/playground/sid1/chat", {
+            "messages": [{"role": "user", "content": "hi"}], "stream": False,
+            "reasoning_effort": "banana"})
+        assert st == 422
+
+    asyncio.run(go())
