@@ -1,9 +1,10 @@
 /* ===================================================================
    view: coding — コーディングベンチマーク (pi ハーネスで実装を作って比較)
+   ベンチマークタブ内の coding モードとして差し込まれる (旧独立タブは統合済み)
    =================================================================== */
 "use strict";
 VIEWS.coding = `
-  <section id="view-coding" class="view hidden">
+  <div id="view-coding">
     <h2 class="view-title">コーディングベンチ <span class="muted">pi ハーネスにプロファイルのサーバーでバックエンド / フロントエンドを作らせ、実装を並べて比較</span></h2>
     <div class="bm-tabs" role="tablist">
       <button class="bm-tab" id="cbt-run" role="tab" aria-selected="false" onclick="cbSetTab('run')"><svg class=ic aria-hidden=true><use href=#i-play /></svg> 実行<span class="run-dot hidden" id="cbt-run-dot" title="コーディングベンチ実行中"></span></button>
@@ -14,7 +15,7 @@ VIEWS.coding = `
     <div id="cb-active"></div>
     <div class="card">
       <div class="row" style="gap:8px">
-        <select id="cb-profile" class="grow" style="min-width:180px" onchange="cbPersist()"></select>
+        <select id="cb-profile" class="grow" style="min-width:180px" onchange="cbPersist();cbLoadModelOptions()"></select>
         <span class="badge" id="cb-prof-state"><span class="dot"></span>-</span>
       </div>
       <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
@@ -50,8 +51,16 @@ VIEWS.coding = `
         <div class="row" style="gap:6px;margin-top:2px"><button class="ghost" onclick="cbResetField('frontend')" style="min-height:32px;padding:4px 10px">既定に戻す</button><span class="muted" id="cb-frontend-n" style="font-size:11px"></span></div>
       </div>
       <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:10px">
-        <div><label class="f" for="cb-model">モデル名 <span class="muted">(空 = 自動)</span></label><input type="text" id="cb-model" class="mono" placeholder="(自動)" style="width:180px"></div>
-        <div><label class="f" for="cb-thinking">thinking</label><select id="cb-thinking" style="width:110px"><option value="off">off</option><option value="minimal">minimal</option><option value="low">low</option><option value="medium">medium</option><option value="high">high</option></select></div>
+        <div><label class="f" for="cb-model">モデル名 <span class="muted">(稼働中サーバーから自動取得)</span></label>
+          <div class="row" style="gap:4px">
+            <select id="cb-model" class="mono" style="width:230px"><option value="">(開始時に自動解決)</option></select>
+            <button class="ghost" onclick="cbLoadModelOptions(true)" title="モデル一覧を再取得" style="min-height:36px;padding:4px 8px">${IC("refresh")}</button>
+          </div>
+        </div>
+        <div><label class="f" for="cb-thinking">thinking <span class="muted">(モデルで設定できるもののみ)</span></label>
+          <select id="cb-thinking" style="width:110px"><option value="off">off</option></select>
+          <div class="muted" id="cb-think-note" style="font-size:10.5px;max-width:220px"></div>
+        </div>
         <div><label class="f" for="cb-ptimeout">1 フェーズ上限 (秒)</label><input type="number" id="cb-ptimeout" min="30" max="14400" value="1800" style="width:100px"></div>
         <div class="grow" style="min-width:160px"><label class="f" for="cb-name">ラベル <span class="muted">(空 = 自動)</span></label><input type="text" id="cb-name" maxlength="120" placeholder="例: Qwen3-30B タスク管理" style="width:100%"></div>
       </div>
@@ -69,7 +78,7 @@ VIEWS.coding = `
     </div>
     <div id="cbt-p-history" class="hidden"><div id="cb-history"></div></div>
     <div id="cbt-p-viewer" class="hidden"><div id="cb-viewer"></div></div>
-  </section>
+  </div>
 `;
 /* ============================================================= coding bench */
 /* pi ハーネス (https://github.com/earendil-works/pi) にプロファイルのサーバーで
@@ -95,13 +104,19 @@ function cbInit() {
                modeA: "preview", modeB: "preview",
                filesA: null, filesB: null, codeA: null, codeB: null,
                logOpen: false, logPhase: "backend", logText: "",
+               tx: {rid: "", phase: "backend", data: null, loading: false, error: ""},
                _act: "", _hist: "", _psigA: "", _psigB: "", _codeRev: 0, _fv: {} };
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") {
     if (el.type === "checkbox") el.checked = !!v; else el.value = v; } };
   set("#cb-profile", d.profile); set("#cb-skills", d.skills); set("#cb-agents", d.agents);
   set("#cb-backend", d.backend); set("#cb-frontend", d.frontend);
-  set("#cb-model", d.model); set("#cb-thinking", d.thinking); set("#cb-ptimeout", d.ptimeout);
+  set("#cb-model", d.model); set("#cb-thinking", d.thinking);
+  set("#cb-ptimeout", d.ptimeout);
   set("#cb-name", d.name);
+  // 選択肢は非同期ロード前に復元値を覚えておく (cbLoadModelOptions が適用)。
+  // effort 段階 (minimal/low/.../max) もそのまま保持し、語彙に無ければ先頭に落とす
+  S.coding._restored = {profile: d.profile || "", model: d.model || "",
+                        thinking: d.thinking || "off"};
   if (d.autostart === false) $("#cb-autostart").checked = false;
   if (d.stopafter === true) $("#cb-stopafter").checked = true;
   if (d.sandbox === false) $("#cb-sandbox").checked = false;
@@ -111,6 +126,7 @@ function cbInit() {
   });
   cbPromptCount();
   cbLoadAssets();
+  cbLoadModelOptions();
 }
 function cbPersist() {
   if (!S.coding) return;
@@ -144,7 +160,7 @@ async function cbLoadAssets() {
   fill("#cb-skills", a.skills_dir); fill("#cb-agents", a.agents_path);
   fill("#cb-backend", a.backend_prompt); fill("#cb-frontend", a.frontend_prompt);
   cbPromptCount(); cbPersist();
-  if (S.tab === "coding") renderCoding();
+  if (codingVisible()) renderCoding();
 }
 function cbResetField(kind) {
   const a = S.coding && S.coding.assets;
@@ -155,6 +171,46 @@ function cbResetField(kind) {
   $(id).value = v;
   cbPromptCount(); cbPersist();
 }
+/* モデル名自動取得 + thinking 選択肢 (モデルで設定できるものだけ) */
+async function cbLoadModelOptions(refresh) {
+  const d = S.coding;
+  const pid = $("#cb-profile").value;
+  d._optsPid = pid;
+  const msel = $("#cb-model"), tsel = $("#cb-thinking");
+  if (!pid) {
+    msel.innerHTML = `<option value="">(開始時に自動解決)</option>`;
+    tsel.innerHTML = `<option value="off">off</option>`;
+    $("#cb-think-note").textContent = "";
+    return;
+  }
+  const wantModel = msel.value || (d._restored && d._restored.model) || "";
+  let wantThink = tsel.value || (d._restored && d._restored.thinking) || "off";
+  let o;
+  try { o = await api(`/api/coding/model-options?profile_id=${encodeURIComponent(pid)}`); }
+  catch (e) { if (refresh) toast("モデル情報取得失敗: " + e.message); return; }
+  d.modelOpts = o;
+  // モデル一覧: 取得できたら先頭を自動選択。未起動なら「開始時に自動解決」
+  if (o.models && o.models.length) {
+    msel.innerHTML = o.models.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join("");
+    msel.value = o.models.includes(wantModel) ? wantModel : o.models[0];
+  } else {
+    msel.innerHTML = `<option value="">(開始時に自動解決)</option>`;
+  }
+  // thinking: 非思考モデルは off のみ / 思考モデルは off+on / effort 語彙があれば off+段階
+  const levels = (o.thinking && o.thinking.levels) || ["off"];
+  // 旧保存値 "on" は effort 段階モデルでは high に読み替える (qwen は on のまま)
+  if (wantThink === "on" && !levels.includes("on") && levels.includes("high")) wantThink = "high";
+  tsel.innerHTML = levels.map(l => `<option value="${l}">${l}</option>`).join("");
+  tsel.value = levels.includes(wantThink) ? wantThink : levels[0];
+  tsel.disabled = levels.length <= 1;
+  const cap = o.thinking || {};
+  $("#cb-think-note").textContent = cap.capable
+    ? `根拠: ${cap.source}${cap.qwen ? " (enable_thinking 配線)" : ""}`
+    : "このモデルは thinking 非対応 (off のみ)";
+  if (refresh) toast(o.models && o.models.length
+    ? `モデル ${o.models.length} 件を取得しました` : "サーバー未起動のためモデル名は開始時に解決します");
+  cbPersist();
+}
 function cbSetTab(t) {
   if (!CB_TABS.includes(t)) return;
   S.coding.tab = t; cbPersist(); renderCoding();
@@ -164,10 +220,17 @@ async function cbPoll(force) {
   try {
     const d = await api("/api/coding/runs");
     S.coding.runs = d.runs || []; S.coding.active = d.active || null;
-    if (S.tab === "coding") S.coding.status = await api("/api/coding/status");
+    if (codingVisible()) S.coding.status = await api("/api/coding/status");
   } catch { return; }
-  try { if (S.tab === "coding" || force) renderCoding(); }
+  bmBadge();   // 統合タブのバッジ (速度ベンチ / コーディングベンチ共通)
+  try { if (codingVisible() || force) renderCoding(); }
   catch (e) { console.error("coding render error:", e); }
+  // 開いている出力履歴が実行中の実行なら自動更新 (ライブ閲覧)
+  const tx = S.coding.tx;
+  if (tx.rid && !tx.loading &&
+      S.coding.runs.some(r => r.id === tx.rid && ["queued", "running"].includes(r.status))) {
+    cbFetchTranscript();
+  }
 }
 async function cbInstallPi() {
   try {
@@ -189,7 +252,7 @@ async function cbStart() {
       agents_path: $("#cb-agents").value,
       backend_prompt: $("#cb-backend").value,
       frontend_prompt: $("#cb-frontend").value,
-      thinking: $("#cb-thinking").value,
+      thinking: $("#cb-thinking").value === "on" ? "high" : $("#cb-thinking").value,
       phase_timeout: +$("#cb-ptimeout").value || 1800,
       auto_start: $("#cb-autostart").checked,
       stop_after: $("#cb-stopafter").checked,
@@ -213,12 +276,14 @@ async function cbDelete(id) {
   catch (e) { toast("削除失敗: " + e.message); }
   if (S.coding.selA === id) S.coding.selA = "";
   if (S.coding.selB === id) S.coding.selB = "";
+  if (S.coding.tx.rid === id) S.coding.tx = {rid: "", phase: S.coding.tx.phase, data: null, loading: false, error: ""};
   cbPoll(true);
 }
 async function cbClearAll() {
   if (!confirm("完了済みのコーディングベンチ履歴をすべて削除しますか? (生成ファイルも削除されます)")) return;
   try { const r = await api("/api/coding/runs", {method: "DELETE"}); toast(`${r.removed} 件削除しました`); }
   catch (e) { toast("削除失敗: " + e.message); }
+  S.coding.tx = {rid: "", phase: S.coding.tx.phase, data: null, loading: false, error: ""};
   cbPoll(true);
 }
 function cbRerun(id) {
@@ -228,11 +293,14 @@ function cbRerun(id) {
   const set = (fid, v) => { const el = $(fid); if (el && v != null) el.value = v; };
   set("#cb-profile", r.profile_id); set("#cb-skills", p.skills_dir); set("#cb-agents", p.agents_path);
   set("#cb-backend", p.backend_prompt); set("#cb-frontend", p.frontend_prompt);
-  set("#cb-model", p.model); set("#cb-thinking", p.thinking || "off");
   set("#cb-ptimeout", p.phase_timeout || 1800);
   $("#cb-autostart").checked = p.auto_start !== false;
   $("#cb-stopafter").checked = !!p.stop_after;
   $("#cb-sandbox").checked = p.sandbox !== false;
+  // モデル / thinking は選択肢ロード後に適用 (effort 段階はそのまま復元)
+  S.coding._restored = {profile: r.profile_id, model: p.model || "",
+                        thinking: p.thinking || "off"};
+  cbLoadModelOptions();
   cbPromptCount(); cbSetTab("run"); cbPersist();
   toast("実行フォームに読み込みました");
 }
@@ -320,12 +388,113 @@ function cbCmpToggle(id) {
   const i = d.cmp.indexOf(id);
   if (i >= 0) d.cmp.splice(i, 1);
   else { d.cmp.push(id); if (d.cmp.length > 6) d.cmp.shift(); }
-  // チェック操作は S.cmp が正 = 今の DOM 状態を基準に引き直す (さもないと
-  // formDirty が「未保存編集」と誤認して行更新を止め続ける)
-  const rowsEl = $("#cb-history [data-rows]"); if (rowsEl) stampForm(rowsEl);
-  cbPersist(); renderCodingHistory();
+  cbPersist();
+  cbCmpSync();                  // チェック状態を即座に in-place 反映 (上限で押し出された行も)
+  renderCodingHistory(true);    // 比較表もフォーカス中に後回しせず即時反映
 }
-function cbCmpClear() { S.coding.cmp = []; cbPersist(); renderCodingHistory(); }
+function cbCmpClear() { S.coding.cmp = []; cbPersist(); cbCmpSync(); renderCodingHistory(true); }
+/* チェックボックスの DOM 状態を S.cmp に合わせる。ポーリング描画は「フォーカス中の
+   入力は巻き込まない」ガードで後回しになるため、クリック直後はここで即時に同期する
+   (dataset.base も引き直して formDirty の「未保存編集」誤認を防ぐ)。 */
+function cbCmpSync() {
+  const rowsEl = $("#cb-history [data-rows]");
+  if (!rowsEl) return;
+  rowsEl.querySelectorAll("[data-row]").forEach(row => {
+    const cb = row.querySelector(".cb-cmp input");
+    if (!cb) return;
+    cb.checked = S.coding.cmp.includes(row.dataset.row);
+    cb.dataset.base = cb.checked ? "1" : "0";
+  });
+}
+/* ------------------------------------------------------------- 出力履歴 (transcript) */
+/* モデルが実際に出力したトークン内容 (text / thinking / ツール引数) を履歴から見る。
+   pi の生 JSONL (message_end) をバックエンドが解析して返す。実行中の実行は
+   ポーリングごとに自動更新 (ライブ閲覧)。 */
+async function cbToggleTranscript(id) {
+  const d = S.coding;
+  if (d.tx.rid === id) {
+    d.tx = {rid: "", phase: d.tx.phase, data: null, loading: false, error: ""};
+    renderCodingHistory(true);
+    return;
+  }
+  d.tx = {rid: id, phase: d.tx.phase || "backend", data: null, loading: true, error: ""};
+  renderCodingHistory(true);
+  await cbFetchTranscript();
+  renderCodingHistory(true);   // 取得完了もユーザー操作由来: フォーカス中に後回ししない
+}
+function cbTxPhase(phase) {
+  const d = S.coding;
+  if (!d.tx.rid || d.tx.phase === phase) return;
+  d.tx.phase = phase; d.tx.data = null; d.tx.loading = true; d.tx.error = "";
+  renderCodingHistory(true);
+  cbFetchTranscript().then(() => renderCodingHistory(true));
+}
+async function cbFetchTranscript() {
+  const d = S.coding;
+  const rid = d.tx.rid;
+  if (!rid) return;
+  if (!d.tx.data) d.tx.loading = true;
+  try {
+    const r = await api(`/api/coding/runs/${rid}/transcript?phase=${d.tx.phase}`);
+    if (d.tx.rid !== rid) return;          // 取得中に別の実行へ切り替わった
+    d.tx.data = r; d.tx.error = "";
+  } catch (e) { if (d.tx.rid === rid) d.tx.error = e.message; }
+  if (d.tx.rid === rid) d.tx.loading = false;
+  renderCodingHistory();
+}
+async function cbTxCopy() {
+  const tx = S.coding.tx;
+  if (!tx.data || !tx.data.messages.length) return toast("コピーする出力がありません");
+  const txt = tx.data.messages.map(m => {
+    const parts = [];
+    if (m.thinking) parts.push("[thinking]\n" + m.thinking);
+    if (m.text) parts.push(m.text);
+    for (const t of m.tools || []) parts.push(`[tool] ${t.name} ${JSON.stringify(t.args ?? {})}`);
+    return `--- #${m.i} ---\n` + parts.join("\n\n");
+  }).join("\n\n");
+  try { await navigator.clipboard.writeText(txt); toast(`モデル出力をコピーしました (${txt.length.toLocaleString()} 文字)`); }
+  catch { toast("コピー権限がありません。手動選択でお願いします"); }
+}
+function cbTranscriptPanel(r) {
+  const tx = S.coding.tx;
+  const tabs = [["backend", "バックエンド"], ["frontend", "フロントエンド"]].map(([ph, lab]) =>
+    `<button class="bm-tab cb-tx-tab ${tx.phase === ph ? "on" : ""}" onclick="cbTxPhase('${ph}')">${lab}</button>`).join("");
+  let body;
+  if (tx.loading && !tx.data) body = `<div class="muted" style="padding:10px">読み込み中…</div>`;
+  else if (tx.error) body = `<div class="muted" style="padding:10px;color:var(--err)">取得失敗: ${esc(tx.error)}</div>`;
+  else if (!tx.data || tx.data.missing) body = `<div class="muted" style="padding:10px">このフェーズの出力記録はまだありません (実行前か、記録の無い古い実行です)。</div>`;
+  else if (!tx.data.messages.length) body = `<div class="muted" style="padding:10px">アシスタント出力はまだありません。</div>`;
+  else {
+    body = tx.data.messages.map(m => {
+      const ts = m.ts ? new Date(m.ts).toLocaleTimeString("ja-JP", {hour: "2-digit", minute: "2-digit", second: "2-digit"}) : "";
+      const think = m.thinking ? `<details class="adv" data-detailkey="tx:${r.id}:${tx.phase}:${m.i}:th">
+        <summary class="muted">思考 (${m.thinking.length.toLocaleString()} 文字)</summary>
+        <div class="inner"><pre class="cb-tx-think mono">${esc(m.thinking)}</pre></div></details>` : "";
+      const tools = (m.tools || []).map((t, j) => {
+        const args = JSON.stringify(t.args ?? {}, null, 2);
+        return `<details class="adv" data-detailkey="tx:${r.id}:${tx.phase}:${m.i}:t${j}">
+          <summary class="mono">${IC("wrench")} ${esc(t.name || "?")} <span class="muted">(引数 ${args.length.toLocaleString()} 文字)</span></summary>
+          <div class="inner"><pre class="cb-tx-args mono">${esc(args)}</pre></div></details>`;
+      }).join("");
+      const text = m.text ? `<pre class="cb-tx-text">${esc(m.text)}</pre>` : "";
+      const err = m.error ? `<div class="cb-warn">${IC("alert")} ${esc(m.error)}</div>` : "";
+      return `<div class="cb-tx-msg">
+        <div class="muted cb-tx-hd">#${m.i} · 出力 ${m.tokens_out || 0} tok / 入力 ${m.tokens_in || 0} tok${m.stop_reason ? ` · ${esc(m.stop_reason)}` : ""}${ts ? ` · ${ts}` : ""}${m.clipped ? " · 冒頭のみ" : ""}</div>
+        ${think}${text}${tools}${err}</div>`;
+    }).join("");
+    if (tx.data.truncated) body += `<div class="muted" style="padding:6px 10px">出力が大きいため ${tx.data.total} 件中先頭 ${tx.data.messages.length} 件のみ表示しています。</div>`;
+  }
+  return `<div class="cb-tx">
+    <div class="row" style="gap:8px;flex-wrap:wrap;align-items:center">
+      <b style="font-size:12.5px">${IC("article")} モデル出力履歴</b>
+      <div class="bm-tabs cb-tx-tabs">${tabs}</div>
+      <span class="grow"></span>
+      <button class="ghost" onclick="cbTxCopy()" style="min-height:30px;padding:3px 9px;font-size:11.5px">${IC("clipboard")} コピー</button>
+      <button class="ghost" onclick="cbToggleTranscript('${r.id}')" style="min-height:30px;padding:3px 9px;font-size:11.5px">${IC("chev_up")} 閉じる</button>
+    </div>
+    <div class="cb-tx-body" data-logkey="tx:${r.id}:${tx.phase}">${body}</div>
+  </div>`;
+}
 /* ------------------------------------------------------------- live card */
 async function cbToggleLog() {
   S.coding.logOpen = !S.coding.logOpen;
@@ -346,15 +515,40 @@ async function cbFetchLog() {
 function renderCodingActive(run) {
   const el = $("#cb-active");
   if (!el) return;
-  if (!run) { setHtml(el, "", "cb-act", () => renderCodingActive(S.coding.runs.find(r => r.id === S.coding.active) || null)); return; }
-  if (uiScrolling() && el.childElementCount) { deferRender("cb-act", () => renderCodingActive(run)); return; }
-  // ライブ出力 / ログを選択して読んでいる間・アニメーション中は組み直しを後回し
-  if (uiBusyIn(el) && el.childElementCount) { deferRender("cb-act", () => renderCodingActive(run)); return; }
+  if (!run) {
+    /* 完了で active が null になったらカードを消す。setHtml のキャッシュは使わない:
+       ライブカードは innerHTML 直書きでキャッシュと同期していないため、setHtml("") が
+       「変更なし」と誤認して完了済みカードが残る (手動更新まで実行タブに残る事故)。 */
+    const redo = () => renderCodingActive(S.coding.runs.find(r => r.id === S.coding.active) || null);
+    if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) { deferRender("cb-act", redo); return; }
+    if (el.childElementCount) { el.innerHTML = ""; S.coding._act = ""; }
+    return;
+  }
   const html = cbActiveCard(run);
   // ライブ更新は実行中だけ。完了済みカードは内容が変わらない限り組み直さない
   if (html === S.coding._act && el.childElementCount) return;
+  /* 骨格が変わらなければライブ欄 (経過 / カウンタ / フェーズ / 状態) だけ in-place。
+     カード内でテキスト選択していてもライブ更新は止まらない (選択中のノードは
+     書き換えないので選択も解除されない)。全体組み直しは骨格変更時だけ。 */
+  if (el.childElementCount && cbActivePatch(el, run, html)) { S.coding._act = html; return; }
+  // 骨格変更 (実行切替 / ログ開閉 / 警告・ライブテキストの出現): 操作中なら後回し
+  if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) { deferRender("cb-act", () => renderCodingActive(run)); return; }
   S.coding._act = html;
+  el._struct = cbActiveStruct(run);
   el.innerHTML = html;
+}
+/* 骨格シグネチャ: 要素の有無 / 固定文字列を変えるフィールドだけ。これが同じなら
+   残りは数値のみ = data-f フックで in-place 書き換えできる。 */
+function cbActiveStruct(run) {
+  const p = run.progress || {};
+  return JSON.stringify([run.id, run.status, run.warning || "", S.coding.logOpen,
+    !!p.tool_errors, p.gen_avg != null, !!p.last_tool, !!p.text,
+    run.model || "", run.profile_name, !!(run.params && run.params.sandbox === false)]);
+}
+function cbActivePatch(el, run, html) {
+  if (el._struct !== cbActiveStruct(run)) return false;
+  patchFields(el, html);
+  return true;
 }
 /* 実行中カードの HTML (完了後は固定 = キャッシュで書き換えスキップ) */
 function cbActiveCard(run) {
@@ -369,21 +563,21 @@ function cbActiveCard(run) {
   <div class="card cb-live">
     <div class="row">
       <b class="grow ellip">${esc(run.name)}</b>
-      ${cbBadge(run.status)}
+      <span data-f="badge">${cbBadge(run.status)}</span>
       <button class="danger" onclick="cbCancel('${run.id}')" style="min-height:34px;padding:5px 12px">${IC("stop")} 中断</button>
     </div>
-    <div class="row" style="gap:6px;margin-top:8px">${stepHtml}</div>
+    <div class="row" data-f="steps" style="gap:6px;margin-top:8px">${stepHtml}</div>
     <div class="row" style="gap:14px;margin-top:8px;flex-wrap:wrap">
-      <span class="muted">ターン <b>${p.turns || 0}</b></span>
-      <span class="muted">ツール <b>${p.tool_calls || 0}</b></span>
-      ${p.tool_errors ? `<span class="muted" style="color:var(--err)">ツールエラー <b>${p.tool_errors}</b></span>` : ""}
-      <span class="muted">tokens <b>${(p.tokens_in || 0) + (p.tokens_out || 0)}</b> (in ${p.tokens_in || 0} / out ${p.tokens_out || 0})</span>
-      <span class="muted">経過 <b>${fmtUp(p.elapsed || 0)}</b></span>
-      ${p.gen_avg != null ? `<span class="muted">平均思考 <b>${p.gen_avg}s</b>/ターン</span>` : ""}
-      ${p.last_tool ? `<span class="badge info">${IC("wrench")} ${esc(p.last_tool)}</span>` : ""}
+      <span class="muted">ターン <b data-f="turns">${p.turns || 0}</b></span>
+      <span class="muted">ツール <b data-f="tools">${p.tool_calls || 0}</b></span>
+      ${p.tool_errors ? `<span class="muted" style="color:var(--err)">ツールエラー <b data-f="errors">${p.tool_errors}</b></span>` : ""}
+      <span class="muted">tokens <b data-f="tokens">${(p.tokens_in || 0) + (p.tokens_out || 0)}</b> <span data-f="tokio">(in ${p.tokens_in || 0} / out ${p.tokens_out || 0})</span></span>
+      <span class="muted">経過 <b data-f="elapsed">${fmtUp(p.elapsed || 0)}</b></span>
+      ${p.gen_avg != null ? `<span class="muted">平均思考 <b data-f="genavg">${p.gen_avg}s</b>/ターン</span>` : ""}
+      ${p.last_tool ? `<span class="badge info" data-f="lasttool">${IC("wrench")} ${esc(p.last_tool)}</span>` : ""}
     </div>
     ${run.warning ? `<div class="cb-warn">${IC("alert")} ${esc(run.warning)}</div>` : ""}
-    ${p.text ? `<div class="cb-live-text muted">${esc(p.text)}</div>` : ""}
+    ${p.text ? `<div class="cb-live-text muted" data-f="text">${esc(p.text)}</div>` : ""}
     <div class="row" style="margin-top:8px">
       <button class="ghost" onclick="cbToggleLog()" style="min-height:32px;padding:4px 10px">${IC("article")} ${S.coding.logOpen ? "ログを隠す" : "pi ログを見る"}</button>
       <span class="muted" style="font-size:11px">${esc(run.profile_name)} / ${esc(run.model || "(モデル解決中)")} / ${run.params && run.params.sandbox === false ? "サンドボックス OFF" : "サンドボックス内"}</span>
@@ -392,14 +586,15 @@ function cbActiveCard(run) {
   </div>`;
 }
 /* ------------------------------------------------------------- history */
-function renderCodingHistory() {
+function renderCodingHistory(force) {
   const el = $("#cb-history");
   if (!el) return;
   const runs = S.coding.runs;
   $("#cbt-hn").textContent = runs.length;
   if (uiScrolling() && el.childElementCount) { deferRender("cb-hist", renderCodingHistory); return; }
-  // 選択 / チェックボックス操作中 / アニメーション中は組み直しを後回し
-  if (uiBusyIn(el) && el.childElementCount) { deferRender("cb-hist", renderCodingHistory); return; }
+  // 選択 / チェックボックス操作中 / アニメーション中は組み直しを後回し。
+  // force = ユーザーのチェック操作由来: フォーカス中でも即時に組み直す
+  if (!force && uiBusyIn(el) && el.childElementCount) { deferRender("cb-hist", renderCodingHistory); return; }
   if (!runs.length) {
     const empty = `<div class="card muted">まだ実行履歴がありません。実行タブからコーディングベンチを開始してください。</div>`;
     if (S.coding._hist !== empty) { S.coding._hist = empty; el.innerHTML = empty; }   // 空欄も毎回は書き直さない
@@ -436,9 +631,11 @@ function renderCodingHistory() {
       ${r.warning ? `<div class="cb-warn">${IC("alert")} ${esc(r.warning)}</div>` : ""}
       <div class="row" style="gap:6px;margin-top:8px">
         <button class="primary" ${viewable ? "" : "disabled"} onclick="cbViewRun('${r.id}')" style="min-height:34px;padding:5px 12px">${IC("layers")} 見て比較</button>
+        <button class="ghost" onclick="cbToggleTranscript('${r.id}')" style="min-height:34px;padding:5px 12px">${IC("article")} 出力${S.coding.tx.rid === r.id ? " ▴" : ""}</button>
         <button class="ghost" onclick="cbRerun('${r.id}')" style="min-height:34px;padding:5px 12px">${IC("refresh")} 再実行</button>
         <button class="ghost" onclick="cbDelete('${r.id}')" style="min-height:34px;padding:5px 12px;color:var(--err)">${IC("trash")} 削除</button>
       </div>
+      ${S.coding.tx.rid === r.id ? cbTranscriptPanel(r) : ""}
     </div>`;
   }).join("");
   const cmpRuns = S.coding.cmp.map(id => runs.find(r => r.id === id)).filter(Boolean);
@@ -675,7 +872,9 @@ function renderCoding() {
   const profs = S.state ? (S.state.profiles || []) : [];
   setOptions(sel, `<option value="">(プロファイルを選択)</option>` + profs.map(p =>
     `<option value="${p.id}">${esc(p.name)} [${esc((backendById(p.backend) || {}).name || p.backend)}]</option>`).join(""),
-    "cb-profile", renderCoding);
+    "cb-profile", renderCoding, sel.value || (d._restored && d._restored.profile) || "");
+  // 保存プロファイルの復元 / 変更があったらモデル名・thinking 選択肢を取得
+  if (sel.value && d._optsPid !== sel.value) cbLoadModelOptions();
   const live = sel.value ? liveOf(sel.value) : null;
   const pb = statusBadge(live).replace('class="badge', 'id="cb-prof-state" class="badge');
   if ($("#cb-prof-state")._badge !== pb) {

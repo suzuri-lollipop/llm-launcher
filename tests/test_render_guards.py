@@ -210,10 +210,13 @@ def test_coding_select_history_viewer_guarded():
     assert "sel.innerHTML =" not in b   # 無条件の毎ポーリング作り直し (選択が飛ぶ) は禁止
     h = body("renderCodingHistory")
     assert "if (html === S.coding._hist && el.childElementCount) return;" in h
-    assert "if (uiBusyIn(el) && el.childElementCount) { deferRender(\"cb-hist\", renderCodingHistory); return; }" in h
+    # 操作中ガードは残る。ただし force (ユーザーのチェック操作) は即時反映
+    assert "if (!force && uiBusyIn(el) && el.childElementCount) { deferRender(\"cb-hist\", renderCodingHistory); return; }" in h
     assert "_hist: \"\"" in SRC.split("function cbInit")[1][:900]
     a = body("renderCodingActive")
-    assert "if (uiBusyIn(el) && el.childElementCount) { deferRender(\"cb-act\"," in a
+    # ホールドは骨格変更時のみ。ライブ欄は cbActivePatch が選択中でも進める
+    assert "if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) { deferRender(\"cb-act\"," in a
+    assert a.index("cbActivePatch") < a.index("uiBusyIn(el)", a.index("cbActivePatch"))
     v = body("renderCodingViewer")
     assert 'setOptions($("#cb-selA"), cbViewerOptions(d.selA), "cb-selA", renderCodingViewer)' in v
     assert 'setOptions($("#cb-selB"), cbViewerOptions(d.selB), "cb-selB", renderCodingViewer)' in v
@@ -236,11 +239,12 @@ def test_bench_calibrate_setup_selects_use_setOptions():
 
 
 def test_active_and_history_panels_hold_while_busy():
-    """test_bench_scroll_keep の scroll ガードはそのままに、操作中ガードを足す。"""
+    """test_bench_scroll_keep の scroll ガードはそのままに、操作中ガードを足す。
+    force 引数付き (チェック操作の即時反映) は !force で同じガードを通る。"""
     for fn in ("renderBenchActive", "renderBenchHistory", "renderBenchCompare",
                "renderCalActive", "renderCalHistory", "renderInsActive", "renderInsHistory"):
         b = body(fn)
-        assert "if (uiBusyIn(el) && el.childElementCount) { deferRender(" in b, fn
+        assert "uiBusyIn(el) && el.childElementCount) { deferRender(" in b, fn
         # scroll ガード (既存契約) が先に残っている
         assert "if (uiScrolling() && el.childElementCount) { deferRender(" in b, fn
 
@@ -322,13 +326,18 @@ def test_tickLive_only_advances_time_driven_fields():
 def test_patchRows_contract():
     b = body("patchRows")
     assert "if (_htmlCache.get(el) === html) return false;" in b
-    assert "if (el.childElementCount && (uiScrolling() || uiBusyIn(el) || formDirty(el)))" in b
+    # スクロール慣性だけ全体ホールド。操作 / 未保存編集は「行だけ」ホールドし、
+    # 他の行の更新は続ける (1 行の選択で一覧全体が凍結する事故の修正)
+    assert "if (el.childElementCount && uiScrolling())" in b
+    assert "if (uiBusyIn(o) || formDirty(o)) { held = true; return; }" in b
+    assert "if (held) {" in b
     # 行の比較はライブ DOM ではなく前回書いた HTML (in-place patch を差分と数えない)
     assert "if (_htmlCache.get(o) === nh) return;" in b
     assert "o.replaceWith(n);" in b
     # 差し替えた行のログ位置 / 開閉は復元
     assert b.index("logScrollSnap(o)") < b.index("o.replaceWith(n);")
     assert "logScrollBack(el, snap);" in b
+    assert "stampForm(n);" in b
     # 全体差し替えのときは行キャッシュを seed (次のポーリングで行単位に動くように)
     assert "_htmlCache.set(c, news[i].outerHTML);" in b
     assert "n.dataset.row !== undefined" in b
@@ -375,13 +384,98 @@ def test_active_cards_are_cached_live_only_while_running():
         assert m and f'{key}: ""' in m.group(0), (init, key)
 
 
+def test_completed_active_cards_clear_without_cache():
+    """完了 (active=null) でライブカードは消える。setHtml のキャッシュ経由だと
+       innerHTML 直書きのライブカードとキャッシュが同期しておらず「変更なし」と
+       誤認して完了済みカードが手動更新まで残る (2026-11-24 の報告)。"""
+    for fn in ("renderBenchActive", "renderCalActive", "renderCodingActive"):
+        b = body(fn)
+        null_branch = b.split("if (!run) {")[1].split("\n  }")[0]
+        assert 'setHtml(el, ""' not in null_branch, fn
+        assert 'el.innerHTML = ""' in null_branch, fn
+        assert "deferRender(" in null_branch, fn   # 操作中は後回し (取りこぼさない)
+
+
 def test_checkbox_toggles_restamp_baseline():
     """チェック操作は状態 (S.pm.sel / S.cmp / S.autoScroll) が正。基準を引き直さないと
-    formDirty が「未保存編集」と誤認して行更新を止め続けてしまう。"""
-    assert "stampForm(rowsEl)" in body("cbCmpToggle")
+    formDirty が「未保存編集」と誤認して行更新を止め続けてしまう。
+    コーディングベンチの比較チェックは cbCmpSync が in-place で即時同期し、
+    比較表は force 描画でフォーカス中でもすぐ反映する。"""
+    assert "cbCmpSync()" in body("cbCmpToggle")
+    assert "renderCodingHistory(true)" in body("cbCmpToggle")
+    sync = body("cbCmpSync")
+    assert 'cb.checked = S.coding.cmp.includes(row.dataset.row)' in sync
+    assert 'cb.dataset.base = cb.checked ? "1" : "0"' in sync
     assert 'stampForm($("#profiles-grid"))' in body("toggleProfileSel")
     assert 'stampForm($("#profiles-grid"))' in body("selectAllProfiles")
     assert "this.dataset.base=this.checked?'1':'0'" in SRC   # logPanel の自動スクロール
+
+
+# ---------------------------------------------------------------- ライブ欄はホールド中も進む (2026-11-24 第 3 段)
+# 報告: コーディングベンチの実行中カードが、カード内でテキスト選択したまま見ていると
+# 経過 0s / カウンタ 0 のまま手動更新まで凍結した。原因は「カード全体をホールド中に
+# 書き換えない」ガードがライブ数値まで止めていたこと。修正: 骨格が同じなら data-f
+# フックだけ in-place で進め、全体組み直し (ホールド対象) は骨格変更時だけにする。
+
+def test_patchFields_helper():
+    b = body("patchFields")
+    assert 'tpl.content.querySelectorAll("[data-f]")' in b
+    assert 'n.dataset.f === "bar"' in b and "o.style.width = n.style.width" in b
+    assert 'n.dataset.f === "text"' in b and "o.textContent = n.textContent" in b
+
+
+def test_coding_active_card_ticks_in_place():
+    b = body("renderCodingActive")
+    assert "if (el.childElementCount && cbActivePatch(el, run, html)) { S.coding._act = html; return; }" in b
+    # 全体組み直しのホールドは骨格変更時だけ (null 分岐のクリアガードは別)
+    assert b.index("cbActivePatch") < b.index("uiBusyIn(el)", b.index("cbActivePatch"))
+    s = body("cbActiveStruct")
+    for f in ("run.id", "run.status", "S.coding.logOpen", "!!p.tool_errors", "!!p.text"):
+        assert f in s, f
+    card = body("cbActiveCard")
+    for hook in ('data-f="elapsed"', 'data-f="turns"', 'data-f="tools"', 'data-f="tokens"',
+                 'data-f="steps"', 'data-f="badge"', 'data-f="text"'):
+        assert hook in card, hook
+
+
+def test_bench_cal_ins_active_tick_while_held():
+    for fn, cardfn in (("renderBenchActive", "bmActiveCard"),
+                       ("renderCalActive", "calActiveCard")):
+        b = body(fn)
+        tick = f"if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) patchFields(el, {cardfn}(run));"
+        assert tick in b, fn
+        # tick は既存の scroll / busy ガード (ホールド) より前
+        assert b.index(tick) < b.index("if (uiScrolling() && el.childElementCount) { deferRender("), fn
+    b = body("renderInsActive")
+    assert "if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) patchFields(el, html);" in b
+    for cardfn in ("bmActiveCard", "calActiveCard", "insActiveCard", "calActiveCardSetup"):
+        c = body(cardfn)
+        assert 'data-f="elapsed"' in c or 'data-f="prog"' in c, cardfn
+        assert 'data-f="chips"' in c, cardfn
+
+
+def test_home_par_chart_keeps_moving_while_slots_held():
+    b = body("renderHomeParallel")
+    assert 'el.innerHTML = `<div data-par-chart></div><div data-par-slots></div>`;' in b
+    assert "if (chEl._html !== chartHtml) { chEl._html = chartHtml; chEl.innerHTML = chartHtml; }" in b
+    # スロット表は .par-slots 容器を行単位で更新 (data-row は行側に付く)
+    assert 'patchRows(tblEl.querySelector(".par-slots"), parSlotTable(latest, slotSeries, p), "par-slots", renderHomeParallel)' in b
+    assert 'data-row="slot-${idx}"' in body("parSlotTable")
+    assert 'data-row="head"' in body("parSlotTable")
+
+
+def test_oom_card_ticks_while_held():
+    b = body("renderOomCard")
+    assert "if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) patchFields(el, html);" in b
+    assert b.index("patchFields(el, html)") < b.index('setHtml(el, html, "oom-card"')
+    assert 'data-f="verdict"' in b and 'data-f="bar"' in b
+
+
+def test_playground_streaming_tail_ticks_while_held():
+    b = body("pgRenderMsgs")
+    assert "if (S.pg.streaming && msgs.length && el.lastElementChild)" in b
+    assert 'tpl.innerHTML = pgMsgHtml(last, msgs.length - 1);' in b
+    assert b.index("uiBusyIn(el)") < b.index("S.pg._mSig = sig")
 
 
 def test_job_histories_split_head_and_rows():

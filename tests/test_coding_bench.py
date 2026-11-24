@@ -67,6 +67,35 @@ def server():
     srv.shutdown()
 
 
+class _EffortModelHandler(_ModelHandler):
+    """/v1/models が Inkling-2 相当の effort 語彙 (none 含む) を公開するサーバー。"""
+
+    def do_GET(self):  # noqa: N802
+        if self.path == "/v1/models":
+            body = json.dumps({"data": [{
+                "id": "test-model",
+                "supported_reasoning_efforts":
+                    ["max", "xhigh", "high", "medium", "low", "minimal", "none"],
+                "default_reasoning_effort": "high",
+            }]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            super().do_GET()
+
+
+@pytest.fixture
+def effort_server():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _EffortModelHandler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield srv, srv.server_address[1]
+    srv.shutdown()
+
+
 FAKE_PI = r'''#!/usr/bin/env python3
 """偽 pi: --version / --mode json のふりをして JSONL イベントを出し、ファイルを書く。"""
 import json, os, sys
@@ -653,6 +682,130 @@ def test_on_startup_marks_lost_and_clears_preview(tmp_path):
 # ------------------------------------------------------------------ 8. API
 
 
+def test_thinking_capability_detection():
+    """thinking はモデルで設定できるものだけ: parser 設定 / モデル名で判定。"""
+    cap = coding_mod.thinking_capability(["--reasoning-parser", "qwen3"], "")
+    assert cap["capable"] and cap["qwen"] and cap["levels"] == ["off", "on"]
+    assert "reasoning-parser" in cap["source"]
+    cap = coding_mod.thinking_capability([], "Qwen3-30B-A3B-Instruct")
+    assert cap["capable"] and cap["qwen"]
+    cap = coding_mod.thinking_capability([], "Inkling-2-Mini-UD-Q8_K_XL.gguf")
+    assert cap["capable"] and not cap["qwen"] and cap["levels"] == ["off", "on"]
+    cap = coding_mod.thinking_capability(["--reasoning", "on"], "some-model")
+    assert cap["capable"]
+    cap = coding_mod.thinking_capability([], "Llama-3.1-8B-Instruct")
+    assert not cap["capable"] and cap["levels"] == ["off"]
+    assert coding_mod.argv_flag(["--reasoning-parser=glm45"], "--reasoning-parser") == "glm45"
+
+
+def test_model_ids_and_pi_home_qwen_wiring(tmp_path, server):
+    _, port = server
+    ids = coding_mod.model_ids(f"http://127.0.0.1:{port}")
+    assert ids == ["test-model"]
+    assert coding_mod.model_ids("http://127.0.0.1:1") == []   # 接続失敗は []
+    mgr = _manager(tmp_path, _FakeManager(port))
+    rd = mgr.run_dir("cb_q")
+    rd.mkdir(parents=True)
+    mgr._prepare_pi_home(rd, f"http://127.0.0.1:{port}", "Qwen3-30B-A3B", "",
+                         {"thinking": "off"})
+    entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
+    # Qwen3 系は off でも enable_thinking=false を送れる配線 (reasoning=True + format)
+    assert entry["reasoning"] is True
+    assert entry["compat"]["thinkingFormat"] == "qwen-chat-template"
+    assert entry["thinkingLevelMap"]["medium"] is None
+    mgr._prepare_pi_home(rd, f"http://127.0.0.1:{port}", "Llama-3.1-8B", "",
+                         {"thinking": "off"})
+    entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
+    assert entry["reasoning"] is False and "compat" not in entry
+
+
+def test_thinking_capability_uses_server_effort_vocabulary():
+    """サーバーが "none" 含む effort 語彙を公開すればその段階を出す (Inkling-2)。
+    "none" の無い語彙や Qwen は従来の off/on (enable_thinking 配線)。"""
+    eff = ["max", "xhigh", "high", "medium", "low", "minimal", "none"]
+    cap = coding_mod.thinking_capability([], "Inkling-2-Mini", eff, "high")
+    assert cap["capable"] and not cap["qwen"]
+    assert cap["levels"] == ["off", "max", "xhigh", "high", "medium", "low", "minimal"]
+    assert cap["default"] == "high"
+    cap = coding_mod.thinking_capability(["--reasoning-parser", "glm"], "some-model",
+                                         ["xhigh", "medium", "low"], "xhigh")
+    assert cap["capable"] and cap["levels"] == ["off", "on"]
+    cap = coding_mod.thinking_capability([], "Qwen3-30B", eff, "high")
+    assert cap["qwen"] and cap["levels"] == ["off", "on"]
+
+
+def test_model_efforts_reads_v1_models(effort_server):
+    _, port = effort_server
+    eff, default = coding_mod.model_efforts(f"http://127.0.0.1:{port}")
+    assert "none" in eff and default == "high"
+    assert coding_mod.model_efforts("http://127.0.0.1:1") == ([], None)
+
+
+def test_pi_home_effort_wiring(tmp_path, effort_server):
+    """effort 配線: off でも reasoning=True にして pi が reasoning_effort="none" を
+    送れるようにする (Inkling-2 のテンプレート既定 0.9 を確実に切る)。"""
+    _, port = effort_server
+    eff, _ = coding_mod.model_efforts(f"http://127.0.0.1:{port}")
+    mgr = _manager(tmp_path, _FakeManager(port))
+    rd = mgr.run_dir("cb_e")
+    rd.mkdir(parents=True)
+    mgr._prepare_pi_home(rd, f"http://127.0.0.1:{port}", "Inkling-2-Mini", "",
+                         {"thinking": "off"}, eff)
+    entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
+    assert entry["reasoning"] is True
+    assert entry["compat"]["supportsReasoningEffort"] is True
+    # pi が developer ロールを送らないようにする (Inkling テンプレートは system のみ)
+    assert entry["compat"]["supportsDeveloperRole"] is False
+    assert entry["thinkingLevelMap"]["off"] == "none"
+    assert entry["thinkingLevelMap"]["xhigh"] == "xhigh"
+    assert entry["thinkingLevelMap"]["max"] == "max"
+    # 思考 OFF は 8192、思考 ON は thinking が出力枠を食うため 32768 に広げる
+    # (8192 固定だと thinking=max が length 打ち切りでツールを呼べず終了する)。
+    assert entry["maxTokens"] == 8192
+    mgr._prepare_pi_home(rd, f"http://127.0.0.1:{port}", "Inkling-2-Mini", "",
+                         {"thinking": "max"}, eff)
+    entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
+    assert entry["maxTokens"] == 32768
+
+
+def test_api_model_options(tmp_path):
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    JsonStore(tmp_path / "data" / "profiles.json", []).mutate(lambda lst: lst.append(PROFILE))
+    client = Client(_app(tmp_path))
+
+    async def go() -> None:
+        st, r = await client.get("/api/coding/model-options?profile_id=p1")
+        assert st == 200
+        assert r["live"] is False and r["models"] == []
+        assert r["thinking"]["levels"] == ["off"]      # 非思考モデルは off のみ
+        st, r = await client.get("/api/coding/model-options?profile_id=nope")
+        assert st == 404
+    asyncio.run(go())
+
+
+def test_api_model_options_live_server(tmp_path, server, monkeypatch):
+    """稼働中セッションがいれば /v1/models からモデル名を自動取得する。"""
+    from llm_launcher import app as app_mod
+    _, port = server
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    JsonStore(tmp_path / "data" / "profiles.json", []).mutate(lambda lst: lst.append(PROFILE))
+
+    class _Mgr(app_mod.ProcessManager):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self.sessions["s1"] = {"id": "s1", "profile_id": "p1", "status": "running",
+                                   "port": port, "health_path": "/health", "argv": []}
+    monkeypatch.setattr(app_mod, "ProcessManager", _Mgr)
+    client = Client(app_mod.create_app(tmp_path))
+
+    async def go() -> None:
+        st, r = await client.get("/api/coding/model-options?profile_id=p1")
+        assert st == 200
+        assert r["live"] is True
+        assert r["models"] == ["test-model"] and r["model"] == "test-model"
+    asyncio.run(go())
+
+
 def _app(tmp_path):
     from llm_launcher import app as app_mod
     (tmp_path / "data").mkdir(parents=True, exist_ok=True)
@@ -938,10 +1091,15 @@ def _frontend_src() -> str:
 def test_frontend_contract():
     src = _frontend_src()
     assert "VIEWS.coding" in src
-    assert 'data-tab="coding"' in src                      # メニュー項目
-    assert '["#mi-coding", "bench"]' in src                # メニュー開示 (bench 権限)
+    # タブ統一: コーディングベンチは独立メニューを持たず、ベンチマーク内のモード
+    assert 'data-tab="coding"' not in src                  # 旧メニュー項目は廃止
+    assert 'id="mi-coding"' not in src
+    assert 'id="nb-coding"' not in src
+    assert "bm-mode-coding" in src                         # ベンチマーク内の受け皿
+    assert "bmSetMode" in src                              # 速度 / コーディング切替
+    assert "codingVisible" in src
     assert "views/coding.js" in src                        # 読み込み
-    assert '"coding"' in src.split("ROUTE_TABS")[1][:200]  # ルーティング登録
+    assert '"coding"' in src.split("ROUTE_TABS")[1][:200]  # 旧 URL 互換エイリアス
     # 実行フォーム: プロファイル / スキル / AGENTS.md / 2 プロンプト
     for el in ("cb-profile", "cb-skills", "cb-agents", "cb-backend", "cb-frontend",
                "cb-sandbox", "cb-pi-install"):
@@ -949,6 +1107,261 @@ def test_frontend_contract():
     # ビューアー: 2 実装並列 + iframe + 履歴から選択して起動
     for el in ("cb-grid", "cb-frame", "cb-selA", "cb-selB", "cbViewRun",
                "cbPreviewStart", "cb-pane", "cb-warn", "cbMetricsTable",
-               "cbCmpToggle", "cb-table", "cb-best"):
+               "cbCmpToggle", "cb-table", "cb-best", "cbLoadModelOptions",
+               "cb-think-note"):
         assert el in src, el
     assert ".cb-grid" in src                               # CSS 2 カラム
+    # 出力履歴 (モデルが出力したトークン内容) を履歴から閲覧
+    for el in ("cbToggleTranscript", "cbTranscriptPanel", "cbTxPhase", "cb-tx",
+               "/transcript?phase="):
+        assert el in src, el
+    # チェック即時反映: フォーカス中でも強制描画 + in-place 同期
+    assert "cbCmpSync" in src
+    assert "renderCodingHistory(true)" in src
+    # 完了カードの消し残し対策: live カードはキャッシュなしで直接クリア
+    assert 'el.innerHTML = ""' in src
+
+# ------------------------------------------------------------------ 11. DSH 風ツール拡張
+# pi に持たせるファイル編集 / 検索 / 閲覧ツール (read / edit / write / grep / glob)。
+# 既定資材として生成され、-e で明示ロードされる (--no-extensions は自動発見だけ止める)。
+
+
+def test_extension_asset_created_and_idempotent(tmp_path):
+    assets = CodingAssets(tmp_path)
+    assets.ensure_defaults()
+    ext = assets.extension_path
+    assert ext.is_file()
+    text = ext.read_text(encoding="utf-8")
+    for name in ("read", "edit", "write", "grep", "glob"):
+        assert f'name: "{name}"' in text, name
+    assert "withFileMutationQueue" in text
+    assert "replace_all" in text and "old_string" in text
+    # ユーザー編集は上書きしない
+    ext.write_text("// custom", encoding="utf-8")
+    assets.ensure_defaults()
+    assert ext.read_text(encoding="utf-8") == "// custom"
+    assert str(ext) in assets.defaults_info()["extension_path"]
+
+
+def _argv_for(mgr, tmp_path, sandbox=False, monkeypatch=None):
+    rd = mgr.run_dir("cb_argv")
+    ws = rd / "workspace"
+    ws.mkdir(parents=True, exist_ok=True)
+    run = {"id": "cb_argv", "name": "n", "model": "test-model"}
+    params = _params(mgr, sandbox=sandbox)
+    skill_dirs = mgr._skill_dirs(Path(params["skills_dir"]))
+    return mgr._pi_argv(run, "backend", "p", rd, ws, skill_dirs, params)
+
+
+def test_pi_argv_wires_extension(tmp_path, monkeypatch):
+    mgr = _manager(tmp_path, _FakeManager(0))
+    argv, env, container = _argv_for(mgr, tmp_path)
+    assert "--extension" in argv
+    ext = str(mgr.assets.extension_path)
+    assert argv[argv.index("--extension") + 1] == ext
+    assert argv[argv.index("--tools") + 1] == "read,bash,edit,write,grep,glob"
+    assert "--no-extensions" in argv          # 自動発見は止めたまま明示 -e は有効
+    assert container == ""
+    # サンドボックス (bwrap / docker) には拡張ファイルが ro で渡る
+    monkeypatch.setattr(coding_mod, "sandbox_backend", lambda settings=None: "bwrap")
+    argv, _, _ = _argv_for(mgr, tmp_path, sandbox=True)
+    i = argv.index(ext)
+    assert argv[i - 1] == "--ro-bind"
+    monkeypatch.setattr(coding_mod, "sandbox_backend", lambda settings=None: "docker")
+    argv, _, container = _argv_for(mgr, tmp_path, sandbox=True)
+    assert f"{ext}:{ext}:ro" in argv
+    assert container.startswith(coding_mod.CONTAINER_PREFIX)
+
+
+def test_pi_argv_fallback_without_extension(tmp_path, monkeypatch):
+    mgr = _manager(tmp_path, _FakeManager(0))
+    # _params → defaults_info が資材を再生成してしまうので ensure_defaults を止めてから消す
+    monkeypatch.setattr(CodingAssets, "ensure_defaults", lambda self: None)
+    mgr.assets.extension_path.unlink()
+    argv, _, _ = _argv_for(mgr, tmp_path)
+    assert "--extension" not in argv
+    assert argv[argv.index("--tools") + 1] == "read,bash,edit,write,grep,find,ls"
+
+
+# ------------------------------------------------------------------ 12. 出力履歴 (transcript)
+
+
+def _seed_transcript_log(tmp_path, rid="cb_tx"):
+    logs = CodingAssets(tmp_path).runs_dir / rid / "logs"
+    logs.mkdir(parents=True)
+    events = [
+        {"type": "turn_start"},
+        {"type": "message_end", "message": {"role": "user", "content": "依頼"}},
+        {"type": "message_end", "message": {
+            "role": "assistant", "timestamp": 1795507167913,
+            "stopReason": "toolUse", "usage": {"input": 100, "output": 40},
+            "content": [
+                {"type": "thinking", "thinking": "まずファイルを作る"},
+                {"type": "text", "text": "作成します"},
+                {"type": "toolCall", "id": "c1", "name": "write",
+                 "arguments": {"file_path": "a.txt", "content": "hello"}},
+            ]}},
+        {"type": "message_update", "usage": {"input": 1, "output": 1}},
+        {"type": "message_end", "message": {
+            "role": "assistant", "stopReason": "stop",
+            "usage": {"input": 200, "output": 10},
+            "content": [{"type": "text", "text": "完了しました"}]}},
+        {"type": "agent_end"},
+    ]
+    with open(logs / "backend.jsonl", "w", encoding="utf-8") as f:
+        for ev in events:
+            f.write(json.dumps(ev, ensure_ascii=False) + "\n")
+        f.write("{broken json\n")          # 壊れた行は読み飛ばす
+    return logs
+
+
+def test_transcript_parses_model_output(tmp_path):
+    mgr = _manager(tmp_path, _FakeManager(0))
+    _seed_transcript_log(tmp_path)
+    r = mgr.transcript("cb_tx", "backend")
+    assert r["missing"] is False and r["total"] == 2 and not r["truncated"]
+    m1, m2 = r["messages"]
+    assert m1["thinking"] == "まずファイルを作る"
+    assert m1["text"] == "作成します"
+    assert m1["tools"] == [{"name": "write", "args": {"file_path": "a.txt", "content": "hello"}}]
+    assert m1["tokens_out"] == 40 and m1["stop_reason"] == "toolUse"
+    assert m1["ts"] == 1795507167913
+    assert m2["text"] == "完了しました" and m2["tools"] == []
+    # 記録なし / 不正 phase
+    assert mgr.transcript("cb_tx", "frontend")["missing"] is True
+    with pytest.raises(CodingError):
+        mgr.transcript("cb_tx", "preview")
+
+
+def test_transcript_budget_truncation(tmp_path, monkeypatch):
+    mgr = _manager(tmp_path, _FakeManager(0))
+    _seed_transcript_log(tmp_path)
+    monkeypatch.setattr(coding_mod, "TRANSCRIPT_MAX_BYTES", 10)
+    r = mgr.transcript("cb_tx", "backend")
+    assert r["truncated"] is True
+    assert r["total"] == 2                    # 件数は最後まで数える
+    assert len(r["messages"]) == 1            # 先頭 1 件は冒頭だけ見せる
+    assert r["messages"][0]["clipped"] is True
+
+
+def test_api_transcript(tmp_path):
+    _seed_completed_run(tmp_path, rid="cb_txapi")
+    _seed_transcript_log(tmp_path, rid="cb_txapi")
+    client = Client(_app(tmp_path))
+
+    async def go() -> None:
+        st, r = await client.get("/api/coding/runs/cb_txapi/transcript?phase=backend")
+        assert st == 200
+        assert r["total"] == 2 and r["messages"][1]["text"] == "完了しました"
+        st, r = await client.get("/api/coding/runs/cb_txapi/transcript?phase=bogus")
+        assert st == 422
+        st, r = await client.get("/api/coding/runs/missing/transcript")
+        assert st == 404
+    asyncio.run(go())
+
+
+# ------------------------------------------------------------------ 13. 実 pi + DSH ツール E2E
+# 偽 OpenAI 互換サーバーが write → read → edit → grep → glob → 完了テキスト の順に
+# ツール呼び出しを指示し、実 pi がサンドボックス内で DSH 風ツールを実行できることを
+# 確認する (拡張のロード / typebox alias / ファイルミューテーションまで通る)。
+
+
+class _ToolScriptHandler(BaseHTTPRequestHandler):
+    """会話中の tool 結果数で次の一手を決めるスクリプト型 SSE サーバー。"""
+
+    STEPS = [
+        ("write", {"file_path": "hello.txt", "content": "alpha\nbeta\n"}),
+        ("read", {"file_path": "hello.txt"}),
+        ("edit", {"file_path": "hello.txt", "old_string": "beta", "new_string": "gamma"}),
+        ("grep", {"pattern": "gamma", "include": "*.txt"}),
+        ("glob", {"pattern": "**/*.txt"}),
+    ]
+
+    def do_GET(self):  # noqa: N802
+        if self.path == "/health":
+            body = b'{"ok":true}'
+        elif self.path == "/v1/models":
+            body = json.dumps({"data": [{"id": "test-model"}]}).encode()
+        else:
+            self.send_response(404)
+            self.end_headers()
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):  # noqa: N802
+        length = int(self.headers.get("Content-Length", 0))
+        req = json.loads(self.rfile.read(length))
+        step = sum(1 for m in req.get("messages", []) if m.get("role") == "tool")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.end_headers()
+        if step < len(self.STEPS):
+            name, args = self.STEPS[step]
+            delta = {"role": "assistant", "tool_calls": [{
+                "index": 0, "id": f"call_{step}", "type": "function",
+                "function": {"name": name, "arguments": json.dumps(args)}}]}
+            fin = "tool_calls"
+        else:
+            delta = {"role": "assistant", "content": "ALL_DONE"}
+            fin = "stop"
+        c1 = {"id": "c1", "object": "chat.completion.chunk", "created": 0,
+              "model": "test-model",
+              "choices": [{"index": 0, "delta": delta, "finish_reason": None}]}
+        c2 = {"id": "c1", "object": "chat.completion.chunk", "created": 0,
+              "model": "test-model",
+              "choices": [{"index": 0, "delta": {}, "finish_reason": fin}],
+              "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}}
+        for c in (c1, c2):
+            self.wfile.write(f"data: {json.dumps(c)}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+
+    def log_message(self, *a):
+        pass
+
+
+def test_real_pi_dsh_tools_e2e(tmp_path):
+    import shutil
+    import tempfile
+    settings = JsonStore(tmp_path / "data" / "settings.json", {})
+    pi = PiTool(settings, tmp_path / "pi-install.log")
+    if not pi.available() or not coding_mod.sandbox_backend():
+        pytest.skip("pi またはサンドボックス (bwrap / docker) が使えない環境ではスキップ")
+    scratch = Path(__file__).resolve().parents[1] / ".scratch"
+    scratch.mkdir(exist_ok=True)
+    base = Path(tempfile.mkdtemp(dir=scratch, prefix="llmcb-tools-"))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _ToolScriptHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    try:
+        mgr = _manager(base, _FakeManager(port))
+        run = _run_to_finish(mgr, _params(mgr, sandbox=True, phase_timeout=180))
+        assert run["status"] == "completed", run["error"]
+        ws = mgr.run_dir(run["id"]) / "workspace"
+        # write → edit が実際にファイルへ反映 (DSH 風リテラル置換)
+        assert (ws / "hello.txt").read_text(encoding="utf-8") == "alpha\ngamma\n"
+        st = run["phases"]["backend"]
+        assert st["tool_errors"] == 0, st
+        assert st["tool_calls"] >= 5
+        # --session-id 廃止: pi の "No project session found with id 'coding'" 警告が
+        # backend / frontend どちらの stderr にも出ない (backend は id 指定なしで新規作成、
+        # frontend は --continue で継続)。セッションファイルも 1 つだけ (継続の証拠)。
+        logs = mgr.run_dir(run["id"]) / "logs"
+        for ph in ("backend", "frontend"):
+            err = (logs / f"{ph}.stderr").read_text(encoding="utf-8")
+            assert "No project session found" not in err, err
+        assert len(list((mgr.run_dir(run["id"]) / "sessions").glob("*.jsonl"))) == 1
+        # 出力履歴にモデルのツール引数と最終テキストが残る
+        tx = mgr.transcript(run["id"], "backend")
+        names = [t["name"] for m in tx["messages"] for t in m["tools"]]
+        assert names[:5] == ["write", "read", "edit", "grep", "glob"]
+        assert any(m["text"] == "ALL_DONE" for m in tx["messages"])
+        write_args = next(t["args"] for m in tx["messages"] for t in m["tools"]
+                          if t["name"] == "write")
+        assert write_args["content"] == "alpha\nbeta\n"
+    finally:
+        srv.shutdown()
+        shutil.rmtree(base, ignore_errors=True)

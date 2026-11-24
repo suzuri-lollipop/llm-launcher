@@ -4,7 +4,12 @@
 "use strict";
 VIEWS.bench = `
   <section id="view-bench" class="view hidden">
-    <h2 class="view-title">ベンチマーク <span class="muted">作成済みプロファイルのサーバー (OpenAI 互換 API) を直接計測</span></h2>
+    <h2 class="view-title">ベンチマーク <span class="muted">プロファイルのサーバーを計測 (速度ベンチ) / pi ハーネスで実装を作らせて比較 (コーディングベンチ)</span></h2>
+    <div class="bm-mode" role="tablist" aria-label="ベンチマークの種類">
+      <button class="bm-mode-btn" id="bmm-speed" role="tab" aria-selected="true" onclick="bmSetMode('speed')"><svg class=ic aria-hidden=true><use href=#i-speed /></svg> 速度ベンチ</button>
+      <button class="bm-mode-btn" id="bmm-coding" role="tab" aria-selected="false" onclick="bmSetMode('coding')"><svg class=ic aria-hidden=true><use href=#i-edit /></svg> コーディングベンチ</button>
+    </div>
+    <div id="bm-mode-speed">
     <div class="bm-tabs" role="tablist">
       <button class="bm-tab" id="bmt-run" role="tab" aria-selected="false" onclick="bmSetTab('run')"><svg class=ic aria-hidden=true><use href=#i-play /></svg> 実行<span class="run-dot hidden" id="bmt-run-dot" title="ベンチマーク実行中"></span></button>
       <button class="bm-tab" id="bmt-history" role="tab" aria-selected="false" onclick="bmSetTab('history')"><svg class=ic aria-hidden=true><use href=#i-history /></svg> 履歴・管理 <span class="n" id="bmt-hn">0</span></button>
@@ -59,6 +64,8 @@ VIEWS.bench = `
     </div>
     <div id="bmt-p-history" class="hidden"><div id="bm-history"></div></div>
     <div id="bmt-p-compare" class="hidden"><div id="bm-compare"></div></div>
+    </div>
+    <div id="bm-mode-coding" class="hidden"></div>
   </section>
 `;
 /* ============================================================= benchmarks */
@@ -82,6 +89,7 @@ function bmInit() {
   S.bench = { runs: [], active: null, busy: false, _ba: "", _bh: "", _bc: "", _recv: 0,
               cmp: [], cmpMetric: "decode", cmpConc: null, moreCols: false,
               profiles: [], bpId: "",
+              mode: d.vmode === "coding" ? "coding" : "speed",
               tab: BM_TABS.includes(d.tab) ? d.tab : "run" };
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") {
     if (el.type === "checkbox") el.checked = !!v; else el.value = v; } };
@@ -121,7 +129,7 @@ function bmPersist() {
       bp: S.bench.bpId, bpName: v("#bm-bp-name"),
       endpoint: v("#bm-endpoint"), model: v("#bm-model"),
       stream: $("#bm-stream").checked, autostart: $("#bm-autostart").checked,
-      stopafter: $("#bm-stopafter").checked, tab: S.bench.tab,
+      stopafter: $("#bm-stopafter").checked, tab: S.bench.tab, vmode: S.bench.mode,
       mode: v("#bm-mode"), gap: v("#bm-gap"),
     }));
   } catch { /* 容量超過等は無視 */ }
@@ -132,9 +140,31 @@ function bmSetTab(t) {
   if (!BM_TABS.includes(t)) return;
   S.bench.tab = t; bmPersist(); renderBench();
 }
+/* ベンチマーク内のモード切替 (速度ベンチ / コーディングベンチ)。旧「コーディング
+   ベンチ」タブはここに統合された。DOM は両モードとも維持して hidden だけ切り替える
+   (フォームの状態・ビューアーの iframe を壊さない)。 */
+function bmSetMode(m) {
+  if (!S.bench || (m !== "speed" && m !== "coding")) return;
+  if (S.bench.mode === m) { renderBenchMode(); return; }
+  S.bench.mode = m; bmPersist();
+  renderBenchMode();
+  if (m === "coding") { renderCoding(); cbPoll(); }
+  else renderBench();
+}
+function renderBenchMode() {
+  const m = S.bench ? S.bench.mode : "speed";
+  const sp = $("#bm-mode-speed"), cb = $("#bm-mode-coding");
+  if (sp) sp.classList.toggle("hidden", m !== "speed");
+  if (cb) cb.classList.toggle("hidden", m !== "coding");
+  [["bmm-speed", "speed"], ["bmm-coding", "coding"]].forEach(([id, k]) => {
+    const b = $("#" + id);
+    if (b) { b.classList.toggle("on", m === k); b.setAttribute("aria-selected", m === k ? "true" : "false"); }
+  });
+}
 function openBench(pid) {
   if (!S.bench) bmInit();
   S.bench.tab = "run";                        // 各所の「ベンチ」ボタンは実行の意図で飛ぶ
+  S.bench.mode = "speed";                     // 速度ベンチの実行フォームへ
   if (pid) { $("#bm-profile").value = pid; bmPersist(); }
   switchTab("bench");
   bmProfileList();
@@ -197,7 +227,8 @@ async function bmPoll(force) {
 }
 function bmBadge() {
   const nb = $("#nb-bench"); if (!nb) return;
-  const on = !!S.bench.active;
+  // タブ統合: 速度ベンチ / コーディングベンチどちらかの実行中で点灯
+  const on = !!S.bench.active || !!(S.coding && S.coding.active);
   nb.classList.toggle("hidden", !on);
   nb.classList.toggle("run", on);
   nb.innerHTML = on ? IC("play") : "";
@@ -837,9 +868,10 @@ function bmCmpToggle(id) {
   const i = d.cmp.indexOf(id);
   if (i >= 0) d.cmp.splice(i, 1);
   else { if (d.cmp.length >= BM_CMP_MAX) return toast(`比較は最大 ${BM_CMP_MAX} 件までです`); d.cmp.push(id); }
-  renderBench();
+  // チェック操作は即時反映: フォーカスがチェックボックスに残っていても描画を後回しにしない
+  bmTabBar(); renderBenchCompare(true);
 }
-function bmCmpClear() { S.bench.cmp = []; renderBench(); }
+function bmCmpClear() { S.bench.cmp = []; bmTabBar(); renderBenchCompare(true); }
 function bmCmpMetric(v) { S.bench.cmpMetric = v; renderBench(); }
 function bmCmpConc(v) { S.bench.cmpConc = +v; renderBench(); }
 function bmMoreCols() { S.bench.moreCols = !S.bench.moreCols; renderBench(); }
@@ -887,6 +919,7 @@ function bmStageTable(stages, key) {
 }
 function renderBench() {
   if (!S.bench) bmInit();
+  renderBenchMode();
   const ps = S.state?.profiles || [];
   const sel = $("#bm-profile");
   const cur = sel.value;
@@ -935,7 +968,17 @@ function bmTabBar() {
 }
 function renderBenchActive(run) {
   const el = $("#bm-active");
-  if (!run) { setHtml(el, "", "bm-act", () => renderBenchActive(S.bench.runs.find(r => r.id === S.bench.active) || null)); return; }
+  if (!run) {
+    /* 完了で active が null になったらカードを消す。setHtml のキャッシュは使わない:
+       ライブカードは innerHTML 直書きでキャッシュと同期していないため、setHtml("") が
+       「変更なし」と誤認して完了済みカードが残る (手動更新まで実行タブに残る事故)。 */
+    const redo = () => renderBenchActive(S.bench.runs.find(r => r.id === S.bench.active) || null);
+    if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) { deferRender("bm-act", redo); return; }
+    if (el.childElementCount) el.innerHTML = "";
+    return;
+  }
+  // ホールド中もライブ数値 (経過 / メーター / 段チップ / 状態) だけは in-place で進める
+  if (el.childElementCount && (uiScrolling() || uiBusyIn(el))) patchFields(el, bmActiveCard(run));
   // スクロール中は組み直しを後回し (結果表の横スクロールバーを掴んだままにできる)
   if (uiScrolling() && el.childElementCount) { deferRender("bm-act", () => renderBenchActive(run)); return; }
   // テキスト選択して読んでいる間 / アニメーション中も後回し (操作中のオブジェクトを巻き込まない)
@@ -987,16 +1030,16 @@ function bmActiveCard(run) {
   const modelNote = run.model ? `model: ${run.model}` : bmParamsSummary(run.params || {});
   return `<div class="card" style="border-color:#c6dafc">
     <div class="row">
-      ${bmStatusBadge(run)}
+      <span data-f="badge">${bmStatusBadge(run)}</span>
       <b class="grow ellip" style="font-size:15px">${esc(run.profile_name)}</b>
       <span class="chip ${esc(run.backend)}">${esc(run.backend_name)}</span>
       <button class="danger" style="min-height:34px;font-size:12.5px" onclick="bmCancel('${run.id}')"><svg class=ic aria-hidden=true><use href=#i-stop /></svg> 中断</button>
     </div>
     <div class="muted mono ellip" style="margin-top:4px;font-size:11px">${esc(modelNote)}</div>
-    <div class="row" style="gap:6px;margin-top:8px;flex-wrap:wrap">${chips}</div>
+    <div class="row" data-f="chips" style="gap:6px;margin-top:8px;flex-wrap:wrap">${chips}</div>
     <div class="meter" style="margin:10px 0 4px"><div class="m-hd"><b>${esc(phase)}</b>
-      <span class="r">${esc(doneNote)}${tpsNote} · ${bmF1(secs)}s</span></div>
-      <div class="mbar"><i class="warn" style="width:${pctw}%"></i></div></div>
+      <span class="r" data-f="prog">${esc(doneNote)}${tpsNote} · ${bmF1(secs)}s</span></div>
+      <div class="mbar"><i class="warn" data-f="bar" style="width:${pctw}%"></i></div></div>
     ${bmLiveChart(run)}
     ${(pr.reqs || []).length ? bmPhaseBlock("フェーズ (ライブ)", pr.reqs, secs) : ""}
     ${(run.stages || []).length ? bmStageTable(run.stages, "a:" + run.id) : ""}
@@ -1056,7 +1099,7 @@ function renderBenchHistory() {
 /* 結果・比較タブ: 実行を選んで表示 — 1 件 = 結果の詳細 (経時チャート・段表・フェーズ
    スイムレーン)、2 件以上 = 経時カーブ / 並列度カーブ / 指標表で比較。
    管理操作 (削除・再実行) は置かず、表示に専念する */
-function renderBenchCompare() {
+function renderBenchCompare(force) {
   const el = $("#bm-compare");
   const d = S.bench;
   const runs = (d.runs || []).filter(r => r.id !== d.active);
@@ -1066,7 +1109,8 @@ function renderBenchCompare() {
     return;
   }
   if (uiScrolling() && el.childElementCount) { deferRender("bm-cmp", renderBenchCompare); return; }
-  if (uiBusyIn(el) && el.childElementCount) { deferRender("bm-cmp", renderBenchCompare); return; }
+  // force = ユーザーのチェック操作由来: フォーカス中でも即時に組み直す
+  if (!force && uiBusyIn(el) && el.childElementCount) { deferRender("bm-cmp", renderBenchCompare); return; }
   const picks = runs.map(r => {
     const on = (d.cmp || []).includes(r.id);
     const pk = bmPeakOf(r);

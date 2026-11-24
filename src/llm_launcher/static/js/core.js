@@ -248,6 +248,21 @@ function tickLive() {
   else if (S.tab === "launch") patchUptime($("#launch-grid"), live);
   else if (S.tab === "home") { patchUptime($("#home-live"), live); patchUptime($("#home-recent"), live); }
 }
+/* data-f フックだけ新しい HTML から in-place で書き換える (ホールド中のライブ更新用)。
+   選択 / フォーカス / アニメーション中の容器でも、数値バーや経過時間だけは進み続ける。
+   bar フックは style.width (トランジション維持)、text フックは textContent で書く。 */
+function patchFields(el, html) {
+  if (!el) return;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  tpl.content.querySelectorAll("[data-f]").forEach(n => {
+    const o = el.querySelector(`[data-f="${n.dataset.f}"]`);
+    if (!o) return;
+    if (n.dataset.f === "bar") { if (o.style.width !== n.style.width) o.style.width = n.style.width; }
+    else if (n.dataset.f === "text") { if (o.textContent !== n.textContent) o.textContent = n.textContent; }
+    else if (o.innerHTML !== n.innerHTML) o.innerHTML = n.innerHTML;
+  });
+}
 /* カード / 行一覧の選択的更新: 各行に data-row キーを付け、キー列が同じなら
    「変わった行だけ」差し替える。1 台の状態変化が他のカードのホバー / 選択 /
    ログスクロールを巻き込まない。行の比較はライブ DOM ではなく「前回書いた HTML」
@@ -256,7 +271,8 @@ function tickLive() {
 function patchRows(el, html, key, redo) {
   if (!el) return false;
   if (_htmlCache.get(el) === html) return false;
-  if (el.childElementCount && (uiScrolling() || uiBusyIn(el) || formDirty(el))) {
+  // スクロールの慣性は容器全体の問題なので全体を後回し (従来どおり)
+  if (el.childElementCount && uiScrolling()) {
     deferRender(key, redo || (() => patchRows(el, html, key, redo)));
     return false;
   }
@@ -267,20 +283,35 @@ function patchRows(el, html, key, redo) {
   const keyed = news.length > 0 && news.every(n => n.dataset.row !== undefined);
   if (keyed && olds.length === news.length &&
       olds.every((o, i) => o.dataset.row === news[i].dataset.row)) {
+    /* 操作中 / 未保存編集の「行だけ」後回しにし、他の行は更新を続ける。
+       1 行でテキスト選択していても、他のセッションの状態表示は止まらない。 */
+    let held = false;
     news.forEach((n, i) => {
       const o = olds[i], nh = n.outerHTML;
       if (_htmlCache.get(o) === nh) return;   // 変わっていない行: 触らない
+      if (uiBusyIn(o) || formDirty(o)) { held = true; return; }
       const snap = logScrollSnap(o);
       o.replaceWith(n);
       logScrollBack(el, snap);              // 差し替えた行のログ位置 / 開閉だけ復元
+      stampForm(n);
       _htmlCache.set(n, nh);
     });
-  } else {
-    const snap = logScrollSnap(el);
-    el.innerHTML = html;
-    logScrollBack(el, snap);
-    [...el.children].forEach((c, i) => { if (news[i]) _htmlCache.set(c, news[i].outerHTML); });
+    if (held) {
+      deferRender(key, redo || (() => patchRows(el, html, key, redo)));
+      return false;   // 容器キャッシュは進めない = 後回しの行を次のポーリングで再試行
+    }
+    _htmlCache.set(el, html);
+    return true;
   }
+  // 顔ぶれ (キー列) の変更は全体差し替え (稀)。操作中なら後回し
+  if (el.childElementCount && (uiBusyIn(el) || formDirty(el))) {
+    deferRender(key, redo || (() => patchRows(el, html, key, redo)));
+    return false;
+  }
+  const snap = logScrollSnap(el);
+  el.innerHTML = html;
+  logScrollBack(el, snap);
+  [...el.children].forEach((c, i) => { if (news[i]) _htmlCache.set(c, news[i].outerHTML); });
   stampForm(el);
   _htmlCache.set(el, html);
   return true;
@@ -425,6 +456,7 @@ function tabAllowed(tab) {
    (#/profiles/editor/new など) ので、戻るとダイアログだけ閉じて一覧に戻る。
    直接リンクされたダイアログは列表だけ開いてダイアログ側を捨てる (戻るとアプリ外へ出るため)。
 */
+/* "coding" は旧 URL (#/coding) 互換のエイリアス: ベンチマークタブの coding モードへ変換 */
 const ROUTE_TABS = ["home","launch","running","history","profiles","backends",
                     "users","playground","bench","coding","calibrate","setup","models"];
 let _openDialog = null;   // 開いているダイアログ {kind, arg, mode}
@@ -459,6 +491,11 @@ function applyRoute() {
   const raw = location.hash !== "" && location.hash !== "#";
   const r = parseHash();
   let tab = raw ? r.tab : defaultTab();
+  // 旧 #/coding はベンチマークタブの coding モードへ統合 (タブ統一)
+  if (tab === "coding") {
+    if (S.bench) { S.bench.mode = "coding"; bmPersist(); }
+    tab = "bench";
+  }
   if (AUTH.booted && !tabAllowed(tab)) { go("#/launch", true); return; }   // 権限喪失: そのビューを捨てる
   if (raw) {                                   // 不正な URL は履歴を増やさず正規化
     const canon = routeUrl(tab, first ? null : r.kind, r.arg, r.mode);
@@ -502,16 +539,22 @@ addEventListener("hashchange", applyRoute);
    差し込んでから配線する。 */
 const VIEWS = {};
 function mountViews() {
-  document.querySelector("main").innerHTML = ROUTE_TABS.map(t => VIEWS[t]).join("\n");
+  document.querySelector("main").innerHTML =
+    ROUTE_TABS.filter(t => t !== "coding").map(t => VIEWS[t]).join("\n");
+  // コーディングベンチは独立タブではなくベンチマーク内のモードなので専用枠へ差し込む
+  const cbHost = $("#bm-mode-coding");
+  if (cbHost) cbHost.innerHTML = VIEWS.coding;
   document.querySelectorAll("main section.view").forEach(v => v.classList.add("hidden"));
   const v = document.querySelector("#view-" + S.tab); if (v) v.classList.remove("hidden");
 }
+/* コーディングベンチが表示中か (ベンチマークタブの coding モード) */
+const codingVisible = () => S.tab === "bench" && !!S.bench && S.bench.mode === "coding";
 /* ============================================================= render */
 function renderAll(force) {
   if (!S.state) return;
   // コーディングベンチのビューアー (2 実装並列) だけ画面幅を広げる
   document.querySelector("main").style.maxWidth =
-    (S.tab === "coding" && S.coding && S.coding.tab === "viewer") ? "1600px" : "";
+    (codingVisible() && S.coding && S.coding.tab === "viewer") ? "1600px" : "";
   renderTabBadges();
   if (S.tab === "home") renderHome();
   if (S.tab === "launch") renderLaunch();
@@ -520,8 +563,7 @@ function renderAll(force) {
   if (S.tab === "profiles") renderProfiles();
   if (S.tab === "backends") renderBackends();
   if (S.tab === "playground") renderPlayground();
-  if (S.tab === "bench") renderBench();
-  if (S.tab === "coding") renderCoding();
+  if (S.tab === "bench") { renderBench(); if (codingVisible()) renderCoding(); }
   if (S.tab === "calibrate") renderCalibrate();
   if (S.tab === "setup") renderSetup();
   if (S.tab === "models") renderModels();
@@ -533,10 +575,13 @@ function renderTabBadges() {
   const f = (S.state.sessions || []).filter(s => s.status === "failed").length;
   const nf = $("#nb-fail");
   nf.classList.toggle("hidden", f === 0); nf.textContent = f;
-  const nc = $("#nb-coding");
-  if (nc) {
-    const cbr = S.coding && S.coding.active ? 1 : 0;
-    nc.classList.toggle("hidden", cbr === 0); nc.textContent = cbr;
+  // ベンチマークタブのバッジは速度ベンチ / コーディングベンチどちらかの実行中
+  const nb2 = $("#nb-bench");
+  if (nb2) {
+    const on = !!((S.bench && S.bench.active) || (S.coding && S.coding.active));
+    nb2.classList.toggle("hidden", !on);
+    nb2.classList.toggle("run", on);
+    nb2.innerHTML = on ? IC("play") : "";
   }
 }
 

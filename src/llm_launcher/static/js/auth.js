@@ -103,7 +103,7 @@ function applyAuthUi() {
   b.toggle("no-install", !can("install"));
   // メニュー項目
   [["#mi-home", "dashboard"], ["#mi-history", "history"], ["#mi-playground", "playground"],
-   ["#mi-bench", "bench"], ["#mi-coding", "bench"], ["#mi-calibrate", "calibrate"],
+   ["#mi-bench", "bench"], ["#mi-calibrate", "calibrate"],
    ["#mi-profiles", "profiles.edit"],
    ["#mi-backends", "backends.edit"], ["#mi-setup", "install"], ["#mi-models", "install"]]
     .forEach(([id, cap]) => $(id).classList.toggle("hidden", !can(cap)));
