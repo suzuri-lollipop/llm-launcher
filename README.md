@@ -199,14 +199,19 @@ scripts/systemd-install.sh --uninstall  # 停止 + 登録解除 + ユニット�
    **モデル名は稼働中サーバーの `/v1/models` から自動取得**して一覧に表示します
    (未起動時は「開始時に自動解決」。再取得ボタンあり)。
    **thinking はモデルで設定できるものだけ表示**します — 稼働中サーバーが
-   `/v1/models` で effort 語彙を公開していればその段階 (`off` + minimal / low /
-   medium / high / xhigh / max。Inkling-2 等) を、無ければプロファイルの
+   `/v1/models` で effort 語彙を公開していればその段階をファミリーを問わずそのまま
+   出します (`off` + 語彙。Inkling-2 の minimal / low / medium / high / xhigh / max、
+   Qwen3.8-Flash-Next の low / medium / xhigh 等。語彙はサーバーがチェックポイントの
+   テンプレートを probe した結果)。無ければプロファイルの
    `--reasoning-parser` / `--reasoning` 設定とモデル名 (Qwen3 / DeepSeek-R1 / V3 /
    GLM-4 / Inkling / gpt-oss 系) から判定した `off / on` を出します (非思考モデルは
-   `off` のみ)。effort 語彙モデルは pi の `thinkingLevelMap.off = "none"` で
-   `reasoning_effort` を配線し、Qwen3 系は `thinkingFormat: qwen-chat-template` で
-   `enable_thinking` を確実に配線します (どちらも `off` でテンプレート既定の
-   thinking ON を切る)。
+   `off` のみ)。配線は 3 系統: "none" 含む effort 語彙モデル (Inkling-2) は pi の
+   `thinkingLevelMap.off = "none"` で `reasoning_effort` を配線、effort 語彙を持つ
+   Qwen (Qwen3.8-Flash-Next) は `thinkingFormat: chat-template` の
+   `chat_template_kwargs` で `enable_thinking` と `reasoning_effort` の両方を配線
+   (off は `enable_thinking=false` かつ `reasoning_effort` を omit)、語彙の無い
+   Qwen3 系は `thinkingFormat: qwen-chat-template` で `enable_thinking` を確実に
+   配線します (いずれも `off` でテンプレート既定の thinking ON を切る)。
 2. **スキル群フォルダ選択** — `SKILL.md` を再帰的に列挙して `pi --skill` で渡します。
    デフォルトは `data/coding/defaults/skills/` (初回に自動生成):
    - `python-stdlib-backend` — 標準ライブラリだけの REST API + 静的配信の型
