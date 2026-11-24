@@ -8,7 +8,7 @@
 SECTION_ORDER (FreeToken のセットアップ基準) で全バックエンドを統一する。
 
 セットアップウィザード (/setup) の ③ 稼働設定も同じ基準で揃える:
-  - 質問順は ctx → out → kv → moe → ple → tp → par → vis の固定順 (定義側の並びに依存しない)
+  - 質問順は ctx → out → kv → moe → ple → kern → tp → par → vis の固定順 (定義側の並びに依存しない)
   - freetoken (upstream) の RUNCFG 欠落で ③④ が丸ごとスキップされ、
     プロファイルが作られない状態を fork と同じ導線に直す
 """
@@ -80,8 +80,8 @@ def test_sections_ja_covers_the_canonical_order():
 
 def test_wizard_question_order_is_fixed():
     """描画 / 補足 / 保存の 3 ループとも同じ固定順 (FreeToken 基準の
-    ctx → out → kv → moe → ple → tp → par → vis)。定義オブジェクトの並び順には依存しない。"""
-    assert WIZARD_JS.count('for (const id of ["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"])') == 3
+    ctx → out → kv → moe → ple → kern → tp → par → vis)。定義オブジェクトの並び順には依存しない。"""
+    assert WIZARD_JS.count('for (const id of ["ctx", "out", "kv", "moe", "ple", "kern", "tp", "par", "vis"])') == 3
 
 
 def test_wizard_covers_every_installable_backend():
@@ -178,6 +178,27 @@ def test_wizard_fork_hides_ple_for_non_ple_models_and_names_quant():
     assert 'gguf: bs.length === 1 ? bs[0] : ""' not in WIZARD_JS
     # drafter sidecar はモデル択に出さない
     assert '.filter(g => !/^(dspark|mtp)-/i.test(String(g.name).split("/").pop()))' in WIZARD_JS
+
+
+def test_wizard_inkling_asks_gpu_mode_and_kernel():
+    """Inkling-2-Mini の ③: 複数 GPU 方式 (1枚 / TP / layer split) と GGML カーネル
+    (CUDA / Vulkan) を聞く。方式は --tp-size + FREETOKEN_LAYER_SPLIT、カーネルは
+    FREETOKEN_GGML_BACKEND へ導出 (env 書き込み。values ではない)。他家系には出さない。"""
+    fork = _runcfg_block("freetoken-fork")
+    assert 'key: "ggml_backend"' in fork and 'envKey: "FREETOKEN_GGML_BACKEND"' in fork
+    # 複数 GPU 方式の質問定義 (renderConfig の Inkling 出し分け) と導出
+    assert 'key: "gpu_mode"' in WIZARD_JS and "inkGpus: true" in WIZARD_JS
+    assert '["split", "Layer split (2枚)", ""]' in WIZARD_JS
+    assert 'if (el.value === "split") env.FREETOKEN_LAYER_SPLIT = "1";' in WIZARD_JS
+    assert 'vals.tp_size = el.value === "1" ? "1" : "2";' in WIZARD_JS
+    assert "if (sec.envKey) {" in WIZARD_JS and "env[sec.envKey] = el.value;" in WIZARD_JS
+    # 出し分け: Inkling かつ 2 枚以上で GPU 方式 / 1 枚なら GPU 質問なし / 非 Inkling はカーネル質問なし
+    assert "if (W.ftModel.inkling) {" in WIZARD_JS
+    assert "if ((W.sysGpus || []).length >= 2) {" in WIZARD_JS
+    assert "} else delete cfg.tp;" in WIZARD_JS
+    assert "} else delete cfg.kern;" in WIZARD_JS
+    # 現在値の復元 (tp_size + env が正)
+    assert 'curs.kern = (p.env || {}).FREETOKEN_GGML_BACKEND === "vulkan" ? "vulkan" : "cuda";' in WIZARD_JS
 
 
 # ---------------------------------------------------------------- ダウンロード択の取得済みガード
