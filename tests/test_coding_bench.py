@@ -74,6 +74,7 @@ class _EffortModelHandler(_ModelHandler):
         if self.path == "/v1/models":
             body = json.dumps({"data": [{
                 "id": "test-model",
+                "context_length": 262144,
                 "supported_reasoning_efforts":
                     ["max", "xhigh", "high", "medium", "low", "minimal", "none"],
                 "default_reasoning_effort": "high",
@@ -501,17 +502,283 @@ def test_external_helpers():
     assert coding_mod.normalize_external_base("https://api.openai.com/v1/") == "https://api.openai.com"
     assert coding_mod.normalize_external_base("https://x.example/v1") == "https://x.example"
     assert coding_mod.normalize_external_base("https://x.example/") == "https://x.example"
+    # エンドポイントを丸ごと貼られても base まで畳む (…/v1/chat/completions → ルート)
+    assert coding_mod.normalize_external_base(
+        "https://api.openai.com/v1/chat/completions") == "https://api.openai.com"
+    assert coding_mod.normalize_external_base("https://x.example/v1/models") == "https://x.example"
+    assert coding_mod.normalize_external_base("https://x.example/v1/completions") == "https://x.example"
     assert coding_mod.mask_secret("sk-abcdef123456") == "sk-a…56"
     assert coding_mod.mask_secret("short") == "sh…"
     assert coding_mod.mask_secret("") == ""
 
 
-def test_external_probe(server):
+_FAKE_CATALOG = {
+    "alibaba-token-plan": {"models": {
+        "qwen4-max-preview": {"limit": {"context": 1000000}},
+        "qwen3.8-max": {"limit": {"context": 1000000}},
+        "glm-5.3": {"limit": {"context": 1000000}}}},
+    "opencode": {"models": {"qwen3.8-max": {"limit": {"context": 262144}}}},
+    "openai": {"models": {"gpt-5.2": {"limit": {"context": 400000}}}},
+    "anthropic": {"models": {"claude-sonnet-4-5": {"limit": {"context": 200000}}}},
+}
+
+
+def test_catalog_context_provider_aware(monkeypatch):
+    monkeypatch.setattr(coding_mod, "_load_models_catalog", lambda: _FAKE_CATALOG)
+    # プロバイダ一致 (token-plan) の実測値を優先
+    tokens, note = coding_mod.catalog_context(
+        "qwen3.8-max", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode")
+    assert tokens == 1000000 and "alibaba-token-plan" in note
+    # プロバイダ不一致なら最頻値 (1000000 が 2 件 vs 262144 が 1 件)
+    assert coding_mod.catalog_context("qwen3.8-max", "https://unknown.example")[0] == 1000000
+    assert coding_mod.catalog_context("gpt-5.2", "https://api.openai.com/v1")[0] == 400000
+    assert coding_mod.catalog_context("claude-sonnet-4-5", "")[0] == 200000
+    assert coding_mod.catalog_context("totally-unknown-model", "") == (0, "")
+
+
+def test_catalog_context_preview_variant_fallback(monkeypatch):
+    cat = {"alibaba-token-plan": {"models": {"qwen4-max": {"limit": {"context": 1000000}}}}}
+    monkeypatch.setattr(coding_mod, "_load_models_catalog", lambda: cat)
+    # preview はカタログ未収載 → 基底 qwen4-max の値を適用
+    ctx, note = coding_mod.catalog_context(
+        "qwen4-max-preview", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode")
+    assert ctx == 1000000 and "qwen4-max" in note
+    assert coding_mod._catalog_name_variants("qwen3.8-max-0902") == ["qwen3.8-max-0902", "qwen3.8-max"]
+    assert coding_mod._catalog_name_variants("m-2026-05-20") == ["m-2026-05-20", "m"]
+
+
+def test_catalog_context_empty_when_offline(monkeypatch):
+    monkeypatch.setattr(coding_mod, "_load_models_catalog", lambda: {})
+    assert coding_mod.catalog_context("qwen3.8-max", "") == (0, "")
+
+
+def test_external_probe(server, monkeypatch):
+    monkeypatch.setattr(coding_mod, "_load_models_catalog", lambda: {})
     _, port = server
     ok = coding_mod.external_probe(f"http://127.0.0.1:{port}", {})
     assert ok["ok"] and ok["models"] == ["test-model"]
+    assert ok["model_cards"] == [{"id": "test-model"}]   # メタデータ非公開は id のみ
     bad = coding_mod.external_probe("http://127.0.0.1:1", {}, timeout=2.0)
     assert not bad["ok"] and bad["error"]
+
+
+def test_external_probe_returns_model_cards(effort_server):
+    """モデル名自動取得に加え context_length / effort 語彙もカードで返す。"""
+    _, port = effort_server
+    r = coding_mod.external_probe(f"http://127.0.0.1:{port}", {})
+    assert r["ok"]
+    card = r["model_cards"][0]
+    assert card["id"] == "test-model"
+    assert card["context_length"] == 262144
+    assert card["context_source"] == "api"
+    assert "none" in card["supported_reasoning_efforts"]
+    assert card["default_reasoning_effort"] == "high"
+
+
+class _BareModelHandler(_ModelHandler):
+    """/v1/models が id だけ (コンテキスト/語彙なし) の API。"""
+
+    def do_GET(self):  # noqa: N802
+        if self.path == "/v1/models":
+            body = json.dumps({"data": [{"id": "gpt-5.2"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            super().do_GET()
+
+
+@pytest.fixture
+def bare_server():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _BareModelHandler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield srv, srv.server_address[1]
+    srv.shutdown()
+
+
+def test_external_probe_context_falls_back_to_catalog(bare_server, monkeypatch):
+    """コンテキストを公開しない API でもカタログ値を返し、根拠を明示する。"""
+    monkeypatch.setattr(coding_mod, "_load_models_catalog", lambda: _FAKE_CATALOG)
+    _, port = bare_server
+    r = coding_mod.external_probe(f"http://127.0.0.1:{port}", {})
+    card = r["model_cards"][0]
+    assert card["id"] == "gpt-5.2"
+    assert card["context_source"] == "catalog"
+    assert card["context_length"] == 400000
+    assert card["context_note"]
+    assert "supported_reasoning_efforts" not in card
+
+
+class _ValidatingEffortHandler(_ModelHandler):
+    """reasoning_effort を検証する API (不正値は 400 + 許容値一覧)。"""
+
+    ALLOWED = {"low", "medium", "high", "xhigh"}
+
+    def do_POST(self):  # noqa: N802
+        n = int(self.headers.get("Content-Length", 0))
+        req = json.loads(self.rfile.read(n))
+        eff = req.get("reasoning_effort")
+        if eff and eff not in self.ALLOWED:
+            body = json.dumps({"error": {"message":
+                "reasoning_effort must be one of low, medium, high, xhigh; got "
+                f"'{eff}'"}}).encode()
+            self.send_response(400)
+        else:
+            body = json.dumps({"choices": [{"message": {"content": "ok"},
+                                            "finish_reason": "stop"}]}).encode()
+            self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class _IgnoringEffortHandler(_ModelHandler):
+    """reasoning_effort を無視する API (何を送っても 200)。"""
+
+    def do_POST(self):  # noqa: N802
+        n = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(n)
+        body = json.dumps({"choices": [{"message": {"content": "ok"},
+                                        "finish_reason": "stop"}]}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _serve(handler):
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, srv.server_address[1]
+
+
+def test_capabilities_reads_vocabulary_from_error(monkeypatch):
+    """検証する API は不正値 1 回のエラー本文から語彙が確定する (1 リクエスト)。"""
+    srv, port = _serve(_ValidatingEffortHandler)
+    try:
+        r = coding_mod.external_capabilities(f"http://127.0.0.1:{port}", {}, "m")
+        assert r["validated"] is True and r["unknown"] is False
+        assert r["efforts"] == ["low", "medium", "high", "xhigh"]
+        assert r["requests"] == 1
+    finally:
+        srv.shutdown()
+
+
+def test_capabilities_detects_off_value_from_error_list():
+    """Token Plan 形式: 許容値一覧に none/off が含まれれば off_value を返す。"""
+    srv, port = _serve(_ValidatingEffortHandler)
+    try:
+        # _ValidatingEffortHandler のエラー文に none/off を足した版を模擬
+        import llm_launcher.coding as cm
+        orig = cm._tiny_chat
+        def fake(base, auth, model, effort, timeout=60.0):
+            if effort == cm._PROBE_EFFORT:
+                return 400, ("'reasoning_effort' must be one of: 'none', 'off', "
+                             "'minimal', 'low', 'medium', 'high', 'xhigh', 'max'")
+            return 200, ""
+        cm._tiny_chat = fake
+        try:
+            r = cm.external_capabilities("http://x", {}, "qwen4-max-preview")
+            assert r["efforts"] == ["minimal", "low", "medium", "high", "xhigh", "max"]
+            assert r["off_value"] == "none"
+            assert r["requests"] == 1
+        finally:
+            cm._tiny_chat = orig
+    finally:
+        srv.shutdown()
+
+
+def test_capabilities_per_value_probe_when_error_has_no_list(monkeypatch):
+    """エラーに一覧が無い API は候補を 1 つずつ実測する。"""
+    calls = []
+
+    def fake(base, auth, model, effort, timeout=60.0):
+        calls.append(effort)
+        if effort == coding_mod._PROBE_EFFORT:
+            return 400, "invalid reasoning_effort"
+        return (200, "") if effort in ("low", "high") else (400, "")
+    monkeypatch.setattr(coding_mod, "_tiny_chat", fake)
+    r = coding_mod.external_capabilities("http://x", {}, "m")
+    assert r["efforts"] == ["low", "high"]
+    assert r["requests"] == 8          # 不正値 1 + 候補 6 + none 1
+    assert r["validated"] is True
+
+
+def test_capabilities_reports_unvalidated_when_param_ignored():
+    """不正値でも 200 を返す API は語彙判定不能として正直に返す。"""
+    srv, port = _serve(_IgnoringEffortHandler)
+    try:
+        r = coding_mod.external_capabilities(f"http://127.0.0.1:{port}", {}, "m")
+        assert r["validated"] is False and r["unknown"] is False
+        assert r["efforts"] == [] and r["requests"] == 1
+        assert "検証しません" in r["note"]
+    finally:
+        srv.shutdown()
+
+
+def test_capabilities_auth_error_is_unknown():
+    srv, port = _serve(_ModelHandler)   # POST は 501 相当 (unknown route)
+    try:
+        r = coding_mod.external_capabilities(f"http://127.0.0.1:1", {}, "m", timeout=2)
+        assert r["unknown"] is True
+    finally:
+        srv.shutdown()
+
+
+def test_apply_saved_meta_prefers_saved_values():
+    cards = [{"id": "qwen4-max-preview", "context_source": "catalog", "context_length": 128000}]
+    saved = {"https://api.example|qwen4-max-preview": {
+        "context_length": 1048576, "efforts": ["low", "medium", "xhigh"]}}
+    out = coding_mod.apply_saved_meta(cards, saved, "https://api.example")
+    assert out[0]["context_length"] == 1048576
+    assert out[0]["context_source"] == "saved"
+    assert out[0]["supported_reasoning_efforts"] == ["low", "medium", "xhigh"]
+
+
+def test_external_run_vocabulary_wiring_off_really_off(tmp_path, effort_server):
+    """effort 語彙を公開する外部サーバーは語彙配線: off でも reasoning=True +
+    thinkingLevelMap.off="none" でテンプレート既定の thinking を確実に切る。"""
+    _, port = effort_server
+    mgr = _manager(tmp_path, _FakeManager(port), _write_fake_pi(tmp_path))
+    params = _params(mgr, thinking="off", external={
+        "base_url": f"http://127.0.0.1:{port}", "api_key": "",
+        "model": "test-model", "name": "", "context_window": 128000})
+
+    async def go():
+        run = await mgr.start(None, params, "外部 API")
+        await mgr._tasks[run["id"]]
+        return mgr.get(run["id"])
+    run = asyncio.run(go())
+    assert run["status"] == "completed", run["error"]
+    cfg = json.loads((mgr.run_dir(run["id"]) / "pi-home" / "models.json").read_text())
+    entry = cfg["providers"]["launcher"]["models"][0]
+    assert entry["reasoning"] is True
+    assert entry["thinkingLevelMap"]["off"] == "none"
+    assert entry["thinkingLevelMap"]["max"] == "max"
+
+
+def test_external_pi_home_wiring_variants(tmp_path):
+    """外部の配線: 語彙 Qwen は kwargs、語彙無し (OpenAI 等) は標準 reasoning_effort。"""
+    mgr = _manager(tmp_path, _FakeManager(0))
+    rd = tmp_path / "rd"
+    rd.mkdir()
+    params = {"thinking": "xhigh", "external": {"context_window": 262144}}
+    mgr._prepare_pi_home(rd, "https://x.example", "Qwen3.8-Flash-Next", "k", params,
+                         ["xhigh", "medium", "low"], external=True)
+    entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
+    assert entry["compat"]["thinkingFormat"] == "chat-template"
+    assert entry["compat"]["chatTemplateKwargs"]["enable_thinking"] == {"$var": "thinking.enabled"}
+    assert entry["contextWindow"] == 262144
+    mgr._prepare_pi_home(rd, "https://api.openai.com", "gpt-5.2", "k", params, [], external=True)
+    entry = json.loads((rd / "pi-home" / "models.json").read_text())["providers"]["launcher"]["models"][0]
+    assert entry["compat"] == {"supportsReasoningEffort": True, "supportsDeveloperRole": False}
+    assert "off" not in entry["thinkingLevelMap"]      # off は何も送らない
+    assert entry["thinkingLevelMap"]["high"] == "high"
 
 
 def test_external_run_flow_masks_key(tmp_path, server):

@@ -38,6 +38,7 @@ import socket
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -1150,12 +1151,148 @@ def model_ids(base: str, auth: dict[str, str] | None = None) -> list[str]:
 # ------------------------------------------------------------------ 外部 API ターゲット
 
 def normalize_external_base(url: str) -> str:
-    """外部 API の base URL を /v1 無し形に正規化 (pi 配線が /v1 を付加する)。
-    https://api.openai.com/v1 → https://api.openai.com"""
+    """外部 API の URL を「/v1 を付け足せる base」に正規化する。
+
+    利用者がエンドポイントをそのまま貼る場合があるため、末尾の
+    /v1/chat/completions・/chat/completions・/v1/models・/models・/v1 を落とす。
+    https://api.openai.com/v1/chat/completions → https://api.openai.com"""
     u = (url or "").strip().rstrip("/")
-    if u.endswith("/v1"):
-        u = u[:-3]
+    # 連鎖して落とす (…/v1/chat/completions → …/v1 → …)
+    changed = True
+    while changed:
+        changed = False
+        for suffix in ("/chat/completions", "/completions", "/models", "/v1"):
+            if u.endswith(suffix):
+                u = u[:-len(suffix)].rstrip("/")
+                changed = True
     return u
+
+
+# ------------------------------------------------------------------ コンテキスト長
+# /v1/models がコンテキスト長を公開しない API (OpenAI / Anthropic 互換の多く) 向けの
+# 既知モデル推定表。value は (正規表現, トークン数, 表示用ラベル)。
+# 保守的に: 見つからなければ 128000 を既定にして「既定値」と明示する。
+# コンテキスト長は API が公開しないことが多いため、公開カタログ models.dev を
+# 正とする (プロバイダ別に実測値を持つ。手書きの推定表は値が誤りやすく廃止)。
+# 取得は 24h キャッシュ (メモリ + ディスク)。オフライン時はディスク缓存→無ければ未取得。
+_CONTEXT_KEYS = ("context_length", "context_window", "max_model_len", "max_context_tokens",
+                 "max_input_tokens", "max_seq_len", "input_token_limit", "n_ctx_train",
+                 "context", "max_tokens_total")
+
+_MODELS_DEV_URL = "https://models.dev/api.json"
+_CATALOG_TTL = 24 * 3600
+_catalog_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+
+# base URL のホスト断片 → models.dev のプロバイダ ID (そのプロバイダの実測値を優先)
+_PROVIDER_HINTS: list[tuple[str, str]] = [
+    ("token-plan.cn-beijing.maas", "alibaba-token-plan-cn"),
+    ("token-plan", "alibaba-token-plan"),
+    ("dashscope-intl", "alibaba"),
+    ("dashscope-us", "alibaba"),
+    ("dashscope", "alibaba-cn"),
+    ("api.openai.com", "openai"),
+    ("api.anthropic.com", "anthropic"),
+    ("generativelanguage", "google"),
+    ("openrouter.ai", "openrouter"),
+    ("api.deepseek.com", "deepseek"),
+    ("bigmodel.cn", "zhipuai"),
+    ("api.moonshot", "moonshot"),
+    ("api.mistral", "mistral"),
+    ("x.ai", "xai"),
+    ("api.cohere", "cohere"),
+    ("api.groq.com", "groq"),
+    ("together", "together"),
+    ("fireworks", "fireworks"),
+    ("perplexity", "perplexity"),
+    ("azure", "azure"),
+]
+
+
+def _catalog_path() -> Path:
+    return Path.home() / ".cache" / "llm-launcher" / "models-dev.json"
+
+
+def _load_models_catalog() -> dict[str, Any]:
+    """models.dev カタログを返す (24h キャッシュ)。失敗時は {} (未取得扱い)。"""
+    now = time.time()
+    if _catalog_cache["data"] is not None and now - _catalog_cache["ts"] < _CATALOG_TTL:
+        return _catalog_cache["data"]
+    path = _catalog_path()
+    # 期限内のディスクキャッシュ
+    with contextlib.suppress(OSError, ValueError):
+        if path.exists() and now - path.stat().st_mtime < _CATALOG_TTL:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            _catalog_cache.update(data=data, ts=now)
+            return data
+    # 取得
+    data: dict[str, Any] = {}
+    with contextlib.suppress(OSError, ValueError, urllib.error.URLError):
+        req = urllib.request.Request(_MODELS_DEV_URL, headers={"User-Agent": "llm-launcher"})
+        with urllib.request.urlopen(req, timeout=25) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+    if data:
+        with contextlib.suppress(OSError):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data), encoding="utf-8")
+        _catalog_cache.update(data=data, ts=now)
+        return data
+    # 取得失敗: 古いディスクキャッシュでもあれば使う (無ければ {})
+    with contextlib.suppress(OSError, ValueError):
+        data = json.loads(path.read_text(encoding="utf-8"))
+    _catalog_cache.update(data=data, ts=now)
+    return data
+
+
+def _catalog_lookup(cat: dict[str, Any], name: str, hint: str) -> tuple[int, str]:
+    """1 つのモデル名でカタログを引く (プロバイダ優先 / 最頻値)。"""
+    values: list[int] = []
+    hinted: int | None = None
+    for pid, pd in cat.items():
+        m = (pd.get("models") or {}).get(name)
+        if not isinstance(m, dict):
+            continue
+        ctx = (m.get("limit") or {}).get("context")
+        if isinstance(ctx, (int, float)) and ctx > 0:
+            values.append(int(ctx))
+            if pid == hint:
+                hinted = int(ctx)
+    if hinted:
+        return hinted, f"models.dev カタログ ({hint})"
+    if values:
+        return max(set(values), key=values.count), "models.dev カタログ"
+    return 0, ""
+
+
+def _catalog_name_variants(model: str) -> list[str]:
+    """プレビュー版 / 日付スナップショットを基底モデル名に落とした候補を返す。
+    例: qwen4-max-preview → qwen4-max / qwen3.8-max-0902 → qwen3.8-max"""
+    out = [model]
+    if model.endswith("-preview"):
+        out.append(model[:-len("-preview")])
+    # 末尾の日付系サフィックス (-0902 / -2026-05-20 / -20260520 / -latest) を剥がす
+    stripped = re.sub(r"-(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4}|latest)$", "", model)
+    if stripped != model and stripped not in out:
+        out.append(stripped)
+    return out
+
+
+def catalog_context(model: str, base: str = "") -> tuple[int, str]:
+    """(コンテキスト長, 根拠ラベル) を返す。カタログに無ければ (0, "")。
+
+    base URL からプロバイダを推定し、そのプロバイダの実測値を優先する。
+    一致しなければ全プロバイダの最頻値を使う。exact 名が無ければプレビュー版 /
+    日付スナップショットを基底モデル名に落として引く (qwen4-max-preview → qwen4-max)。"""
+    cat = _load_models_catalog()
+    if not cat:
+        return 0, ""
+    hint = next((pid for frag, pid in _PROVIDER_HINTS if frag in (base or "")), "")
+    for i, name in enumerate(_catalog_name_variants(model)):
+        ctx, label = _catalog_lookup(cat, name, hint)
+        if ctx:
+            if i > 0:
+                label += f"・{name} の値を適用"
+            return ctx, label
+    return 0, ""
 
 
 def mask_secret(key: str) -> str:
@@ -1170,23 +1307,206 @@ def mask_secret(key: str) -> str:
 
 def external_probe(base: str, auth: dict[str, str] | None = None,
                    timeout: float = 15.0) -> dict[str, Any]:
-    """外部 API の /v1/models を叩いて (ok, models, error, status) を返す。
-    接続テストと起動待ちの両方で使う。認証エラーは即失敗扱い。"""
+    """外部 API の /v1/models を叩いて (ok, models, model_cards, error, status) を返す。
+    接続テスト・起動待ち・モデル名/コンテキスト/thinking 語彙の自動取得に使う。
+    model_cards はサーバーが公開するメタデータ (context_length / max_model_len /
+    supported_reasoning_efforts 等。公開しない API は id のみ)。認証エラーは即失敗扱い。"""
     try:
         req = urllib.request.Request(f"{base}/v1/models", headers=auth or {})
         with urllib.request.urlopen(req, timeout=timeout) as r:
             data = json.loads(r.read().decode("utf-8", "replace"))
-        models = [str(it.get("id") or it.get("model") or it.get("name") or "")
-                  for it in (data.get("data") or []) if isinstance(it, dict)]
-        return {"ok": True, "models": [m for m in models if m], "error": "", "status": 200}
+        cards: list[dict[str, Any]] = []
+        for it in (data.get("data") or []):
+            if not isinstance(it, dict):
+                continue
+            mid = str(it.get("id") or it.get("model") or it.get("name") or "")
+            if not mid:
+                continue
+            card: dict[str, Any] = {"id": mid}
+            ctx = next((it[k] for k in _CONTEXT_KEYS
+                        if isinstance(it.get(k), (int, float)) and it[k] > 0), None)
+            if ctx is not None:
+                card["context_length"] = int(ctx)
+                card["context_source"] = "api"
+            else:
+                ctx2, label = catalog_context(mid, base)
+                if ctx2:
+                    card["context_length"] = ctx2
+                    card["context_source"] = "catalog"
+                    card["context_note"] = label
+            eff = it.get("supported_reasoning_efforts")
+            if isinstance(eff, list) and eff:
+                card["supported_reasoning_efforts"] = [str(e) for e in eff]
+                if it.get("default_reasoning_effort"):
+                    card["default_reasoning_effort"] = str(it["default_reasoning_effort"])
+            cards.append(card)
+        # 一覧にメタデータが無い API は詳細エンドポイントも試す (OpenRouter 等)。
+        # 最初の 1 件が空なら詳細エンドポイント非対応とみなして残りは叩かない
+        # (一覧のみの API にモデル数分の無駄なリクエストを投げない)。
+        detail_supported = True
+        for card in cards:
+            if card.get("context_length") and card.get("supported_reasoning_efforts"):
+                continue
+            if not detail_supported:
+                break
+            det = model_detail(base, auth, card["id"])
+            if not det:
+                detail_supported = False
+                continue
+            src = det.get("data") if isinstance(det.get("data"), dict) else det
+            if not card.get("context_length"):
+                ctx = next((src[k] for k in _CONTEXT_KEYS
+                            if isinstance(src.get(k), (int, float)) and src[k] > 0), None)
+                if ctx is not None:
+                    card["context_length"] = int(ctx)
+                    card["context_source"] = "api"
+                    card.pop("context_note", None)
+            if not card.get("supported_reasoning_efforts"):
+                eff = src.get("supported_reasoning_efforts")
+                if isinstance(eff, list) and eff:
+                    card["supported_reasoning_efforts"] = [str(e) for e in eff]
+        return {"ok": True, "models": [c["id"] for c in cards], "model_cards": cards,
+                "error": "", "status": 200}
     except urllib.error.HTTPError as e:
         detail = ""
         with contextlib.suppress(Exception):
             detail = e.read().decode("utf-8", "replace")[:300]
-        return {"ok": False, "models": [], "status": e.code,
+        return {"ok": False, "models": [], "model_cards": [], "status": e.code,
                 "error": f"HTTP {e.code}: {detail or e.reason}"}
     except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
-        return {"ok": False, "models": [], "status": 0, "error": str(e)}
+        return {"ok": False, "models": [], "model_cards": [], "status": 0, "error": str(e)}
+
+
+# ------------------------------------------------------------------ 能力の実測 (外部 API)
+# /v1/models は多くのクラウド API で「id の一覧」しか返さない (DashScope / Token Plan /
+# OpenAI 等)。そこで実リクエストで語彙を測る:
+#   1) 不正値 (probe) を 1 回送る。検証する API は 400 とともに許容値を列挙してくれる
+#      (FreeToken: "reasoning_effort must be one of none, minimal, low, medium, high,
+#      xhigh, max, off")。列挙が読めれば 1 リクエストで語彙が確定する。
+#   2) 列挙が無ければ候補を 1 つずつ送って 200/4xx で判定する。
+#   3) 不正値でも 200 が返る API はパラメータを無視する = 判定不能として正直に返す。
+
+EFFORT_CANDIDATES = ("minimal", "low", "medium", "high", "xhigh", "max")
+_PROBE_EFFORT = "llm-launcher-probe-invalid"
+_EFFORT_TOKEN_RE = re.compile(r"\b(minimal|low|medium|high|xhigh|max|none|off)\b")
+
+
+def _tiny_chat(base: str, auth: dict[str, str] | None, model: str,
+               effort: str | None, timeout: float = 60.0) -> tuple[int, str]:
+    """極小の chat completions を 1 回送り (status, error_text) を返す。
+    200=受理 / 4xx=拒否。認証・経路エラーはそのまま返して呼び側が中断判断する。"""
+    body: dict[str, Any] = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1, "temperature": 0, "stream": False,
+    }
+    if effort:
+        body["reasoning_effort"] = effort
+    req = urllib.request.Request(
+        f"{base}/v1/chat/completions", data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json", **(auth or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            r.read()
+        return 200, ""
+    except urllib.error.HTTPError as e:
+        with contextlib.suppress(Exception):
+            return e.code, e.read().decode("utf-8", "replace")[:600]
+        return e.code, ""
+    except (OSError, urllib.error.URLError) as e:
+        return 0, str(e)[:300]
+
+
+def _off_value(listed: set[str]) -> str | None:
+    """思考を切る値。none があれば none、無ければ off (どちらも無ければ None)。"""
+    return "none" if "none" in listed else ("off" if "off" in listed else None)
+
+
+def external_capabilities(base: str, auth: dict[str, str] | None, model: str,
+                          timeout: float = 60.0) -> dict[str, Any]:
+    """実測で (efforts, validated, requests, note) を返す。
+
+    validated=False は「API が reasoning_effort を検証しない」= 語彙を判定できない。
+    efforts は受理された値 (off を含まない)。unknown=True は 401/404 等で測れなかった。"""
+    status, err = _tiny_chat(base, auth, model, _PROBE_EFFORT, timeout)
+    if status in (401, 403):
+        return {"efforts": [], "validated": False, "unknown": True, "requests": 1,
+                "note": f"認証エラー ({status}) のため実測できません"}
+    if status == 404:
+        return {"efforts": [], "validated": False, "unknown": True, "requests": 1,
+                "note": "chat/completions が 404 — base URL を確認してください"}
+    if status == 200:
+        # 不正値を受け入れた = reasoning_effort を無視する API。語彙は判定不能
+        return {"efforts": [], "validated": False, "unknown": False, "requests": 1,
+                "note": "この API は reasoning_effort を検証しません (無効値も 200)。"
+                        "語彙は自動判定できません"}
+    # 400/422: エラー本文に許容値が並んでいれば 1 回で確定
+    listed = {m for m in _EFFORT_TOKEN_RE.findall(err or "")}
+    if len(listed) >= 2:
+        efforts = [e for e in ("minimal", "low", "medium", "high", "xhigh", "max")
+                   if e in listed]
+        return {"efforts": efforts, "validated": True, "unknown": False, "requests": 1,
+                "off_value": _off_value(listed),
+                "note": "エラー応答の許容値一覧から取得"}
+    # 列挙が無い: 候補を 1 つずつ実測 (none も送って off 可否を確かめる)
+    accepted: list[str] = []
+    off_value = None
+    requests = 1
+    for cand in (*EFFORT_CANDIDATES, "none"):
+        st, _ = _tiny_chat(base, auth, model, cand, timeout)
+        requests += 1
+        if st == 200:
+            if cand == "none":
+                off_value = "none"
+            else:
+                accepted.append(cand)
+        elif st in (401, 403, 429, 0):
+            return {"efforts": accepted, "validated": True, "unknown": True,
+                    "requests": requests, "off_value": off_value,
+                    "note": f"実測中に {st or '接続'} エラー (途中結果)"}
+    return {"efforts": accepted, "validated": True, "unknown": False, "requests": requests,
+            "off_value": off_value, "note": "候補を 1 つずつ送って実測"}
+
+
+def model_detail(base: str, auth: dict[str, str] | None, model: str,
+                 timeout: float = 15.0) -> dict[str, Any]:
+    """GET {base}/v1/models/{id} を試す (OpenRouter / LiteLLM 等はメタデータを返す)。
+    失敗は {}。"""
+    try:
+        req = urllib.request.Request(f"{base}/v1/models/{urllib.parse.quote(model)}",
+                                     headers=auth or {})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, urllib.error.HTTPError, json.JSONDecodeError, UnicodeDecodeError):
+        return {}
+
+
+def saved_external_meta(settings: dict[str, Any], base: str,
+                        model: str) -> dict[str, Any]:
+    """settings.json の coding.external_models からこのモデルの確定値を引く。"""
+    table = (settings.get("coding") or {}).get("external_models") or {}
+    return dict(table.get(f"{base}|{model}") or {})
+
+
+def apply_saved_meta(cards: list[dict[str, Any]],
+                     saved: dict[str, dict[str, Any]], base: str) -> list[dict[str, Any]]:
+    """ユーザーが確定した値 (context / efforts) を card に重ねる。
+    /v1/models が何も公開しないクラウド API でも、一度確定すれば自動適用される。"""
+    for card in cards:
+        over = saved.get(f"{base}|{card['id']}") or {}
+        if isinstance(over.get("context_length"), int) and over["context_length"] > 0:
+            card["context_length"] = over["context_length"]
+            card["context_source"] = "saved"
+            card["context_note"] = "このモデルの保存値"
+        if isinstance(over.get("efforts"), list) and over["efforts"]:
+            card["supported_reasoning_efforts"] = [str(e) for e in over["efforts"]]
+            card["efforts_source"] = "saved"
+            if over.get("source"):
+                card["efforts_note"] = over["source"]
+        if over.get("off_value"):
+            card["off_value"] = over["off_value"]
+    return cards
 
 
 # ------------------------------------------------------------------ マネージャー
@@ -1467,7 +1787,14 @@ class CodingManager:
             if not model:
                 raise CodingError("外部 API からモデル名を解決できません (/v1/models が空です)。"
                                   "モデル名を明示指定してください")
-            efforts: list[str] = []
+            # effort 語彙を公開する外部サーバー (FreeToken 等) は語彙配線に使う。
+            # 公開しない API (DashScope / Token Plan 等) は実測保存値を使う。
+            efforts, _ = await asyncio.to_thread(model_efforts, base, auth)
+            if not efforts:
+                saved = saved_external_meta(self.pi.settings.load(), base, model)
+                efforts = [str(e) for e in (saved.get("efforts") or [])]
+                if saved.get("off_value") == "none" and "none" not in efforts:
+                    efforts.append("none")   # off を確実に切る配線に進める
         else:
             sess = await self._resolve_session(run, profile, params)
             port = sess.get("port")
@@ -1628,20 +1955,26 @@ class CodingManager:
         off でも reasoning=True にして pi が reasoning_effort="none" を送るようにする
         (テンプレート既定の effort 0.9 を確実に切る)。
 
-        外部 API (external=True) はサーバー側テンプレートが未知なので、OpenAI 標準の
-        reasoning_effort 配線だけを使う (chat_template_kwargs は送らない)。
-        off は reasoning=False で何も送らない ("none" は OpenAI が拒否するため)。"""
+        外部 API (external=True): サーバーが effort 語彙を公開するならローカルと同じ
+        語彙配線を使う (off を enable_thinking=false / "none" で確実に切る)。
+        語彙の無い外部 API (OpenAI 等) は OpenAI 標準の reasoning_effort 配線のみ
+        (chat_template_kwargs は送らない。off は reasoning=False で何も送らない —
+        "none" は OpenAI が拒否するため)。"""
         pi_home = rd / "pi-home"
         pi_home.mkdir(exist_ok=True)
         thinking = str(params.get("thinking") or "off")
-        qwen = bool(QWEN_THINKING_RE.search(model or "")) and not external
-        effort_wired = bool(efforts) and "none" in efforts and not qwen
+        qwen_name = bool(QWEN_THINKING_RE.search(model or ""))
+        qwen = qwen_name and not external
+        effort_wired = bool(efforts) and "none" in efforts and not qwen_name
+        # 外部でも effort 語彙を公開するサーバー (FreeToken 等) は語彙配線を使う
+        # (off を確実に切る: Qwen は enable_thinking=false、none 語彙は "none" 送信)
+        ext_wired = external and bool(efforts) and (qwen_name or "none" in efforts)
         ctx = int((params.get("external") or {}).get("context_window") or 128000) \
             if external else 128000
         entry: dict[str, Any] = {
             "id": model,
             "name": model,
-            "reasoning": True if (qwen or effort_wired) else thinking != "off",
+            "reasoning": True if (qwen or effort_wired or ext_wired) else thinking != "off",
             "input": ["text"],
             "contextWindow": ctx,
             # 思考 ON では thinking が出力枠を食う。8192 固定だと thinking=max で
@@ -1651,11 +1984,7 @@ class CodingManager:
             "maxTokens": 8192 if thinking == "off" else 32768,
             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
         }
-        if external:
-            entry["compat"] = {"supportsReasoningEffort": True, "supportsDeveloperRole": False}
-            entry["thinkingLevelMap"] = {
-                name: name for name in ("minimal", "low", "medium", "high", "xhigh", "max")}
-        elif qwen and efforts:
+        if qwen_name and efforts:
             # 語彙はサーバー probe 済み (例: xhigh/medium/low)。pi の extended
             # レベル (xhigh/max) は明示 map が無いと unsupported 扱いなので、
             # 語彙の名前は全部明示する。high は旧 "on" の読み替え先として
@@ -1689,6 +2018,21 @@ class CodingManager:
             # 400 (Unknown message role: developer) になるため system に固定する
             entry["compat"] = {"supportsReasoningEffort": True, "supportsDeveloperRole": False}
             entry["thinkingLevelMap"] = level_map
+        elif external and efforts and "none" in efforts:
+            # 外部だが "none" 含む語彙を公開するサーバー (Inkling 系等):
+            # off でも reasoning_effort="none" を送ってテンプレート既定を切る
+            level_map = {"off": "none"}
+            for name in efforts:
+                if name in ("minimal", "low", "medium", "high", "xhigh", "max"):
+                    level_map[name] = name
+            entry["compat"] = {"supportsReasoningEffort": True, "supportsDeveloperRole": False}
+            entry["thinkingLevelMap"] = level_map
+        elif external:
+            # 語彙の無い外部 API (OpenAI 等): OpenAI 標準 reasoning_effort のみ。
+            # off は reasoning=False で何も送らない ("none" は OpenAI が拒否する)
+            entry["compat"] = {"supportsReasoningEffort": True, "supportsDeveloperRole": False}
+            entry["thinkingLevelMap"] = {
+                name: name for name in ("minimal", "low", "medium", "high", "xhigh", "max")}
         cfg = {
             "providers": {
                 PI_PROVIDER: {
