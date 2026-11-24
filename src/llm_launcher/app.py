@@ -34,7 +34,8 @@ from .store import JsonStore, new_id, now
 from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .coding import (CodingAssets, CodingError, CodingManager, PiTool,
-                     PROXY_BODY_MAX, external_probe, guess_type, model_efforts,
+                     PROXY_BODY_MAX, apply_saved_meta, external_capabilities,
+                     external_probe, guess_type, model_efforts,
                      model_ids, normalize_external_base, safe_join,
                      sandbox_info, thinking_capability)
 from .coding_eval import CodingEvalManager
@@ -2774,6 +2775,32 @@ def create_app(root: Path) -> FastAPI:
             "sandbox": body.sandbox,
         }
 
+    def _external_saved(base: str, model: str) -> dict[str, Any]:
+        saved = (settings_store.load().get("coding") or {}).get("external_models") or {}
+        return dict(saved.get(f"{base}|{model}") or {})
+
+    def _save_external_meta(base: str, model: str, *, efforts: list[str] | None = None,
+                            context_length: int | None = None, off_value: str | None = None,
+                            source: str = "") -> None:
+        """外部 API の確定値 (語彙 / コンテキスト長) を settings.json に保存する。
+        /v1/models が公開しない API でも次回から自動適用できるようにする。"""
+        key = f"{base}|{model}"
+
+        def _mut(cfg: dict[str, Any]) -> None:
+            coding_cfg = cfg.setdefault("coding", {})
+            table = coding_cfg.setdefault("external_models", {})
+            cur = dict(table.get(key) or {})
+            if efforts is not None:
+                cur["efforts"] = list(efforts)
+                cur["source"] = source
+            if off_value:
+                cur["off_value"] = off_value
+            if context_length:
+                cur["context_length"] = context_length
+            cur["updated_at"] = now()
+            table[key] = cur
+        settings_store.mutate(_mut)
+
     @app.get("/api/coding/assets")
     async def coding_assets_info() -> dict[str, Any]:
         """デフォルト資材 (スキル群 / AGENTS.md / プロンプト) の参照。"""
@@ -2867,17 +2894,53 @@ def create_app(root: Path) -> FastAPI:
 
     @app.post("/api/coding/external-check")
     async def coding_external_check(body: ExternalTarget) -> dict[str, Any]:
-        """外部 API への接続テスト (/v1/models を叩く)。キーはログ・履歴に残さない。"""
+        """外部 API への接続テスト (/v1/models を叩く)。キーはログ・履歴に残さない。
+
+        /v1/models が何も公開しない API でも、一度「実測」または手動確定した値
+        (coding.external_models) があれば card に重ねて返す。"""
         base = normalize_external_base(body.base_url)
         if not base.startswith(("http://", "https://")):
             raise HTTPException(422, "base_url は http(s):// で始めてください")
         key = body.api_key.strip()
         auth = {"Authorization": f"Bearer {key}"} if key else {}
         probe = await asyncio.to_thread(external_probe, base, auth, 20.0)
+        if probe["ok"]:
+            saved = (settings_store.load().get("coding") or {}).get("external_models") or {}
+            apply_saved_meta(probe["model_cards"], saved, base)
         if probe["ok"] and body.model.strip() and body.model.strip() not in probe["models"]:
             probe["warning"] = (f"モデル {body.model.strip()} は /v1/models の一覧にありません"
                                 " (一覧に無いモデルを提供する API もあります)")
         return probe
+
+    @app.post("/api/coding/external-capabilities")
+    async def coding_external_capabilities(body: ExternalTarget) -> dict[str, Any]:
+        """実リクエストで reasoning_effort の語彙を実測する (数リクエスト消費)。
+        不正値を 1 回送って許容値一覧が返る API なら 1 リクエストで確定する。"""
+        base = normalize_external_base(body.base_url)
+        if not base.startswith(("http://", "https://")):
+            raise HTTPException(422, "base_url は http(s):// で始めてください")
+        model = body.model.strip()
+        if not model:
+            raise HTTPException(422, "実測にはモデル名が必要です")
+        key = body.api_key.strip()
+        auth = {"Authorization": f"Bearer {key}"} if key else {}
+        res = await asyncio.to_thread(external_capabilities, base, auth, model, 60.0)
+        if res.get("validated") and not res.get("unknown"):
+            _save_external_meta(base, model, efforts=res["efforts"],
+                                off_value=res.get("off_value"), source=res.get("note", ""))
+        return {**res, "base_url": base, "model": model}
+
+    @app.post("/api/coding/external-model")
+    async def coding_external_model(body: dict[str, Any]) -> dict[str, Any]:
+        """手動確定値を保存 (コンテキスト長など)。次回の接続テストで自動適用する。"""
+        base = normalize_external_base(str(body.get("base_url") or ""))
+        model = str(body.get("model") or "").strip()
+        if not base.startswith(("http://", "https://")) or not model:
+            raise HTTPException(422, "base_url と model が必要です")
+        ctx = body.get("context_length")
+        ctx = int(ctx) if isinstance(ctx, (int, float)) and ctx > 0 else None
+        _save_external_meta(base, model, context_length=ctx)
+        return {"ok": True, "saved": _external_saved(base, model)}
 
     # ------------------------------------------------------- AI 評価 (2 実行の定量診断)
 
