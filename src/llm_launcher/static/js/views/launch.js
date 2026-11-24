@@ -13,30 +13,35 @@ VIEWS.launch = `
 function renderLaunch() {
   const strip = $("#running-strip");
   const live = liveSessions();
-  strip.innerHTML = live.length ? `<div class="card" style="border-color:#ceead6">
+  setHtml(strip, live.length ? `<div class="card" style="border-color:#ceead6">
     <div class="row"><b style="font-size:14px"><svg class=ic aria-hidden=true><use href=#i-play /></svg> 起動中: ${live.length} サーバー</b><span class="grow"></span>
     <button class="ghost" onclick="switchTab('running')">管理へ →</button></div>
     <div class="row" style="margin-top:8px">${live.map(s => `
       <span class="badge ${s.ready?"ok":"warn"}" style="cursor:pointer" onclick="switchTab('running')">
       <span class="dot"></span>${esc(s.profile_name)} · ${esc(s.backend_name)} · :${s.port||"-"}</span>`).join("")}
-    </div></div>` : "";
+    </div></div>` : "", "launch-strip", renderLaunch);
   const bks = S.state.backends;
   const f = $("#launch-filters");
-  f.innerHTML = [{id:"all",name:"すべて"}, ...bks].map(b =>
-    `<button class="fchip ${S.filter===b.id?"on":""}" onclick="S.filter='${b.id}';renderLaunch()">${esc(b.name)}</button>`).join("");
+  /* フィルタは顔ぶれ (id + 名前) が変わらない限り選択クラスだけ in-place で切り替える。
+     クリックのたびに組み直すとフォーカス / ホバーが飛ぶ。setHtml は中身が変わらな
+     い限り触らず、操作中の箱は後回しにする。 */
+  const chips = [{id:"all",name:"すべて"}, ...bks];
+  patchChips(f, chips, S.filter, chips.map(b =>
+    `<button class="fchip ${S.filter===b.id?"on":""}" onclick="S.filter='${b.id}';renderLaunch()">${esc(b.name)}</button>`).join(""),
+    "launch-filters", renderLaunch);
   const g = $("#launch-grid");
   const ps = S.state.profiles.filter(p => S.filter === "all" || p.backend === S.filter);
   if (!ps.length) {
-    g.innerHTML = `<div class="empty" style="grid-column:1/-1">
+    setHtml(g, `<div class="empty" style="grid-column:1/-1">
       起動プロファイルがありません。<br><br>
-      <button class="primary" onclick="openEditor()">＋ プロファイルを作成</button></div>`;
+      <button class="primary" onclick="openEditor()">＋ プロファイルを作成</button></div>`, "launch-grid", renderLaunch);
     return;
   }
-  g.innerHTML = ps.map(p => {
+  const html = ps.map(p => {
     const b = backendById(p.backend), s = liveOf(p.id);
     const vals = p.values || {};
     const model = vals.model || "";
-    return `<div class="card">
+    return `<div class="card" data-row="${p.id}">
       <div class="row">
         <span class="chip ${esc(p.backend)}">${esc(b ? b.name : p.backend)}</span>
         <b class="grow ellip" style="font-size:15.5px">${esc(p.name)}</b>
@@ -47,7 +52,7 @@ function renderLaunch() {
         <span>ポート</span><span class="v mono">${esc(vals.port || b?.default_port || "-")}</span>
         ${p.note ? `<span>備考</span><span class="v">${esc(p.note)}</span>` : ""}
       </div>
-      ${s ? `<div class="muted" style="margin-top:8px">稼働 ${s.status==="running"||s.status==="starting"?fmtUp(s.uptime):"-"} · PID ${s.pid}${s.ready?' · <a href="http://'+esc(S.state.system.ip)+':'+s.port+'" target="_blank" rel="noopener">API ↗</a>':''}</div>` : ""}
+      ${s ? `<div class="muted" style="margin-top:8px">${s.status==="running"||s.status==="starting"?`<span class="upt" data-sid="${s.id}" data-pfx="稼働 "></span>`:"稼働 -"} · PID ${s.pid}${s.ready?' · <a href="http://'+esc(S.state.system.ip)+':'+s.port+'" target="_blank" rel="noopener">API ↗</a>':''}</div>` : ""}
       <div class="row" style="margin-top:12px">
         ${s
           ? `<button class="danger" onclick="stopSession('${s.id}')" ${S.busy[s.id]?"disabled":""}>${S.busy[s.id]?'<span class="spin"></span>':'<svg class=ic aria-hidden=true><use href=#i-stop /></svg>'} 停止</button>
@@ -62,5 +67,8 @@ function renderLaunch() {
       </div>
     </div>`;
   }).join("");
+  // 行単位: 状態 / 内容が変わったプロファイルのカードだけ組み直す
+  patchRows(g, html, "launch-grid", renderLaunch);
+  patchUptime(g, live);   // 稼働時間は in-place 更新 (毎秒の再構築理由にしない)
 }
 

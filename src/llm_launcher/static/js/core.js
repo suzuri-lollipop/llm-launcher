@@ -11,11 +11,12 @@ const S = {
   hf: undefined,           // HF Hub キャッシュスキャン結果 (遅延取得)
   hdr: {host:"", ip:""},   // 右上アカウントチップの吹き出しに出すホスト情報 (refresh() が更新)
   openLogs: new Set(), logCursor: {}, logBuf: {},   // logBuf: sid -> 蓄積ログ文字列
-  autoScroll: {}, busy: {}, _ssSig: "", _hsSig: "",
+  autoScroll: {}, busy: {}, _ssSig: "", _hsSig: "", _stateSig: undefined,
   pm: {q:"", sort:"updated", backend:"all", batch:false, sel:new Set()},   // 管理画面の状態
   hist: {q:"", status:"all", limit:30},   // セッション履歴画面の状態
   pg: null,              // プレイグラウンド状態 (pgInit() で遅延初期化)
   bench: null,           // ベンチマーク状態 (bmInit() で初期化)
+  coding: null,          // コーディングベンチ状態 (cbInit() で初期化)
   cal: null,             // キャリブレーション状態 (calInit() で初期化)
   ins: null,             // セットアップ状態 (insInit() で初期化)
   mm: null,              // モデル管理状態 (mmInit() で初期化)
@@ -70,6 +71,220 @@ function deferRender(key, fn) {
     fn();
   }, 400);
 }
+/* --- 操作中のオブジェクトは周期再描画に巻き込まない ---------------------------
+   innerHTML の差し替えは要素ごと入れ替えるので、入力中のフォームは消え、選択して
+   読んでいるテキストは解除され、アニメーションの途中なら最初に戻る。これが起きる
+   のは「中身が変わったかどうか」ではなく「ポーリングが来たかどうか」で組み直して
+   いたから。そこで周期再描画は次の順で判断する:
+     (a) 中身が変わらなければ触らない (setHtml / setOptions のキャッシュ)
+     (b) 箱が「操作中」(入力フォーカス / IME 変換 / マウス押下 / テキスト選択 /
+         有限アニメーション進行中) なら、操作が済むまで後回し (deferRender)
+     (c) フォームが未保存の編集を持っていれば (formDirty) 巻き戻さない
+     (d) メーターなど構造が変わらない数値は in-place で書き換え、width トランジ
+         ション (.mbar i) を生かす (meterPatch / patchUptime)
+   初回 (箱が空) は後回しにしない = 画面を空白にしない。ユーザー操作由来の描画
+   (フィルタクリック等) は、操作中の要素を箱が含まないので止まらない。 */
+let _pressing = false, _pressT = 0, _composing = false;
+window.addEventListener("pointerdown", () => { _pressing = true; _pressT = Date.now(); }, {passive: true, capture: true});
+window.addEventListener("pointerup", () => { _pressing = false; }, {passive: true, capture: true});
+window.addEventListener("pointercancel", () => { _pressing = false; }, {passive: true, capture: true});
+window.addEventListener("blur", () => { _pressing = false; _composing = false; });
+window.addEventListener("compositionstart", () => { _composing = true; }, {capture: true});
+window.addEventListener("compositionend", () => { _composing = false; }, {capture: true});
+/* この箱を今組み直すとユーザーの操作 / 閲覧 / アニメーションを壊すか。
+   押下と変換は画面全体で短い時間なので箱を問わず止める (クリックの down→up の
+   間に DOM が入れ替わるとクリック自体が死ぬ)。フォーカス / 選択 / アニメーション
+   は箱の中だけを見る = 関係ない箱の更新は止めない。 */
+function uiBusyIn(el) {
+  if (!el || !el.isConnected) return false;
+  // 押下は通常 down→up の一瞬。ウィンドウ外で離す等で up が届かない事故でも
+  // 更新が永久に止まらないよう 5 秒で期限切れにする (長押しのスクロール drag は
+  // uiScrolling / 選択 drag はテキスト選択側が引き続き守る)
+  if (_pressing && Date.now() - _pressT < 5000) return true;
+  if (_composing) return true;
+  const ae = document.activeElement;
+  if (ae && ae !== document.body && el.contains(ae) &&
+      (ae.matches("input,select,textarea,iframe") || ae.isContentEditable)) return true;
+  const sel = document.getSelection && document.getSelection();
+  if (sel && !sel.isCollapsed && sel.rangeCount && el.contains(sel.anchorNode)) return true;
+  // 有限のアニメーション / トランジションだけ待つ (spin / pulse / blink のような
+  // 無限ループを数えると永遠に更新されなくなる)
+  if (el.getAnimations) {
+    for (const a of el.getAnimations({subtree: true})) {
+      const t = a.effect && a.effect.getTiming && a.effect.getTiming();
+      if (t && t.iterations === Infinity) continue;
+      if (a.playState === "running" || a.playState === "pending") return true;
+    }
+  }
+  return false;
+}
+/* フォームの未保存編集: 描画時の値 (data-base) と今の値が違えば dirty。保存 API が
+   成功したら stampForm で基準を引き直し、リセット系は formReset で基準を捨てる。 */
+const _fieldVal = f => (f.type === "checkbox" || f.type === "radio") ? (f.checked ? "1" : "0") : f.value;
+function formDirty(el) {
+  for (const f of el.querySelectorAll("input,select,textarea")) {
+    if (f.dataset.base !== undefined && _fieldVal(f) !== f.dataset.base) return true;
+  }
+  return false;
+}
+function stampForm(el) {
+  el.querySelectorAll("input,select,textarea").forEach(f => { f.dataset.base = _fieldVal(f); });
+}
+function formReset(el) {
+  el.querySelectorAll("input,select,textarea").forEach(f => { delete f.dataset.base; });
+}
+/* 周期再描画の innerHTML 差し替え口。キャッシュ一致 → 何もしない / 操作中・未保存
+   編集あり → deferRender で後回し (redo は描画関数そのもの。タイマー発火時に最新
+   状態から組み直すので古い HTML を書き戻さない) / それ以外 → スクロール位置と
+   details 開閉を保って差し替え、フォームの基準値を stamp する。 */
+const _htmlCache = new WeakMap();
+function setHtml(el, html, key, redo) {
+  if (!el) return false;
+  if (_htmlCache.get(el) === html) return false;
+  if (el.childElementCount && (uiScrolling() || uiBusyIn(el) || formDirty(el))) {
+    deferRender(key, redo || (() => setHtml(el, html, key, redo)));
+    return false;
+  }
+  const _ls = logScrollSnap(el);
+  el.innerHTML = html;
+  logScrollBack(el, _ls);
+  stampForm(el);
+  _htmlCache.set(el, html);
+  return true;
+}
+/* select の選択肢差し替え口。開いている (フォーカスがある) 間は組み直さない =
+   ドロップダウンが閉じたり選択が飛んだりしない。閉じてから必要なら組み直す。
+   値は前の選択 (pick があればそれ) を選択肢に残っていれば復元する。 */
+function setOptions(sel, html, key, redo, pick) {
+  if (!sel) return false;
+  if (sel._optHtml === html && sel.childElementCount) return false;
+  if (sel.childElementCount && (document.activeElement === sel || uiBusyIn(sel))) {
+    deferRender(key, redo || (() => setOptions(sel, html, key, redo, pick)));
+    return false;
+  }
+  const cur = pick != null ? pick : sel.value;
+  sel.innerHTML = html;
+  if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
+  sel._optHtml = html;
+  return true;
+}
+/* フィルタチップ (.fchip) の列: 顔ぶれ (id + 名前 + 件数) が変わらない限り選択
+   クラスだけ in-place で切り替える。クリックのたびに innerHTML を組み直すと
+   フォーカス / ホバー / 押下のクリック自体が飛ぶ。顔ぶれが変わったときだけ
+   setHtml で差し替える (操作中なら後回し)。 */
+function patchChips(el, chips, onId, html, key, redo) {
+  if (!el) return;
+  const sig = chips.map(c => c.id + ":" + (c.name || "") + ":" + (c.n ?? "")).join("|");
+  if (el._chipSig === sig && el.childElementCount === chips.length) {
+    [...el.children].forEach((c, i) => c.classList.toggle("on", chips[i].id === onId));
+    return;
+  }
+  if (setHtml(el, html, key, redo)) el._chipSig = sig;
+}
+/* メーターの数値を in-place で書き換える (構造 = ラベル・並び・周辺 HTML が同じ
+   ときだけ)。innerHTML ごと組み直すと .mbar i の width トランジションが毎回初期化
+   されて棒が跳ねる。既存ノードの style.width を書き換えれば CSS がそのまま animate
+   する。構造が変わったら false を返すので呼び出し側は setHtml に落とす。 */
+function _meterNorm(s) {
+  return s.replace(/width:\s*[\d.]+%/g, "width:W")
+          .replace(/<span class="r">[\s\S]*?<\/span>/g, '<span class="r">R</span>')
+          // 棒の ok/warn/err クラスも値依存 (meterPct) なので構造比較からは外す
+          .replace(/(<div class="mbar"><i class=")[^"]*(")/g, "$1C$2");
+}
+function _meterValues(oldM, newM) {
+  const or = oldM.querySelector(".m-hd .r"), nr = newM.querySelector(".m-hd .r");
+  if (or && nr && or.innerHTML !== nr.innerHTML) or.innerHTML = nr.innerHTML;
+  const oi = oldM.querySelector(".mbar i"), ni = newM.querySelector(".mbar i");
+  if (oi && ni) {
+    if (oi.style.width !== ni.style.width) oi.style.width = ni.style.width;
+    if (oi.className !== ni.className) oi.className = ni.className;
+  }
+}
+function meterPatch(el, html) {
+  if (!el || !el.childElementCount) return false;
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  if (_meterNorm(el.innerHTML) !== _meterNorm(tpl.innerHTML)) return false;
+  const olds = el.querySelectorAll(".meter"), news = tpl.content.querySelectorAll(".meter");
+  if (!olds.length || olds.length !== news.length) return false;
+  olds.forEach((m, i) => _meterValues(m, news[i]));
+  return true;
+}
+/* --- 自動更新は「必要なオブジェクト」にだけ適用する ---------------------------
+   ポーリングは (1) 構造シグネチャ (stateSig) が変わったときだけ構造更新を配り、
+   (2) 変わらなければ時間駆動のライブ欄 (tickLive: 稼働時間 / タブバッジ) だけを進める。
+   構造更新の中身も一覧は行単位 (patchRows) で、変わった行だけ組み直す。
+   ライブオブジェクトの例: セッション状態バッジ / 稼働時間 / メーター / GPU 統計 /
+   デコード速度チャート / 実行中ジョブの進捗・ログ末尾 / タブバッジ / 時計。
+   非ライブ (イベント駆動) の例: プロファイル / バックエンドカードの固定部 /
+   フィルタ / フォーム / 履歴行の固定部 / 選択肢 / ビューアーの iframe。 */
+/* 構造シグネチャ: 毎ポーリング動く値 (uptime / mem_available_gb / server_time) は
+   除外し、描画に影響するフィールドだけを見る。分バケットを 1 つ含めるのは fmtAgo
+   の「N 分前」表示を 1 分ごとに更新するため (patchRows が変わった行だけ直す)。 */
+function stateSig(st) {
+  if (!st) return "";
+  const sess = (st.sessions || []).map(s => [s.id, s.status, s.ready ? 1 : 0, s.pid, s.port ?? "",
+    s.detached ? 1 : 0, s.mem_state || "", s.oom_suspect ? 1 : 0, s.oom_swift_stop ? 1 : 0,
+    s.oom ? `${s.oom.applied}/${s.oom.denied}/${s.oom.score}/${s.oom.error || ""}` : "",
+    s.error || "", s.finished_at ?? "", s.exit_code ?? "", s.started_at ?? "",
+    s.profile_id, s.backend].join(":")).join("|");
+  const profs = (st.profiles || []).map(p => [p.id, p.name, p.backend, p.updated_at ?? "",
+    JSON.stringify(p.values || {}), JSON.stringify(p.on ?? null), p.note || "",
+    p.extra_args || "", JSON.stringify(p.env || {}), p.cwd || "", p.command || "",
+    p.custom_only ? 1 : 0, p.simple_visible ? 1 : 0].join(":")).join("|");
+  const bks = (st.backends || []).map(b => [b.id, b.name, b.command, b.default_command,
+    b.python_override || "", b.binary_override || "", b.detection.installed ? 1 : 0,
+    b.detection.module_exists ? 1 : 0, b.detection.python || "", b.detection.detail || ""].join(":")).join("|");
+  const sys = st.system || {};
+  return [sys.hostname, sys.ip, sys.version, sys.root, sys.platform,
+          sess, profs, bks, Math.floor(Date.now() / 60000)].join("##");
+}
+/* 時間駆動のライブ欄だけを進める (状態が同じポーリングではこれ以外触らない)。 */
+function tickLive() {
+  renderTabBadges();
+  if (!S.state) return;
+  const live = liveSessions();
+  if (S.tab === "running") patchUptime($("#running-list"), live);
+  else if (S.tab === "launch") patchUptime($("#launch-grid"), live);
+  else if (S.tab === "home") { patchUptime($("#home-live"), live); patchUptime($("#home-recent"), live); }
+}
+/* カード / 行一覧の選択的更新: 各行に data-row キーを付け、キー列が同じなら
+   「変わった行だけ」差し替える。1 台の状態変化が他のカードのホバー / 選択 /
+   ログスクロールを巻き込まない。行の比較はライブ DOM ではなく「前回書いた HTML」
+   と行う (稼働時間 patch / ログ追記などの in-place 更新は差分と数えない)。
+   顔ぶれ (キー + 順序) が変わったときだけ全体差し替え (setHtml と同じガード)。 */
+function patchRows(el, html, key, redo) {
+  if (!el) return false;
+  if (_htmlCache.get(el) === html) return false;
+  if (el.childElementCount && (uiScrolling() || uiBusyIn(el) || formDirty(el))) {
+    deferRender(key, redo || (() => patchRows(el, html, key, redo)));
+    return false;
+  }
+  const tpl = document.createElement("template");
+  tpl.innerHTML = html;
+  const news = [...tpl.content.children];
+  const olds = [...el.children];
+  const keyed = news.length > 0 && news.every(n => n.dataset.row !== undefined);
+  if (keyed && olds.length === news.length &&
+      olds.every((o, i) => o.dataset.row === news[i].dataset.row)) {
+    news.forEach((n, i) => {
+      const o = olds[i], nh = n.outerHTML;
+      if (_htmlCache.get(o) === nh) return;   // 変わっていない行: 触らない
+      const snap = logScrollSnap(o);
+      o.replaceWith(n);
+      logScrollBack(el, snap);              // 差し替えた行のログ位置 / 開閉だけ復元
+      _htmlCache.set(n, nh);
+    });
+  } else {
+    const snap = logScrollSnap(el);
+    el.innerHTML = html;
+    logScrollBack(el, snap);
+    [...el.children].forEach((c, i) => { if (news[i]) _htmlCache.set(c, news[i].outerHTML); });
+  }
+  stampForm(el);
+  _htmlCache.set(el, html);
+  return true;
+}
 
 async function api(path, opts = {}) {
   const r = await fetch(path, {
@@ -110,17 +325,25 @@ function statusBadge(s) {
 }
 
 /* ============================================================= polling */
-let refreshTimer = null, logTimer = null, sysTimer = null, clockTimer = null, benchTimer = null, calTimer = null, insTimer = null;
+let refreshTimer = null, logTimer = null, sysTimer = null, clockTimer = null, benchTimer = null, calTimer = null, insTimer = null, codingTimer = null;
 async function refresh(silent = true) {
   /* ランプ (live-dot) は「接続」専用。描画中の JS 例外を接続エラーと取り違えると、
      サーバーが健全なのに画面が赤く沈んで見える (実事故: 実行中の段バッジ組み立てで
      undefined 参照 → 履歴ごと消灯)。取得と描画を try で分ける。 */
   try {
-    S.state = await api("/api/state");
+    const next = await api("/api/state");
     $("#live-dot").classList.add("on");
-    const sys = S.state.system;
+    const sys = next.system;
     S.hdr = { host: sys.hostname, ip: sys.ip };   // 右上の吹き出しに出す (ヘッダにはアイコンだけ)
     renderAcct();
+    /* 自動更新は必要なオブジェクトにだけ: 構造シグネチャが変わらなければ時間駆動の
+       ライブ欄 (稼働時間 / タブバッジ) だけ進め、構造更新はデータが変わったときだけ
+       配る。ユーザー操作由来 (silent=false) は常に全体を描く。 */
+    const sig = stateSig(next);
+    const unchanged = silent && S._stateSig !== undefined && sig === S._stateSig;
+    S.state = next;
+    S._stateSig = sig;
+    if (unchanged) { tickLive(); return; }
   } catch (e) {
     $("#live-dot").classList.remove("on");
     S.hdr = { err: true }; renderAcct();          // 接続エラーは吹き出しの中と live-dot の赤で示す
@@ -153,17 +376,19 @@ async function refreshVram() {
 }
 function startTimers() {
   clearInterval(refreshTimer); clearInterval(logTimer); clearInterval(sysTimer); clearInterval(benchTimer);
-  clearInterval(calTimer); clearInterval(insTimer);
+  clearInterval(calTimer); clearInterval(insTimer); clearInterval(codingTimer);
   refreshTimer = setInterval(() => refresh(true), 3000);
   logTimer = setInterval(pumpLogs, 1500);
   sysTimer = setInterval(refreshSystem, 4000);
   benchTimer = setInterval(bmPoll, 2500);
   calTimer = setInterval(calPoll, 2500);
   insTimer = setInterval(insPoll, 3000);
+  codingTimer = setInterval(cbPoll, 2500);
   refreshSystem();
   bmPoll();
   calPoll();
   insPoll();
+  cbPoll();
 }
 
 /* ============================================================= side menu (ハンバーガー) */
@@ -186,7 +411,7 @@ document.querySelectorAll("nav#sidemen button[data-tab]").forEach(b => {
 });
 /* ロールで開けるタブ。起動 / 稼働中は常に開ける (メンテナーの基本操作)。users は管理者のみ */
 const TAB_CAP = { home: "dashboard", history: "history", playground: "playground",
-                  bench: "bench", calibrate: "calibrate", setup: "install", models: "install",
+                  bench: "bench", coding: "bench", calibrate: "calibrate", setup: "install", models: "install",
                   profiles: "profiles.edit", backends: "backends.edit" };
 function tabAllowed(tab) {
   if (tab === "users") return AUTH.isAdmin;
@@ -201,7 +426,7 @@ function tabAllowed(tab) {
    直接リンクされたダイアログは列表だけ開いてダイアログ側を捨てる (戻るとアプリ外へ出るため)。
 */
 const ROUTE_TABS = ["home","launch","running","history","profiles","backends",
-                    "users","playground","bench","calibrate","setup","models"];
+                    "users","playground","bench","coding","calibrate","setup","models"];
 let _openDialog = null;   // 開いているダイアログ {kind, arg, mode}
 let _firstApply = true;   // 初回 (ダイヤルアップ / 直接リンク) のルート解決
 function routeUrl(tab, kind, arg, mode) {
@@ -284,6 +509,9 @@ function mountViews() {
 /* ============================================================= render */
 function renderAll(force) {
   if (!S.state) return;
+  // コーディングベンチのビューアー (2 実装並列) だけ画面幅を広げる
+  document.querySelector("main").style.maxWidth =
+    (S.tab === "coding" && S.coding && S.coding.tab === "viewer") ? "1600px" : "";
   renderTabBadges();
   if (S.tab === "home") renderHome();
   if (S.tab === "launch") renderLaunch();
@@ -293,6 +521,7 @@ function renderAll(force) {
   if (S.tab === "backends") renderBackends();
   if (S.tab === "playground") renderPlayground();
   if (S.tab === "bench") renderBench();
+  if (S.tab === "coding") renderCoding();
   if (S.tab === "calibrate") renderCalibrate();
   if (S.tab === "setup") renderSetup();
   if (S.tab === "models") renderModels();
@@ -304,6 +533,11 @@ function renderTabBadges() {
   const f = (S.state.sessions || []).filter(s => s.status === "failed").length;
   const nf = $("#nb-fail");
   nf.classList.toggle("hidden", f === 0); nf.textContent = f;
+  const nc = $("#nb-coding");
+  if (nc) {
+    const cbr = S.coding && S.coding.active ? 1 : 0;
+    nc.classList.toggle("hidden", cbr === 0); nc.textContent = cbr;
+  }
 }
 
 function fmtGB(b){ if(b==null) return "-"; const g=b/1073741824; return g>=10?Math.round(g)+"GB":g.toFixed(1)+"GB"; }
@@ -359,7 +593,7 @@ async function deleteSession(sid) {
 function logPanel(sid, open) {
   return `<div class="logwrap ${open ? "" : "hidden"}" id="logwrap-${sid}">
     <div class="row" style="margin-top:8px">
-      <label class="switch" style="padding:4px 0;min-height:0"><input type="checkbox" ${S.autoScroll[sid]!==false?"checked":""} onchange="S.autoScroll['${sid}']=this.checked"><span class="track"></span><span class="lab" style="font-size:12px">自動スクロール</span></label>
+      <label class="switch" style="padding:4px 0;min-height:0"><input type="checkbox" ${S.autoScroll[sid]!==false?"checked":""} onchange="S.autoScroll['${sid}']=this.checked;this.dataset.base=this.checked?'1':'0'"><span class="track"></span><span class="lab" style="font-size:12px">自動スクロール</span></label>
       <span class="grow"></span>
       <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="downloadLog('${sid}')"><svg class=ic aria-hidden=true><use href=#i-download /></svg> DL</button>
       <button class="ghost" style="min-height:32px;padding:4px 10px;font-size:12px" onclick="copyLog('${sid}')"><svg class=ic aria-hidden=true><use href=#i-clipboard /></svg> コピー</button>
@@ -368,13 +602,16 @@ function logPanel(sid, open) {
     <pre class="logbox" id="logbox-${sid}"></pre>
   </div>`;
 }
-/* ビルド直後: オープン中のログにバッファを復元 (テキスト選択の解除・「読み込み中…」化を防ぐ) */
+/* ビルド直後: オープン中のログにバッファを復元 (テキスト選択の解除・「読み込み中…」化を防ぐ)。
+   既に正しい内容の箱は書き換えない = 行単位更新で差し替わらなかった行の選択を守る。 */
 function restoreLogBuffers() {
   for (const sid of S.openLogs) {
     const el = $(`#logbox-${sid}`);
     if (!el) continue;
-    el.textContent = S.logBuf[sid] ?? "読み込み中…";
-    el.dataset.len = (S.logBuf[sid] || "").length;
+    const buf = S.logBuf[sid] ?? "読み込み中…";
+    if (el.dataset.len === String(buf.length) && el.textContent.length === buf.length) continue;
+    el.textContent = buf;
+    el.dataset.len = buf.length;
     el.scrollTop = el.scrollHeight;
   }
 }

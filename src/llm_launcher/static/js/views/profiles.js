@@ -81,23 +81,29 @@ function renderProfiles() {
   const f = $("#pm-filters");
   const all = S.state.profiles || [];
   const bks = S.state.backends;
-  f.innerHTML = [{id:"all", name:"すべて", n: all.length}, ...bks.map(bb =>
-    ({id: bb.id, name: bb.name, n: all.filter(p => p.backend === bb.id).length}))]
-    .map(bb => `<button class="fchip ${S.pm.backend===bb.id?"on":""}" onclick="S.pm.backend='${bb.id}';renderProfiles()">${esc(bb.name)} <span class="muted" style="color:inherit">${bb.n}</span></button>`).join("");
+  /* フィルタは顔ぶれ + 件数が変わらない限り選択クラスだけ in-place (クリックの
+     たびに組み直さない)。グリッドは setHtml = 変更なしなら触らない / 操作中
+     (チェックボックスへのフォーカス・テキスト選択・アニメーション) は後回し。 */
+  const chips = [{id:"all", name:"すべて", n: all.length}, ...bks.map(bb =>
+    ({id: bb.id, name: bb.name, n: all.filter(p => p.backend === bb.id).length}))];
+  patchChips(f, chips, S.pm.backend, chips.map(bb =>
+    `<button class="fchip ${S.pm.backend===bb.id?"on":""}" onclick="S.pm.backend='${bb.id}';renderProfiles()">${esc(bb.name)} <span class="muted" style="color:inherit">${bb.n}</span></button>`).join(""),
+    "pm-filters", renderProfiles);
   $("#batch-bar").classList.toggle("hidden", !S.pm.batch);
   const ps = pmFilterSort(all);
   if (!ps.length) {
-    g.innerHTML = `<div class="empty">${all.length ? "条件に合うプロファイルがありません。" :
-      "プロファイルを作成すると、ここに・起動タブに並びます。<br><br><button class='primary' onclick='openProfileWizard()'>ウィザードで作成 (調整付き)</button> <button class='primary' onclick='openEditor()'>＋ プロファイルを作成</button>"}</div>`;
+    setHtml(g, `<div class="empty">${all.length ? "条件に合うプロファイルがありません。" :
+      "プロファイルを作成すると、ここに・起動タブに並びます。<br><br><button class='primary' onclick='openProfileWizard()'>ウィザードで作成 (調整付き)</button> <button class='primary' onclick='openEditor()'>＋ プロファイルを作成</button>"}</div>`,
+      "profiles-grid", renderProfiles);
     return;
   }
-  g.innerHTML = ps.map(p => {
+  const html = ps.map(p => {
     const b = backendById(p.backend), s = liveOf(p.id);
     const v = p.values || {};
     const model = v.model || v.model_path || "";
     const u = profUsage(p.id);
     const port = v.port || b?.default_port || "";
-    return `<div class="card">
+    return `<div class="card" data-row="${p.id}">
       <div class="row">
         ${S.pm.batch ? `<input type="checkbox" class="pmsel" data-pid="${p.id}" style="width:18px;height:18px;accent-color:var(--acc)" ${S.pm.sel.has(p.id)?"checked":""} onchange="toggleProfileSel('${p.id}',this.checked)">` : ""}
         <span class="chip ${esc(p.backend)}">${esc(b ? b.name : p.backend)}</span>
@@ -126,6 +132,8 @@ function renderProfiles() {
       </div>
     </div>`;
   }).join("");
+  // 行単位: 使用履歴 / 状態が変わったカードだけ組み直す (一括選択中の他のカードを守)
+  patchRows(g, html, "profiles-grid", renderProfiles);
   if (S.pm.batch) syncBatchBar();
 }
 function toggleBatch() {
@@ -136,10 +144,13 @@ function toggleBatch() {
 }
 function toggleProfileSel(pid, on) {
   if (on) S.pm.sel.add(pid); else S.pm.sel.delete(pid);
+  // 選択は S.pm.sel が正 = 今のチェック状態を基準に (formDirty の誤認防止)
+  stampForm($("#profiles-grid"));
   syncBatchBar();
 }
 function selectAllProfiles(on) {
   pmFilterSort(S.state.profiles || []).forEach(p => on ? S.pm.sel.add(p.id) : S.pm.sel.delete(p.id));
+  stampForm($("#profiles-grid"));
   renderProfiles();
 }
 function syncBatchBar() {

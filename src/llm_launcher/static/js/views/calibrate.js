@@ -49,8 +49,8 @@ function calInit() {
   if (S.cal) return;                        // 何度呼ばれても状態を失わない (jobs / logs)
   let d = {};
   try { d = JSON.parse(localStorage.getItem(CAL_KEY) || "{}") || {}; } catch { d = {}; }
-  S.cal = { jobs: [], active: null, busy: false, supported: [], _pSig: "", _ch: "", _recv: 0,
-            logCursor: {}, logs: {}, openLog: "", logError: "", scSig: "" };
+  S.cal = { jobs: [], active: null, busy: false, supported: [], _ca: "", _ch: "", _recv: 0,
+            logCursor: {}, logs: {}, openLog: "", logError: "" };
   if (d.profile) { $("#cal-profile").value = d.profile;
                    if ($("#sc-profile")) $("#sc-profile").value = d.profile; }
   if (d.restart === true) { $("#cal-restart").checked = true;
@@ -263,20 +263,16 @@ function renderCalibrate() {
   calInit();
   const ps = (S.state?.profiles || []).filter(p => calSupports(p.backend));
   const sel = $("#cal-profile");
-  const cur = sel.value;
-  const sig = ps.map(p => p.id + ":" + p.name).join("|");
-  if (sig !== S.cal._pSig || ![...sel.options].some(o => o.value === cur)) {
-    S.cal._pSig = sig;
-    sel.innerHTML = ps.length
-      ? ps.map(p => `<option value="${p.id}">${esc(p.name)} · ${esc(backendById(p.backend)?.name || p.backend)}</option>`).join("")
-      : `<option value="">対象プロファイルがありません (Maya / Strata / FreeToken)</option>`;
-    if (cur) sel.value = cur;
-  }
+  // setOptions = 顔ぶれが変わらなければ触らない / ドロップダウンを開いている間は組み直さない
+  setOptions(sel, ps.length
+    ? ps.map(p => `<option value="${p.id}">${esc(p.name)} · ${esc(backendById(p.backend)?.name || p.backend)}</option>`).join("")
+    : `<option value="">対象プロファイルがありません (Maya / Strata / FreeToken)</option>`, "cal-profile", renderCalibrate);
   const p = ps.find(x => x.id === sel.value) || null;
   const sess = p ? liveOf(p.id) : null;
   const st = $("#cal-prof-state");
   st.className = "badge " + (sess ? (sess.ready ? "ok" : "warn") : "");
-  st.innerHTML = `<span class="dot"></span>` + (sess ? (sess.ready ? `稼働中 :${sess.port || "-"}` : "起動中…") : "未起動");
+  const sth = `<span class="dot"></span>` + (sess ? (sess.ready ? `稼働中 :${sess.port || "-"}` : "起動中…") : "未起動");
+  if (st.innerHTML !== sth) st.innerHTML = sth;
   $("#cal-prof-note").textContent = !p ? "Maya / Strata / FreeToken のプロファイルを作成してください。"
     : sess ? "実行前に launcher がこのサーバーを停止します (GPU 独占 / その後は再起動は手動)"
     : ($("#cal-restart").checked ? "未起動 → 調整完了後に自動起動します。"
@@ -293,15 +289,26 @@ function renderCalibrate() {
 }
 function renderCalActive(run) {
   const el = $("#cal-active");
-  if (!run) { el.innerHTML = ""; return; }
+  if (!run) { setHtml(el, "", "cal-act", () => renderCalActive((S.cal.jobs || []).find(r => r.id === S.cal.active) || null)); return; }
   // スクロール中は組み直しを後回し (調整値表の横スクロールバーを掴んだままにできる)
   if (uiScrolling() && el.childElementCount) { deferRender("cal-act", () => renderCalActive(run)); return; }
+  // テキスト選択して読んでいる間 / アニメーション中も後回し (操作中のオブジェクトを巻き込まない)
+  if (uiBusyIn(el) && el.childElementCount) { deferRender("cal-act", () => renderCalActive(run)); return; }
+  const html = calActiveCard(run);
+  // ライブ更新は実行中だけ。完了済みカードは内容が変わらない限り組み直さない
+  if (html === S.cal._ca && el.childElementCount) return;
+  S.cal._ca = html;
   const _ls = logScrollSnap(el);
+  el.innerHTML = html;
+  logScrollBack(el, _ls);
+}
+/* 実行中カードの HTML (完了後は固定 = キャッシュで書き換えスキップ) */
+function calActiveCard(run) {
   const skew = run.status === "running" || run.status === "queued" ? (Date.now() / 1000) - (S.cal._recv || 0) : 0;
   const secs = (run.finished_at ? run.finished_at : Date.now() / 1000) - (run.started_at || 0);
   const logs = S.cal.logs[run.id] || "";
   const tail = logs.split("\n").filter(Boolean).slice(-25).join("\n");
-  el.innerHTML = `<div class="card" style="border-color:#c6dafc">
+  return `<div class="card" style="border-color:#c6dafc">
     <div class="row">
       ${calStatusBadge(run)}
       <b class="grow ellip" style="font-size:15px">${esc(run.profile_name)}</b>
@@ -321,7 +328,6 @@ function renderCalActive(run) {
     ${run.report ? calSettingsTable(run.report, "a:" + run.id) : ""}
     <div class="logwrap"><pre class="logbox" data-logkey="k:${esc(run.id)}" style="max-height:260px">${esc(tail || "(ログ待ち…)")}</pre></div>
   </div>`;
-  logScrollBack(el, _ls);
 }
 function renderCalHistory(active) {
   const el = $("#cal-history");
@@ -333,9 +339,11 @@ function renderCalHistory(active) {
   }
   // スクロール中は組み直しを後回し (調整値表の横スクロールバーを掴んだままにできる)
   if (uiScrolling() && el.childElementCount) { deferRender("cal-hist", () => renderCalHistory(active)); return; }
-  const html = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>` + runs.map(r => {
+  if (uiBusyIn(el) && el.childElementCount) { deferRender("cal-hist", () => renderCalHistory(active)); return; }
+  const head = `<h2 class="view-title" style="margin-top:18px">履歴 (${runs.length})</h2>`;
+  const rowsHtml = runs.map(r => {
     const open = S.cal.open === r.id;
-    return `<div class="card">
+    return `<div class="card" data-row="${esc(r.id)}">
       <div class="row">
         ${calStatusBadge(r)}
         <b class="grow ellip" style="font-size:14.5px;cursor:pointer" onclick="calToggle('${r.id}')">${esc(r.profile_name)}</b>
@@ -360,11 +368,15 @@ function renderCalHistory(active) {
         : calLogBox(r.id, 320)}</div>` : ""}
     </div>`;
   }).join("");
+  const html = head + rowsHtml;
   // 中身が変わらなければ組み直さない (ログ本文が増えたときだけ組み直す = 横位置が飛ぶのはそのとき)
   if (html === S.cal._ch && el.childElementCount) return;
   S.cal._ch = html;
   const _ls = logScrollSnap(el);                // 組み直したときだけ位置・開閉を復元
-  el.innerHTML = html;
+  // 見出しと行を分離: 変わった行だけ組み直す (patchRows が行のログ位置も復元)
+  if (!el.querySelector("[data-rows]")) el.innerHTML = `<div data-head></div><div data-rows></div>`;
+  setHtml(el.querySelector("[data-head]"), head, "cal-hist-head", () => renderCalHistory(active));
+  patchRows(el.querySelector("[data-rows]"), rowsHtml, "cal-hist", () => renderCalHistory(active));
   logScrollBack(el, _ls);
 }
 

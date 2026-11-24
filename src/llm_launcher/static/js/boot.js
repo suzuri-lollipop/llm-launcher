@@ -5,6 +5,7 @@
 mountViews();                    // VIEWS → <main>。全ての DOM 配線より先に必須
 pgInit();
 bmInit();
+cbInit();
 calInit();
 insInit();
 mmInit();

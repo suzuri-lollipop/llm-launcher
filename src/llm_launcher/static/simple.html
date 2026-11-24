@@ -203,6 +203,32 @@ const $ = s => document.querySelector(s);
 let DATA = null, TIMER = null, KNOWN = [], DISMISS = 0;
 const BUSY = {};
 let MY_ROLE = "user";
+/* 5 秒ごとの自動更新に見ているもの / 押しているものを巻き込まない:
+   (a) 中身が変わらなければ書き換えない (イコライザ / 登場アニメーションが毎周期
+       最初に戻る・テキスト選択が解除されるのを防ぐ)
+   (b) マウス押下中は組み直さない (down→up の間に DOM が入れ替わるとクリックが死ぬ)。
+       押下が済んでから保留していた最新の HTML を 1 回だけ書く。 */
+let _pressing = false;
+window.addEventListener("pointerdown", () => { _pressing = true; }, {passive: true, capture: true});
+window.addEventListener("pointerup", () => { _pressing = false; }, {passive: true, capture: true});
+window.addEventListener("pointercancel", () => { _pressing = false; }, {passive: true, capture: true});
+window.addEventListener("blur", () => { _pressing = false; });
+const _htmlCache = new WeakMap();
+function setHtml(el, html) {
+  if (!el) return;
+  if (_pressing && el.childElementCount) {
+    el._pending = html;
+    if (!el._defer) el._defer = setTimeout(() => {
+      el._defer = 0;
+      const h = el._pending; delete el._pending;
+      if (h != null) setHtml(el, h);
+    }, 300);
+    return;
+  }
+  if (_htmlCache.get(el) === html) return;
+  el.innerHTML = html;
+  _htmlCache.set(el, html);
+}
 /* 全画面プレイヤー (開いているサーバーの profile_id、null = 一覧)。
    sessionStorage に何も無い = 未選択なので「1 台だけ稼働中」なら自動で全画面に
    展開する (稼働中にリロードした人が一覧から押し直す導線を無くすため)。「← 一覧に
@@ -319,10 +345,10 @@ function render() {
   pickFocus(srvs);
   note.classList.toggle("hidden", srvs.length > 0);
   if (!srvs.length) {
-    note.innerHTML = `<div style="font-size:21px;font-weight:800">利用できるサーバーが設定されていません</div>
-      <div class="muted" style="margin-top:8px">管理者に「利用できるよう設定してください」と依頼してください</div>`;
+    setHtml(note, `<div style="font-size:21px;font-weight:800">利用できるサーバーが設定されていません</div>
+      <div class="muted" style="margin-top:8px">管理者に「利用できるよう設定してください」と依頼してください</div>`);
   }
-  $("#list").innerHTML = srvs.map(s => {
+  setHtml($("#list"), srvs.map(s => {
     const st = STATE[s.state] || STATE.stopped, live = s.state !== "stopped";
     const busy = BUSY[s.profile_id], pid = esc(s.profile_id);
     return `<div class="card srv tap" tabindex="0" role="button" aria-label="${esc(s.profile_name)} を大きく表示"
@@ -335,9 +361,9 @@ function render() {
         ? `<button class="stop" onclick="event.stopPropagation();stopSrv('${pid}')" ${busy ? "disabled" : ""}>${I0("stop")} 停止する</button>`
         : `<button class="go" onclick="event.stopPropagation();startSrv('${pid}')" ${busy ? "disabled" : ""}>${I0("play")} 起動する</button>`}
     </div>`;
-  }).join("");
-  $("#foot").innerHTML = "カードをタップすると大きく表示します ・ 5 秒ごとに自動更新します"
-    + (MY_ROLE && MY_ROLE !== "user" ? ' ・ <a href="/">管理画面</a>' : "");
+  }).join(""));
+  setHtml($("#foot"), "カードをタップすると大きく表示します ・ 5 秒ごとに自動更新します"
+    + (MY_ROLE && MY_ROLE !== "user" ? ' ・ <a href="/">管理画面</a>' : ""));
   renderPlayer();
   renderAlert();
 }
@@ -350,10 +376,10 @@ function artHtml(busy, state) {
 function renderPlayer() {
   const el = $("#player");
   const s = (DATA.servers || []).find(x => x.profile_id === FOCUS);
-  if (!s) { el.classList.add("hidden"); el.innerHTML = ""; document.body.classList.remove("plock"); return; }   // 一覧側へ戻る
+  if (!s) { el.classList.add("hidden"); setHtml(el, ""); document.body.classList.remove("plock"); return; }   // 一覧側へ戻る
   const st = STATE[s.state] || STATE.stopped, live = s.state !== "stopped";
   const busy = BUSY[s.profile_id], cls = busy ? "warn" : st[0], pid = esc(s.profile_id);
-  el.innerHTML = `
+  setHtml(el, `
     <div class="p-top"><span>${esc(DATA.hostname || "")}</span>
       <button class="small" onclick="doLogout()">ログアウト</button></div>
     <div class="p-name">${esc(s.profile_name)}</div>
@@ -367,7 +393,7 @@ function renderPlayer() {
         ? `<button class="stop" onclick="stopSrv('${pid}')" ${busy ? "disabled" : ""}>${I0("stop")} 停止する</button>`
         : `<button class="go" onclick="startSrv('${pid}')" ${busy ? "disabled" : ""}>${I0("play")} 起動する</button>`}
       <button class="back" onclick="closePlayer()">← 一覧に戻る</button>
-    </div>`;
+    </div>`);
   el.classList.remove("hidden");
   document.body.classList.add("plock");
 }
@@ -385,7 +411,7 @@ function renderAlert() {
   const fresh = alerts.some(a => !KNOWN.includes(a.id));
   KNOWN = alerts.map(a => a.id);
   if (!alerts.length) {
-    el.classList.add("hidden"); el.innerHTML = ""; DISMISS = 0;
+    el.classList.add("hidden"); setHtml(el, ""); DISMISS = 0;
     if (beep._loop) { clearInterval(beep._loop); beep._loop = null; }
     return;
   }
@@ -395,7 +421,7 @@ function renderAlert() {
   }
   if (fresh) { beep(); if (!beep._loop) beep._loop = setInterval(beep, 30000); }
   const a = alerts[0], t = alertText(a);
-  el.innerHTML = `
+  setHtml(el, `
     <div class="big">${I0("alert")} ${esc(t[0])}</div>
     <div class="mid">${esc(t[1])}</div>
     ${DATA.contact ? `<div class="contact">${I0("phone")} ${esc(DATA.contact)}</div>`
@@ -405,7 +431,7 @@ function renderAlert() {
       <button class="small" onclick="dismissAlert()">今は様子を見るだけ</button>
     </div>
     ${a.detail ? `<details style="max-width:640px"><summary class="muted" style="cursor:pointer">管理者用 詳細</summary>
-      <div class="tech">${esc(a.detail)}</div></details>` : ""}`;
+      <div class="tech">${esc(a.detail)}</div></details>` : ""}`);
   el.classList.remove("hidden");
 }
 function dismissAlert() { DISMISS = Date.now() + 90000; $("#alert").classList.add("hidden"); }

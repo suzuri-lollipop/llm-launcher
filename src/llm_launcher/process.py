@@ -30,6 +30,7 @@ PRESSURE_LOG_COOLDOWN = 120.0
 VIA_SIMPLE = "simple"        # /simple の「▶ 起動する」ボタン
 VIA_UI = "ui"                # 管理画面の起動 / 再起動
 VIA_BENCH = "bench"          # ベンチマークの自動起動 (警告には出さない)
+VIA_CODING = "coding"        # コーディングベンチマークの自動起動 (警告には出さない)
 
 
 def pid_alive(pid: int) -> bool:
