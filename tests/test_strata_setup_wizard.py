@@ -386,9 +386,12 @@ def test_build_argv_whitelist_and_rejection(monkeypatch, tmp_path: Path):
     mod = _seed_tables(monkeypatch, mod)
     argv, cfg = strata_setup.build_argv(mod, {"family": "qwen", "model": "Q2_0",
                                               "context": 131072, "vision": "gpu"})
-    # --yes (全質問が既定確定 = 完全非対話) + --no-start / --no-browser は常に付ける
+    # --yes (全質問が既定確定 = 完全非対話) + --no-start / --no-browser は常に付ける。
+    # --data-dir は launcher の data/ (gitignore 済み) 配下を常に指す
     assert argv == ["setup.py", "--family", "qwen", "--model", "Q2_0", "--context", "131072",
-                    "--vision", "gpu", "--yes", "--no-start", "--no-browser"]
+                    "--vision", "gpu",
+                    "--data-dir", str(tmp_path / "data" / "Strata-data"),
+                    "--yes", "--no-start", "--no-browser"]
     assert cfg == "strata-q2_0.json"
     # vision "" = 渡さない (非対応パック)。tag 付き family は設定名にも効く
     argv2, cfg2 = strata_setup.build_argv(mod, {"family": "deepseek41", "model": "IST-DAS-2.00bpw",
@@ -588,6 +591,7 @@ def test_start_strata_model_plans_single_model_job(monkeypatch, tmp_path: Path):
     assert str(argv[0]).endswith(str(Path(".venv/bin/python")))
     assert argv[1:] == ["setup.py", "--family", "qwen", "--model", "Q2_0",
                         "--context", "131072", "--vision", "gpu",
+                        "--data-dir", str(tmp_path / "data" / "Strata-data"),
                         "--yes", "--no-start", "--no-browser"]
     # 実行は .venv の python — setup.py が自らの pip_install で .venv を前提にするため
     assert str(mod / ".venv" / "bin" / "python") in str(argv[0])
@@ -788,6 +792,7 @@ def test_build_argv_hy4_inkling(monkeypatch, tmp_path: Path):
                                               "context": 131072, "vision": "no"})
     assert argv == ["setup.py", "--family", "hy4-flash", "--model", "SQ-64",
                     "--context", "131072", "--vision", "no",
+                    "--data-dir", str(tmp_path / "data" / "Strata-data"),
                     "--yes", "--no-start", "--no-browser"]
     assert cfg == "strata-hy4-flash-sq-64.json"
     # vision "" = 渡さない = 純正既定 ON (両家系とも画像既定 ON)。

@@ -521,13 +521,14 @@ def installed_configs(module_dir: Path) -> list[dict[str, Any]]:
     return out
 
 
-def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
+def build_argv(module_dir: Path, opts: dict[str, Any], *,
+               root: Path | None = None) -> tuple[list[str], str]:
     """UI の選択を純正 setup.py の argv と、できるはずの設定 JSON 名に直す。
 
     ホワイトリスト: family / model は load_options() が submodule から読んだ表のキー、
     context は表の CONTEXTS の値、vision は VISIONS。どれか一つでも外れたら
     InstallError 相当の ValueError を投げる (argv 化の前に必ず here を通すこと)。
-    """
+    root は launcher のプロジェクトルート (モデル置き場 data/Strata-data の解決用)。"""
     fam = str(opts.get("family") or "").strip()
     model = str(opts.get("model") or "").strip()
     vision = str(opts.get("vision") or "").strip().lower()
@@ -599,6 +600,14 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
                 if not fams[fam].get("multi_gpu", True):
                     raise _no_multi()
                 argv += ["--gpus", ",".join(str(i) for i in sel)]
+    # モデル置き場は launcher の data/ (gitignore 済み) 配下へ明示指定する。
+    # setup.py は settings の data_dir にも記録するので、次回以降もそこを見る。
+    if root is not None:
+        r = root
+    else:
+        r = (module_dir.parent.parent.parent if module_dir.parent.name == "fork"
+             else module_dir.parent.parent)
+    argv += ["--data-dir", str(r / "data" / "Strata-data")]
     argv += ["--yes", "--no-start", "--no-browser"]
     tag = str(fams[fam].get("tag") or "")
     config_name = f"strata-{(tag + model).lower()}.json"

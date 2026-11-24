@@ -354,8 +354,10 @@ def test_build_argv_whitelist_and_rejection(monkeypatch, tmp_path: Path):
     argv, cfg = maya_setup.build_argv(mod, {"family": "glm", "model": "Maya-S24",
                                             "context": 32768, "vision": "off"})
     # --yes (全質問が既定確定) + --no-start + --plain (TUI でない) + --download-model は常に付ける。
-    # GLM は MTP 既定で計測が起きないので --drafting は付けない
+    # GLM は MTP 既定で計測が起きないので --drafting は付けない。
+    # --models-dir は launcher の data/ (gitignore 済み) 配下を常に指す
     assert argv == ["maya.py", "--model", "Maya-S24", "--context", "32768", "--no-vision",
+                    "--models-dir", str(tmp_path / "data" / "Maya-data" / "models"),
                     "--yes", "--no-start", "--plain", "--download-model"]
     assert cfg == "maya-maya-s24.json"
     # vision "" / "on" = 渡さない (純正既定 ON)。DeepSeek は家系名 + --ds4-quant。
@@ -586,6 +588,7 @@ def test_start_maya_model_plans_single_model_job(monkeypatch, tmp_path: Path):
     assert argv[1:] == ["maya.py", "--model", "DeepSeek-V4.1-Flash-1017",
                         "--ds4-quant", "gguf-q8", "--context", "262144",
                         "--drafting", "off",
+                        "--models-dir", str(tmp_path / "data" / "Maya-data" / "models"),
                         "--yes", "--no-start", "--plain", "--download-model"]
 
 
