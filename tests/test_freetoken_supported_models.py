@@ -79,6 +79,9 @@ def test_parse_real_fork_doc():
     repos = {m["repo_id"] for m in out}
     assert "Qwen/Qwen3.8-Flash-Next-FP8" in repos
     assert "deepseek-ai/DeepSeek-V4.1-Flash" in repos
+    # Inkling-2-Mini (NVFP4 + 公式 DSpark drafter 同梱 / mainline GGUF)
+    assert "thinkingmachines/Inkling-2-Mini" in repos
+    assert "unsloth/Inkling-2-Mini-GGUF" in repos
     # Image input 表の Family 行は混ざらない (その表に HF リンクはない)
     assert len(out) >= 10
 

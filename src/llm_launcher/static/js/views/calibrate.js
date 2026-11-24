@@ -37,6 +37,14 @@ VIEWS.calibrate = `
    実行前に同じプロファイルのサーバーを launcher が停止して GPU を独占する。
    実行は 1 件ずつ (バックエンドが 409 で拒否)、中断はプロセスグループごと SIGTERM。 */
 const CAL_KEY = "llm-laun…cal.v1";
+/* Inkling-2-Mini 判定 (表示の出し分け用): 投機現在値が dspark、またはモデル参照に
+   inkling を含む (起動 JSON 主体モードでは config のファイル名がモデル名由来)。
+   校正の実判定はサーバー側 (calibrate._ft_phase_a_spec) が起動 JSON / config.json で行う */
+const ftIsInkling = (v, name) => {
+  v = v || {};
+  return String(v.speculative_algorithm || "") === "dspark"
+    || /inkling/i.test(`${v.model_path || ""} ${v.config || ""} ${v.served_model_name || ""} ${name || ""}`);
+};
 function calInit() {
   if (S.cal) return;                        // 何度呼ばれても状態を失わない (jobs / logs)
   let d = {};
@@ -112,7 +120,9 @@ async function calRun(pid, restart, opts) {
                `${b?.name || p.backend}: この PC 向け調整を実行します (${t}, PC はその間占有されます)。\n` +
                (p.backend === "strata" ? "設定は backup + smoke test 付きで適用されます。\n" : "") +
                (isMulti ? "none / mixed / piped / piped+short-first の 4 腕をプロファイルの全並列数 (decode / 短時間差到着の 2 プローブ) で実測し、合算 tok/s が最も高い腕を選びます (stall は悪化ガード)。勝者の並行ノブ一式 (不要なら明示的 0) を起動構成へ書き戻します。\n"
-                        : isFt ? "none / mtp(+chain) / lookup の自動選定 + 内部ノブの A/B まで全部実測し、勝者の --speculative と env を起動構成へ自動記載します。\n" : "") +
+                        : isFt ? (ftIsInkling(p.values, p.name)
+                            ? "none / DSpark (Inkling-2-Mini 公式 drafter、TP1 専用) の自動選定 + 内部ノブの A/B まで全部実測し、勝者の --speculative-algorithm と env を起動構成へ自動記載します。\n"
+                            : "none / mtp(+chain) / lookup の自動選定 + 内部ノブの A/B まで全部実測し、勝者の --speculative と env を起動構成へ自動記載します。\n") : "") +
                "続行しますか?";
   if (!(opts && opts.auto) && !confirm(warn)) return false;
   d.busy = true; renderCalibrate(); renderSetup();
@@ -207,8 +217,8 @@ const CAL_STEP_LABEL = {create: "profile 作成", measure: "measure", review: "r
                         calibrate: "実測調整", speed: "drafter 速度計測",
                         sweep: "MTP sweep", "calibrate-lookup": "lookup sweep",
                         "calibrate-multi": "multi 並行校正",
-                        auto: "自動選定", "phase-mtp": "MTP 実測", "phase-lookup": "lookup 実測",
-                        tournament: "決勝"};
+                        auto: "自動選定", "phase-mtp": "MTP 実測", "phase-dspark": "DSpark 実測",
+                        "phase-lookup": "lookup 実測", tournament: "決勝"};
 const calStepLabel = name => CAL_STEP_LABEL[name] || name;
 function calStepChips(job) {
   const steps = job.steps || [];
@@ -243,7 +253,9 @@ function calPreview(p) {
     return "maya.sh --calibrate --no-start --config <maya-<model>.json>  (起動せず実測 → config へ書き戻し)";
   if (p.backend === "strata" || p.backend === "strata-fork")
     return "strata.py engine calibrate --profile <保存profile> --measure --exclusive --out <report.json> → --review-result → --apply-result";
-  return "single: MTP / lookup を実測 (auto 選定) → 勝者の --speculative と env を書き戻し / "
+  return (ftIsInkling(p.values, p.name)
+       ? "single: DSpark (Inkling-2-Mini 公式 drafter) / none を実測 (auto 選定) → 勝者の --speculative-algorithm と env を書き戻し / "
+       : "single: MTP / lookup を実測 (auto 選定) → 勝者の --speculative と env を書き戻し / ")
        + "multi: none・mixed・piped・piped+short-first を全並列数の 2 プローブで実測 → "
        + "合算 tok/s 優先で選定 (stall は悪化ガード) → 勝者の並行ノブ一式 (不要なら明示的 0) を起動構成 (profile / 起動 JSON) へ書き戻し";
 }

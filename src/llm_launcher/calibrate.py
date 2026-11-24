@@ -197,6 +197,12 @@ SPEC_ALGO_FLAG = "--speculative-algorithm"
 # 旧 --speculative (none/mtp/lookup) は fork の upstream 統合で廃止。読み取りは両綴り、
 # 書き込みは現行フラグのみ。lookup は現行エンジンに無いのでサーバーは off で動かす
 _SPEC_FLAGS = ("--speculative", "--speculative-algorithm", "--spec-algo")
+# fork calibrate_multi の SPEC_FLAGS 相当: ツールは投機次元全体を所有するので、
+# 勝者適用はアルゴリズムだけでなくドラフトパス / ステップ数 / トークンマップも剥がす
+_MULTI_SPEC_FLAGS = _SPEC_FLAGS + (
+    "--speculative-num-steps", "--spec-num-steps",
+    "--speculative-draft-model-path", "--spec-draft-model",
+    "--speculative-token-map", "--spec-token-map")
 
 
 def _with_spec(argv: list[str], mode: str) -> list[str]:
@@ -213,7 +219,7 @@ def _with_spec(argv: list[str], mode: str) -> list[str]:
             continue
         out.append(argv[i])
         i += 1
-    if mode in ("mtp", "dflash"):
+    if mode in ("mtp", "dflash", "dspark"):
         out += [SPEC_ALGO_FLAG, mode]
     return out
 
@@ -222,9 +228,13 @@ def ft_grid(speculative: str) -> list[tuple[str, list[str]]]:
     """プロファイルの speculative モードに対する実測グリッド。
 
     chain の 2 キーは --speculative-algorithm mtp のリクエストでしか発動しない
-    (FREETOKEN_MTP_LOOKUP_CHAIN は MTP verify 専用) ので、mtp 以外では測らない。"""
+    (FREETOKEN_MTP_LOOKUP_CHAIN は MTP verify 専用) ので、mtp 以外では測らない。
+    dspark (Inkling-2-Mini) に MTP ゲート env は無い — 唯一のノブ IK2_DRAFT_CTX は
+    ドラフト品質 / VRAM のトレードオフで速度ゲートではないため、基準のみ実測する。"""
     if speculative == "mtp":
         return FREETOKEN_MTP_GRID + FREETOKEN_MTP_CHAIN_GRID
+    if speculative == "dspark":
+        return []
     return list(FREETOKEN_MTP_GRID)
 
 
@@ -816,8 +826,10 @@ class CalibrationManager:
         copy_probe = spec_mode == "mtp"   # chain はコピ型テキストでしか発動しない
         winner = {param: (str(base_env.get(param) or "").strip() or FREETOKEN_MTP_DEFAULTS[param])
                   for param, _vals in grid}
-        if not str(base_env.get("FREETOKEN_MTP_RESUME_AFTER") or "").strip():
+        if "FREETOKEN_MTP_ACCEPT_WINDOW" in winner and not str(
+                base_env.get("FREETOKEN_MTP_RESUME_AFTER") or "").strip():
             # 未設定時の実効値は ACCEPT_WINDOW 追従なので、実効値で正規化する
+            # (dspark はグリッドが空 = MTP ノブを持たないので対象外)
             winner["FREETOKEN_MTP_RESUME_AFTER"] = winner["FREETOKEN_MTP_ACCEPT_WINDOW"]
         cells: list[dict[str, Any]] = []
 
@@ -876,7 +888,7 @@ class CalibrationManager:
 
     def _ft_speculative(self, profile: dict[str, Any]) -> str:
         """プロファイルの現在の投機モード (起動 JSON が argv の正)。旧 --speculative の
-        綴りも読む (移行前の起動 JSON 対策)。値は mtp/dflash/lookup/none/空 のラベル。"""
+        綴りも読む (移行前の起動 JSON 対策)。値は mtp/dflash/dspark/lookup/none/空 のラベル。"""
         launch = load_launch_json(self.root, profile)
         if launch is not None:
             argv = [str(a) for a in launch.get("argv") or []]
@@ -886,6 +898,35 @@ class CalibrationManager:
             return ""
         values = profile.get("values") or {}
         return str(values.get("speculative_algorithm") or values.get("speculative") or "").strip().lower()
+
+    def _ft_phase_a_spec(self, profile: dict[str, Any]) -> str:
+        """auto フェーズ A の投機モード。Inkling-2-Mini は MTP ヘッドが無く公式 DSpark
+        drafter (mtp.safetensors) を同梱するので、mtp の代わりに dspark を実測する。
+        判定はプロファイルの現在の投機値、または checkpoint の model_type (inkling2_loop)。
+        それ以外は mtp (ヘッドの無いモデルでは基準セルが起動失敗して除外される)。"""
+        if self._ft_speculative(profile) == "dspark":
+            return "dspark"
+        mp = ""
+        with contextlib.suppress(ValueError):
+            launch = load_launch_json(self.root, profile)
+            if launch is not None:
+                argv = [str(a) for a in launch.get("argv") or []]
+                mp = next((argv[i + 1] for i, t in enumerate(argv)
+                           if t in ("--model-path", "--model") and i + 1 < len(argv)), "")
+        if not mp.strip():
+            mp = str((profile.get("values") or {}).get("model_path") or "")
+        if not mp.strip():
+            return "mtp"
+        p = Path(mp.strip())
+        if not p.is_absolute():
+            p = self.root / p
+        try:
+            cfg = json.loads((p / "config.json").read_text("utf-8"))
+        except (OSError, ValueError):
+            return "mtp"
+        if isinstance(cfg, dict) and cfg.get("model_type") == "inkling2_loop":
+            return "dspark"
+        return "mtp"
 
     def _ft_launch_update(self, profile: dict[str, Any], fn) -> bool:
         """起動 JSON を read-modify-write (原子的差し替え)。config 主体モードでなければ False。"""
@@ -1112,6 +1153,33 @@ class CalibrationManager:
                 self._append_log(job, "起動 JSON argv に適用: " + " ".join(moe_args))
             else:
                 self._append_log(job, "MoE 勝者があるが起動 JSON が無い (レガシープロファイル): argv は未適用")
+        # 投機勝者: ツールの生成スクリプトと同じ契約 (次元全体を所有 = 既存の spec フラグを
+        # 全部剥がしてから勝者 argv を足す)。「none が最善」の結論も正直に反映する
+        sp = chosen.get("spec") or {}
+        sp_args = [str(x) for x in (sp.get("argv") or [])]
+
+        def patch_spec_argv(doc: dict[str, Any]) -> None:
+            argv = [str(x) for x in (doc.get("argv") or [])]
+            out: list[str] = []
+            i = 0
+            while i < len(argv):
+                t = argv[i]
+                if t in _MULTI_SPEC_FLAGS:
+                    i += 2
+                    continue
+                if any(t.startswith(f + "=") for f in _MULTI_SPEC_FLAGS):
+                    i += 1
+                    continue
+                out.append(t)
+                i += 1
+            doc["argv"] = out + (sp_args if sp.get("applied") else [])
+
+        if self._ft_launch_update(profile, patch_spec_argv):
+            self._append_log(job, "起動 JSON argv に適用 (投機): "
+                             + (" ".join(sp_args) if sp.get("applied") and sp_args
+                                else "off (勝者なし)"))
+        elif sp.get("applied") and sp_args:
+            self._append_log(job, "投機勝者があるが起動 JSON が無い (レガシープロファイル): argv は未適用")
         arms = doc.get("arms") or []
         # regime_tps = 全並列数プローブの合算 tok/s (選択スコア)。古いレポートには
         # 無いので staggered wall の out_tps で代用表示する
@@ -1122,10 +1190,12 @@ class CalibrationManager:
             "tuned": True, "backend": "freetoken-multi", "applied": applied,
             "settings": winner if applied else {},
             "moe": moe.get("strategy") if moe.get("applied") else None,
+            "spec": sp.get("algorithm") if sp.get("applied") else None,
             "improvement_pct": round(float(chosen.get("gain_tps_pct") or 0.0), 1),
             "latency": (f"chosen={chosen.get('label')} "
                         f"tps={chosen.get('regime_tps', chosen.get('out_tps', 0)):.1f} "
                         f"stall {chosen.get('stall_worst', 0):.2f}s "
+                        f"spec={sp.get('algorithm') if sp.get('applied') else '-'} "
                         f"moe={moe.get('strategy') if moe.get('applied') else '-'} "
                         f"{chosen.get('note', '')[:80]} | {best_line}")[:400],
         }
@@ -1268,27 +1338,33 @@ class CalibrationManager:
 
     async def _run_freetoken_auto(self, job: dict[str, Any],
                                   profile: dict[str, Any]) -> dict[str, Any]:
-        """投機モード自動選定: mtp sweep → lookup CLI → 共通プローブの決勝トーナメント。
+        """投機モード自動選定: 投機 sweep → lookup CLI → 共通プローブの決勝トーナメント。
 
         「mtp(+chain) / lookup / none のどれがこの箱で最速か」は誰も実測していなかった
         (プロファイルの現在値が校正経路を分岐させるだけだった) ので、1 ジョブで決め、
-        勝者の投機フラグと env ファミリーをまとめて適用する。判定: 単流スコア最優、
+        勝者の投機フラグと env ファミリーをまとめて適用する。Inkling-2-Mini は MTP ヘッドが
+        無いのでフェーズ A は dspark (公式 DSpark drafter、env ノブ無し = 基準のみ) を実測し、
+        決勝は dspark / lookup / none の比較になる。判定: 単流スコア最優、
         ただし並行上限で並行最優に FT_AUTO_PAR_LOSS を超えて負ける構成は差し替え
         (fork ツールの MAX_PARALLEL_LOSS と同じ哲学)。勝者には品質中立の転送/グラフ系
         env 微調整 (フェーズ D) も行う。所要 ≈ 2-3 時間。"""
-        # ---- フェーズ A: mtp(+chain) sweep。適用はまだ (決着はトーナメント)。
-        # MTP ヘッドの無いモデルでは基準セルが起動失敗する → mtp を外して続行する
-        job["step"] = "phase-mtp"
-        self._append_log(job, "[auto] フェーズ A: MTP (chain 込み) を実測します…")
+        # ---- フェーズ A: 投機 sweep。適用はまだ (決着はトーナメント)。
+        # MTP ヘッドの無いモデルでは基準セルが起動失敗する → その腕を外して続行する。
+        # Inkling-2-Mini は mtp の代わりに dspark を実測 (env 調整ノブ無し = 基準のみ)
+        phase_a = self._ft_phase_a_spec(profile)
+        job["step"] = "phase-dspark" if phase_a == "dspark" else "phase-mtp"
+        self._append_log(job, "[auto] フェーズ A: "
+                         + ("DSpark (Inkling-2-Mini 公式 drafter) を実測します…"
+                            if phase_a == "dspark" else "MTP (chain 込み) を実測します…"))
         mtp_env: dict[str, str] | None = None
         mtp_imp: float | None = None
         try:
-            mtp = await self._run_freetoken(job, profile, apply=False, spec_override="mtp")
+            mtp = await self._run_freetoken(job, profile, apply=False, spec_override=phase_a)
             mtp_env = {k: str(v) for k, v in (mtp.get("winner") or {}).items()}
             mtp_imp = mtp.get("improvement_pct")
         except CalibrateError as e:
-            self._append_log(job, f"[auto] フェーズ A: MTP sweep 失敗 ({str(e)[:140]})"
-                                  " — mtp はトーナメントから除外")
+            self._append_log(job, f"[auto] フェーズ A: {phase_a} sweep 失敗 ({str(e)[:140]})"
+                                  f" — {phase_a} はトーナメントから除外")
         if job["id"] in self._cancel:
             raise _Cancelled()
 
@@ -1332,7 +1408,7 @@ class CalibrationManager:
         par_n = self._ft_par_n(profile)
         configs: list[tuple[str, dict[str, str], str]] = [("none", {}, "none")]
         if mtp_env is not None:
-            configs.append(("mtp", mtp_env, "mtp"))
+            configs.append((phase_a, mtp_env, phase_a))
         if lookup_env is not None:
             configs.append(("lookup", lookup_env, "lookup"))
             if par_n > 2:
@@ -1420,7 +1496,7 @@ class CalibrationManager:
         # lookup 勝者でもサーバーは off (現行エンジンに lookup バックエンドは無い)
         launch_path = launch_json_path(self.root, profile)
         spec_mode_now = mode.split("-")[0]        # lookup-mb → lookup
-        armed = spec_mode_now if spec_mode_now in ("mtp", "dflash") else ""
+        armed = spec_mode_now if spec_mode_now in ("mtp", "dflash", "dspark") else ""
         if launch_path is not None and launch_path.is_file():
             self._ft_launch_update(
                 profile,
@@ -1451,7 +1527,8 @@ class CalibrationManager:
         report: dict[str, Any] = {
             "schema_version": 1, "backend": "freetoken-auto", "rule": rule, "par_n": par_n,
             "tournament": tour, "micro": micros,
-            "mtp_sweep_improvement_pct": mtp_imp,
+            "spec_sweep_mode": phase_a,
+            "spec_sweep_improvement_pct": mtp_imp,
             "lookup_phase": lookup_note,
             "winner": {"mode": spec_mode_now, "env": winner_env},
             "improvement_pct": improvement, "latency": winner.get("latency", ""),
@@ -1604,7 +1681,7 @@ class CalibrationManager:
                 clone["values"] = {**(profile.get("values") or {}), "config": str(tmp_cfg)}
             else:
                 values = {**(profile.get("values") or {}),
-                          "speculative_algorithm": spec if spec in ("mtp", "dflash") else ""}
+                          "speculative_algorithm": spec if spec in ("mtp", "dflash", "dspark") else ""}
                 values.pop("speculative", None)
                 clone["values"] = values
         return clone, tmp_cfg

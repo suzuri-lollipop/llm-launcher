@@ -13,7 +13,11 @@
  },
  "--anthropic-inline-system": {
   "aliases": [],
-  "choices": [],
+  "choices": [
+   "auto",
+   "preserve",
+   "fold"
+  ],
   "default": "auto",
   "help": "Preserve inline system instructions when supported by the renderer, or fold them into nearby user/tool content without hoisting the prompt prefix."
  },
@@ -161,11 +165,14 @@
   "aliases": [],
   "choices": [
    "auto",
-   "fp8",
-   "int8",
    "fp8_e4m3",
    "fp8_per_token_head",
-   "int8_per_token_head"
+   "int8_per_token_head",
+   "fp8",
+   "fp8e4m3",
+   "e4m3",
+   "float8_e4m3fn",
+   "int8"
   ],
   "default": "auto",
   "help": "How K and V are stored. 'auto' keeps the compute dtype. The per_token_head formats store 8 bits per element plus one scale per token and head (two per MLA latent row); the triton, qsa_sparse, m3_spars",
@@ -321,8 +328,8 @@
  "--moe-cache-scope": {
   "aliases": [],
   "choices": [],
-  "default": "unified",
-  "help": "How MoE layers share the GPU expert slot cache: unified = one LRU pool per expert quant (all layers when they share one quant format); per-layer = each layer has its own pool. Pools are sized by --moe"
+  "default": "auto",
+  "help": "How MoE layers share the GPU expert slot cache: auto = per-layer when every layer decodes from the GPU slot cache in one format (cyclic decode walks thrash a shared LRU less this way), else unified; u"
  },
  "--moe-cache-size": {
   "aliases": [],
@@ -496,10 +503,11 @@
   "aliases": [],
   "choices": [
    "pinned",
-   "disk"
+   "disk",
+   "gpu"
   ],
   "default": "disk",
-  "help": "Where a PLE n-gram table lives. 'disk' (default) reads rows straight from the checkpoint files; 'pinned' preloads the whole table into page-locked host RAM."
+  "help": "Where a PLE n-gram table lives. 'disk' (default) reads rows straight from the checkpoint files; 'pinned' preloads the whole table into page-locked host RAM; 'gpu' keeps the whole table resident in VRA"
  },
  "--port": {
   "aliases": [],
@@ -533,7 +541,8 @@
    "muse_glimmer",
    "gemma4",
    "flint",
-   "ricursive"
+   "ricursive",
+   "inkling2"
   ],
   "default": "auto",
   "help": "Reasoning parser that splits chain-of-thought into reasoning_content for OpenAI responses. 'auto' selects per model family (gpt-oss Harmony, <think> for qwen3/glm/minimax, <mm:think> for minimax-m3, A",
@@ -565,7 +574,7 @@
    "--spec-algo"
   ],
   "default": "None",
-  "help": "Speculative decoding with this draft method (mtp: the checkpoint's own MTP layers; dflash: a DFlash 2 draft checkpoint from --speculative-draft-model-path). Off by default.",
+  "help": "Speculative decoding with this draft method (mtp: the checkpoint's own MTP layers; dflash: a DFlash 2 draft checkpoint from --speculative-draft-model-path; dspark: Inkling-2-Mini's official mtp.safete",
   "type": "str"
  },
  "--speculative-draft-model-path": {
@@ -633,7 +642,8 @@
    "minimax_m3",
    "muse_glimmer",
    "gpt_oss",
-   "gpt-oss"
+   "gpt-oss",
+   "inkling2"
   ],
   "default": "auto",
   "help": "Tool-call parser format for OpenAI-compatible tool responses.",
