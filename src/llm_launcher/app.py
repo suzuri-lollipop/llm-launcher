@@ -34,8 +34,10 @@ from .store import JsonStore, new_id, now
 from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .coding import (CodingAssets, CodingError, CodingManager, PiTool,
-                     PROXY_BODY_MAX, guess_type, model_efforts, model_ids, safe_join,
+                     PROXY_BODY_MAX, external_probe, guess_type, model_efforts,
+                     model_ids, normalize_external_base, safe_join,
                      sandbox_info, thinking_capability)
+from .coding_eval import CodingEvalManager
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         cached_tags, clone_exists, current_ref, fork_tags, install_tool)
 from .models import (ModelError, build_inventory, classify_gguf_files, delete_entry,
@@ -220,13 +222,25 @@ class BenchProfileBody(BaseModel):
     params: dict[str, Any]
 
 
+class ExternalTarget(BaseModel):
+    """外部 OpenAI 互換 API (クラウド等) をベンチ対象にするための接続情報。
+    api_key は履歴にマスク保存され、実行中だけメモリで保持される。"""
+    base_url: str = Field(min_length=8, max_length=500)
+    api_key: str = Field(default="", max_length=500)
+    model: str = Field(default="", max_length=200)
+    name: str = Field(default="", max_length=120)      # 表示ラベル (空 = モデル名 / URL)
+    context_window: int = Field(default=128000, ge=1024, le=2_000_000)
+
+
 class CodingBody(BaseModel):
     """コーディングベンチマーク設定。pi ハーネスに profile_id のサーバーで
     バックエンド / フロントエンドを順番に作らせる (サンドボックス内で実行)。
+    profile_id の代わりに external (外部 OpenAI 互換 API) も指定できる。
 
     空文字の資材 (skills_dir / agents_path / 各プロンプト) は data/coding/defaults/
     の既定値で補完する。"""
-    profile_id: str = Field(min_length=1)
+    profile_id: str = ""
+    external: ExternalTarget | None = None
     name: str = Field(default="", max_length=120)
     model: str = ""                       # 空 = /v1/models の先頭 id を自動使用
     skills_dir: str = ""                  # 空 = デフォルトのスキル群フォルダ
@@ -242,6 +256,8 @@ class CodingBody(BaseModel):
 
     @model_validator(mode="after")
     def _normalize(self) -> "CodingBody":
+        if bool(self.profile_id.strip()) == bool(self.external):
+            raise ValueError("profile_id か external のどちらか一方を指定してください")
         if self.thinking not in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
             raise ValueError("thinking は off / minimal / low / medium / high / xhigh / max です")
         if len(self.backend_prompt) > 32000 or len(self.frontend_prompt) > 32000:
@@ -252,6 +268,27 @@ class CodingBody(BaseModel):
 class CodingPreviewBody(BaseModel):
     """プレビュー起動の上書きコマンド (空 = 自動検出したエントリを python3 で実行)。"""
     command: str = Field(default="", max_length=500)
+
+
+class CodingEvalJudge(BaseModel):
+    """AI 評価の judge: 稼働中プロファイルか外部 API のどちらか。"""
+    profile_id: str = ""
+    external: ExternalTarget | None = None
+
+    @model_validator(mode="after")
+    def _one(self) -> "CodingEvalJudge":
+        if bool(self.profile_id.strip()) == bool(self.external):
+            raise ValueError("judge は profile_id か external のどちらか一方です")
+        return self
+
+
+class CodingEvalBody(BaseModel):
+    """AI 評価リクエスト: 2 つの完了済み実行を judge モデルで定量診断する。"""
+    run_a: str = Field(min_length=1)
+    run_b: str = Field(min_length=1)
+    judge: CodingEvalJudge
+    thinking: str = "off"
+    timeout: int = Field(default=900, ge=30, le=3600)
 
 
 class CalibrateBody(BaseModel):
@@ -548,6 +585,9 @@ def create_app(root: Path) -> FastAPI:
     coding = CodingManager(root, JsonStore(data_dir / "coding.json", []),
                            profiles_store, manager, coding_assets, coding_pi)
     coding.attach_exclusive(bench.exclusive)
+    coding_eval = CodingEvalManager(JsonStore(data_dir / "coding_evals.json", []),
+                                    coding, manager)
+    coding_eval.attach_exclusive(bench.exclusive)
     installs_store = JsonStore(data_dir / "installs.json", [])
     installs = InstallManager(root, installs_store, manager)
     auth = AuthManager(users_store, sessions_store)
@@ -700,6 +740,10 @@ def create_app(root: Path) -> FastAPI:
         if lost_cb:
             print(f"coding bench recovery: {len(lost_cb)} 件の中断ジョブを lost にしました "
                   f"({', '.join(lost_cb[:4])})", file=sys.stderr)
+        lost_ev = coding_eval.on_startup()
+        if lost_ev:
+            print(f"coding eval recovery: {len(lost_ev)} 件の中断評価を failed にしました",
+                  file=sys.stderr)
         # キャリブレーションは 10-40 分の fire-and-forget ジョブ。launcher が OOM kill / restart されると
         # task は死ぬがファイル上の status は "running" のまま残るので、起動時に "lost" へ回復する。
         lost = calibrate.on_startup()
@@ -2789,6 +2833,22 @@ def create_app(root: Path) -> FastAPI:
 
     @app.post("/api/coding/runs", status_code=201)
     async def start_coding_run(body: CodingBody) -> dict[str, Any]:
+        params = _coding_params(body)
+        if body.external:
+            base = normalize_external_base(body.external.base_url)
+            if not base.startswith(("http://", "https://")):
+                raise HTTPException(422, "外部 API の base_url は http(s):// で始めてください")
+            params["external"] = {
+                "base_url": base, "api_key": body.external.api_key.strip(),
+                "model": body.external.model.strip(), "name": body.external.name.strip(),
+                "context_window": body.external.context_window,
+            }
+            params["auto_start"] = False
+            params["stop_after"] = False
+            try:
+                return await coding.start(None, params, "外部 API")
+            except CodingError as e:
+                raise HTTPException(409, str(e))
         profile = manager.find_profile(body.profile_id)
         if not profile:
             raise HTTPException(404, "プロファイルが見つかりません")
@@ -2800,11 +2860,54 @@ def create_app(root: Path) -> FastAPI:
                 for s in manager.sessions.values()):
             raise HTTPException(409, "プロファイルが起動していません。"
                                      "起動タブでスタートするか、auto_start を ON にしてください")
-        params = _coding_params(body)
         try:
             return await coding.start(profile, params, BACKENDS[bid]["name"])
         except CodingError as e:
             raise HTTPException(409, str(e))
+
+    @app.post("/api/coding/external-check")
+    async def coding_external_check(body: ExternalTarget) -> dict[str, Any]:
+        """外部 API への接続テスト (/v1/models を叩く)。キーはログ・履歴に残さない。"""
+        base = normalize_external_base(body.base_url)
+        if not base.startswith(("http://", "https://")):
+            raise HTTPException(422, "base_url は http(s):// で始めてください")
+        key = body.api_key.strip()
+        auth = {"Authorization": f"Bearer {key}"} if key else {}
+        probe = await asyncio.to_thread(external_probe, base, auth, 20.0)
+        if probe["ok"] and body.model.strip() and body.model.strip() not in probe["models"]:
+            probe["warning"] = (f"モデル {body.model.strip()} は /v1/models の一覧にありません"
+                                " (一覧に無いモデルを提供する API もあります)")
+        return probe
+
+    # ------------------------------------------------------- AI 評価 (2 実行の定量診断)
+
+    @app.get("/api/coding/evals")
+    async def list_coding_evals() -> dict[str, Any]:
+        return {"evals": coding_eval.list_evals()}
+
+    @app.post("/api/coding/evals", status_code=201)
+    async def start_coding_eval(body: CodingEvalBody) -> dict[str, Any]:
+        try:
+            return await coding_eval.start(body.model_dump())
+        except CodingError as e:
+            raise HTTPException(409, str(e))
+
+    @app.get("/api/coding/evals/{eid}")
+    async def get_coding_eval(eid: str) -> dict[str, Any]:
+        ev = coding_eval.get(eid)
+        if not ev:
+            raise HTTPException(404, "評価が見つかりません")
+        return ev
+
+    @app.delete("/api/coding/evals/{eid}")
+    async def delete_coding_eval(eid: str) -> dict[str, Any]:
+        try:
+            coding_eval.delete(eid)
+        except KeyError:
+            raise HTTPException(404, "評価が見つかりません")
+        except CodingError as e:
+            raise HTTPException(409, str(e))
+        return {"ok": True}
 
     @app.get("/api/coding/runs/{rid}")
     async def get_coding_run(rid: str) -> dict[str, Any]:

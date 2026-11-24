@@ -10,13 +10,44 @@ VIEWS.coding = `
       <button class="bm-tab" id="cbt-run" role="tab" aria-selected="false" onclick="cbSetTab('run')"><svg class=ic aria-hidden=true><use href=#i-play /></svg> 実行<span class="run-dot hidden" id="cbt-run-dot" title="コーディングベンチ実行中"></span></button>
       <button class="bm-tab" id="cbt-history" role="tab" aria-selected="false" onclick="cbSetTab('history')"><svg class=ic aria-hidden=true><use href=#i-history /></svg> 履歴 <span class="n" id="cbt-hn">0</span></button>
       <button class="bm-tab" id="cbt-viewer" role="tab" aria-selected="false" onclick="cbSetTab('viewer')"><svg class=ic aria-hidden=true><use href=#i-layers /></svg> ビューアー</button>
+      <button class="bm-tab" id="cbt-eval" role="tab" aria-selected="false" onclick="cbSetTab('eval')"><svg class=ic aria-hidden=true><use href=#i-chart /></svg> AI評価</button>
     </div>
     <div id="cbt-p-run">
     <div id="cb-active"></div>
     <div class="card">
-      <div class="row" style="gap:8px">
+      <div class="row" style="gap:8px;align-items:center">
+        <label class="f" for="cb-target" style="margin:0">対象</label>
+        <select id="cb-target" style="min-width:220px" onchange="cbTargetChange()">
+          <option value="profile">起動プロファイル (ローカル)</option>
+          <option value="external">外部 API (OpenAI 互換)</option>
+        </select>
+        <span class="muted" id="cb-target-note" style="font-size:11px"></span>
+      </div>
+      <div id="cb-target-profile">
+      <div class="row" style="gap:8px;margin-top:8px">
         <select id="cb-profile" class="grow" style="min-width:180px" onchange="cbPersist();cbLoadModelOptions()"></select>
         <span class="badge" id="cb-prof-state"><span class="dot"></span>-</span>
+      </div>
+      </div>
+      <div id="cb-target-external" class="hidden">
+        <div style="margin-top:8px">
+          <label class="f" for="cb-ext-base">Base URL <span class="muted">(OpenAI 互換。例: https://api.openai.com/v1 — /v1 は省略可)</span></label>
+          <input type="text" id="cb-ext-base" class="mono" placeholder="https://api.openai.com/v1" style="width:100%">
+        </div>
+        <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+          <div class="grow" style="min-width:200px"><label class="f" for="cb-ext-key">API キー <span class="muted">(履歴にはマスク保存・実行後は破棄)</span></label>
+            <input type="password" id="cb-ext-key" class="mono" autocomplete="off" placeholder="sk-..." style="width:100%"></div>
+          <div class="grow" style="min-width:180px"><label class="f" for="cb-ext-model">モデル名 <span class="muted">(空 = 一覧の先頭)</span></label>
+            <input type="text" id="cb-ext-model" class="mono" placeholder="gpt-5.2" style="width:100%"></div>
+        </div>
+        <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
+          <div class="grow" style="min-width:160px"><label class="f" for="cb-ext-name">表示ラベル <span class="muted">(空 = 自動)</span></label>
+            <input type="text" id="cb-ext-name" maxlength="120" placeholder="例: GPT-5.2 クラウド" style="width:100%"></div>
+          <div><label class="f" for="cb-ext-ctx">コンテキスト長</label>
+            <input type="number" id="cb-ext-ctx" min="1024" max="2000000" value="128000" style="width:110px"></div>
+          <button class="ghost" onclick="cbExternalCheck()" style="align-self:flex-end;min-height:36px">${IC("refresh")} 接続テスト</button>
+          <span class="badge" id="cb-ext-check" style="align-self:flex-end"><span class="dot"></span>未確認</span>
+        </div>
       </div>
       <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap">
         <span class="badge" id="cb-pi-state"><span class="dot"></span>pi 確認中…</span>
@@ -51,7 +82,7 @@ VIEWS.coding = `
         <div class="row" style="gap:6px;margin-top:2px"><button class="ghost" onclick="cbResetField('frontend')" style="min-height:32px;padding:4px 10px">既定に戻す</button><span class="muted" id="cb-frontend-n" style="font-size:11px"></span></div>
       </div>
       <div class="row" style="gap:12px;flex-wrap:wrap;margin-top:10px">
-        <div><label class="f" for="cb-model">モデル名 <span class="muted">(稼働中サーバーから自動取得)</span></label>
+        <div id="cb-model-wrap"><label class="f" for="cb-model">モデル名 <span class="muted">(稼働中サーバーから自動取得)</span></label>
           <div class="row" style="gap:4px">
             <select id="cb-model" class="mono" style="width:230px"><option value="">(開始時に自動解決)</option></select>
             <button class="ghost" onclick="cbLoadModelOptions(true)" title="モデル一覧を再取得" style="min-height:36px;padding:4px 8px">${IC("refresh")}</button>
@@ -65,8 +96,10 @@ VIEWS.coding = `
         <div class="grow" style="min-width:160px"><label class="f" for="cb-name">ラベル <span class="muted">(空 = 自動)</span></label><input type="text" id="cb-name" maxlength="120" placeholder="例: Qwen3-30B タスク管理" style="width:100%"></div>
       </div>
       <div class="row" style="gap:18px;flex-wrap:wrap;margin-top:8px">
+        <span id="cb-local-opts" style="display:contents">
         <label class="switch"><input type="checkbox" id="cb-autostart" checked><span class="track"></span><span class="lab" style="font-size:12.5px">未起動ならサーバーを自動起動</span></label>
         <label class="switch"><input type="checkbox" id="cb-stopafter"><span class="track"></span><span class="lab" style="font-size:12.5px">完了後、自動起動したサーバーを停止</span></label>
+        </span>
         <label class="switch"><input type="checkbox" id="cb-sandbox" checked><span class="track"></span><span class="lab" style="font-size:12.5px">サンドボックス内で実行</span></label>
       </div>
       <div class="row" style="margin-top:10px">
@@ -78,6 +111,7 @@ VIEWS.coding = `
     </div>
     <div id="cbt-p-history" class="hidden"><div id="cb-history"></div></div>
     <div id="cbt-p-viewer" class="hidden"><div id="cb-viewer"></div></div>
+    <div id="cbt-p-eval" class="hidden"><div id="cb-eval"></div></div>
   </div>
 `;
 /* ============================================================= coding bench */
@@ -86,10 +120,15 @@ VIEWS.coding = `
    (POST /api/coding/runs) がサンドボックス内で走らせ、2.5 秒ポーリングで進捗を描画。
    ビューアーは履歴から 2 件選んでプレビュー (生成アプリの起動 + 中継) を並べる。 */
 const CB_KEY = "llm-laun…h.v1";
-const CB_TABS = ["run", "history", "viewer"];
+const CB_TABS = ["run", "history", "viewer", "eval"];
 const CB_INPUTS = ["cb-profile", "cb-skills", "cb-agents", "cb-backend", "cb-frontend",
                    "cb-model", "cb-thinking", "cb-ptimeout", "cb-autostart",
-                   "cb-stopafter", "cb-sandbox", "cb-name"];
+                   "cb-stopafter", "cb-sandbox", "cb-name",
+                   "cb-target", "cb-ext-base", "cb-ext-model", "cb-ext-name", "cb-ext-ctx"];
+/* 外部 API の thinking 段階 (OpenAI 標準の reasoning_effort 配線。サーバー側
+   テンプレートが未知なので chat_template_kwargs は送らない。xhigh/max は
+   対応プロバイダのみ通るため UI は標準 5 段階 + off まで) */
+const CB_EXT_LEVELS = ["off", "minimal", "low", "medium", "high"];
 const CB_PHASES = {queued: "待機", launching: "サーバー起動", waiting: "health 待ち",
                    backend: "バックエンド作成", frontend: "フロントエンド作成",
                    scanning: "走査", done: "完了"};
@@ -105,7 +144,11 @@ function cbInit() {
                filesA: null, filesB: null, codeA: null, codeB: null,
                logOpen: false, logPhase: "backend", logText: "",
                tx: {rid: "", phase: "backend", data: null, loading: false, error: ""},
-               _act: "", _hist: "", _psigA: "", _psigB: "", _codeRev: 0, _fv: {} };
+               _act: "", _hist: "", _eval: "", _psigA: "", _psigB: "", _codeRev: 0, _fv: {},
+               evals: [], evalBusy: false, evalOpen: "",
+               judgeKind: d.judgeKind || "profile", judgePid: d.judgePid || "",
+               judgeExtBase: d.judgeExtBase || "", judgeExtModel: d.judgeExtModel || "",
+               judgeThinking: d.judgeThinking || "off" };
   const set = (id, v) => { const el = $(id); if (el && v != null && v !== "") {
     if (el.type === "checkbox") el.checked = !!v; else el.value = v; } };
   set("#cb-profile", d.profile); set("#cb-skills", d.skills); set("#cb-agents", d.agents);
@@ -113,6 +156,8 @@ function cbInit() {
   set("#cb-model", d.model); set("#cb-thinking", d.thinking);
   set("#cb-ptimeout", d.ptimeout);
   set("#cb-name", d.name);
+  set("#cb-target", d.target); set("#cb-ext-base", d.extBase);
+  set("#cb-ext-model", d.extModel); set("#cb-ext-name", d.extName); set("#cb-ext-ctx", d.extCtx);
   // 選択肢は非同期ロード前に復元値を覚えておく (cbLoadModelOptions が適用)。
   // effort 段階 (minimal/low/.../max) もそのまま保持し、語彙に無ければ先頭に落とす
   S.coding._restored = {profile: d.profile || "", model: d.model || "",
@@ -126,7 +171,7 @@ function cbInit() {
   });
   cbPromptCount();
   cbLoadAssets();
-  cbLoadModelOptions();
+  cbTargetChange();   // 対象 (プロファイル / 外部 API) の表示切替 + thinking 選択肢
 }
 function cbPersist() {
   if (!S.coding) return;
@@ -141,8 +186,57 @@ function cbPersist() {
       sandbox: $("#cb-sandbox").checked,
       tab: S.coding.tab, selA: S.coding.selA, selB: S.coding.selB,
       cmp: S.coding.cmp,
+      target: v("#cb-target"), extBase: v("#cb-ext-base"), extModel: v("#cb-ext-model"),
+      extName: v("#cb-ext-name"), extCtx: v("#cb-ext-ctx"),   // API キーは保存しない
+      judgeKind: S.coding.judgeKind, judgePid: S.coding.judgePid,
+      judgeExtBase: S.coding.judgeExtBase, judgeExtModel: S.coding.judgeExtModel,
+      judgeThinking: S.coding.judgeThinking,
     }));
   } catch { /* ignore */ }
+}
+/* 対象切替 (起動プロファイル / 外部 API): フォームと thinking 選択肢を差し替える */
+function cbTargetChange() {
+  const ext = $("#cb-target").value === "external";
+  $("#cb-target-profile").classList.toggle("hidden", ext);
+  $("#cb-target-external").classList.toggle("hidden", !ext);
+  $("#cb-model-wrap").classList.toggle("hidden", ext);
+  $("#cb-local-opts").style.display = ext ? "none" : "contents";
+  $("#cb-target-note").textContent = ext
+    ? "クラウド等の OpenAI 互換 API で実行します (GPU 実走ロック不要・ローカルベンチと共存可)" : "";
+  const tsel = $("#cb-thinking");
+  if (ext) {
+    const want = tsel.value;
+    tsel.innerHTML = CB_EXT_LEVELS.map(l => `<option value="${l}">${l}</option>`).join("");
+    tsel.value = CB_EXT_LEVELS.includes(want) ? want : "off";
+    tsel.disabled = false;
+    $("#cb-think-note").textContent = "reasoning_effort を送信 (プロバイダが対応する段階のみ有効)";
+  } else {
+    cbLoadModelOptions();
+  }
+  cbPersist();
+}
+async function cbExternalCheck() {
+  const base = $("#cb-ext-base").value.trim();
+  if (!base) { toast("Base URL を入力してください"); return; }
+  const badge = $("#cb-ext-check");
+  badge.className = "badge warn"; badge.innerHTML = '<span class="dot"></span>確認中…';
+  try {
+    const r = await api("/api/coding/external-check", {method: "POST", body: {
+      base_url: base, api_key: $("#cb-ext-key").value, model: $("#cb-ext-model").value.trim(),
+    }});
+    if (r.ok) {
+      badge.className = "badge ok";
+      badge.innerHTML = `<span class="dot"></span>OK (${r.models.length} モデル)`;
+      badge.title = r.models.slice(0, 30).join("\n");
+      toast(r.warning ? `接続 OK。${r.warning}` : `接続 OK: モデル ${r.models.length} 件`);
+    } else {
+      badge.className = "badge err"; badge.innerHTML = '<span class="dot"></span>失敗';
+      badge.title = r.error || ""; toast("接続失敗: " + (r.error || "不明"));
+    }
+  } catch (e) {
+    badge.className = "badge err"; badge.innerHTML = '<span class="dot"></span>失敗';
+    toast("接続テスト失敗: " + e.message);
+  }
 }
 function cbPromptCount() {
   const b = $("#cb-backend"), f = $("#cb-frontend");
@@ -174,6 +268,7 @@ function cbResetField(kind) {
 /* モデル名自動取得 + thinking 選択肢 (モデルで設定できるものだけ) */
 async function cbLoadModelOptions(refresh) {
   const d = S.coding;
+  if ($("#cb-target") && $("#cb-target").value === "external") return;   // 外部 API は固定段階
   const pid = $("#cb-profile").value;
   d._optsPid = pid;
   const msel = $("#cb-model"), tsel = $("#cb-thinking");
@@ -219,6 +314,11 @@ async function cbLoadModelOptions(refresh) {
 function cbSetTab(t) {
   if (!CB_TABS.includes(t)) return;
   S.coding.tab = t; cbPersist(); renderCoding();
+  if (t === "eval") {
+    api("/api/coding/evals").then(r => {
+      S.coding.evals = r.evals || []; renderCodingEval();
+    }).catch(() => {});
+  }
 }
 async function cbPoll(force) {
   if (!S.coding) return;
@@ -226,6 +326,10 @@ async function cbPoll(force) {
     const d = await api("/api/coding/runs");
     S.coding.runs = d.runs || []; S.coding.active = d.active || null;
     if (codingVisible()) S.coding.status = await api("/api/coding/status");
+    if (codingVisible() && (S.coding.tab === "eval" || S.coding.evals.some(e => e.status === "running"))) {
+      const ev = await api("/api/coding/evals");
+      S.coding.evals = ev.evals || [];
+    }
   } catch { return; }
   bmBadge();   // 統合タブのバッジ (速度ベンチ / コーディングベンチ共通)
   try { if (codingVisible() || force) renderCoding(); }
@@ -246,23 +350,36 @@ async function cbInstallPi() {
 }
 async function cbStart() {
   const d = S.coding;
-  if (!$("#cb-profile").value) { toast("プロファイルを選択してください"); return; }
+  const ext = $("#cb-target").value === "external";
+  if (ext) {
+    if (!$("#cb-ext-base").value.trim()) { toast("外部 API の Base URL を入力してください"); return; }
+  } else if (!$("#cb-profile").value) { toast("プロファイルを選択してください"); return; }
   d.busy = true; renderCoding(); cbPersist();
   try {
     const body = {
-      profile_id: $("#cb-profile").value,
       name: $("#cb-name").value,
-      model: $("#cb-model").value,
       skills_dir: $("#cb-skills").value,
       agents_path: $("#cb-agents").value,
       backend_prompt: $("#cb-backend").value,
       frontend_prompt: $("#cb-frontend").value,
       thinking: $("#cb-thinking").value === "on" ? "high" : $("#cb-thinking").value,
       phase_timeout: +$("#cb-ptimeout").value || 1800,
-      auto_start: $("#cb-autostart").checked,
-      stop_after: $("#cb-stopafter").checked,
       sandbox: $("#cb-sandbox").checked,
     };
+    if (ext) {
+      body.external = {
+        base_url: $("#cb-ext-base").value.trim(),
+        api_key: $("#cb-ext-key").value,
+        model: $("#cb-ext-model").value.trim(),
+        name: $("#cb-ext-name").value.trim(),
+        context_window: +$("#cb-ext-ctx").value || 128000,
+      };
+    } else {
+      body.profile_id = $("#cb-profile").value;
+      body.model = $("#cb-model").value;
+      body.auto_start = $("#cb-autostart").checked;
+      body.stop_after = $("#cb-stopafter").checked;
+    }
     const run = await api("/api/coding/runs", {method: "POST", body});
     toast(`コーディングベンチを開始しました: ${run.name}`);
     d.logOpen = false;
@@ -296,18 +413,30 @@ function cbRerun(id) {
   if (!r) return;
   const p = r.params || {};
   const set = (fid, v) => { const el = $(fid); if (el && v != null) el.value = v; };
-  set("#cb-profile", r.profile_id); set("#cb-skills", p.skills_dir); set("#cb-agents", p.agents_path);
+  set("#cb-skills", p.skills_dir); set("#cb-agents", p.agents_path);
   set("#cb-backend", p.backend_prompt); set("#cb-frontend", p.frontend_prompt);
   set("#cb-ptimeout", p.phase_timeout || 1800);
-  $("#cb-autostart").checked = p.auto_start !== false;
-  $("#cb-stopafter").checked = !!p.stop_after;
   $("#cb-sandbox").checked = p.sandbox !== false;
-  // モデル / thinking は選択肢ロード後に適用 (effort 段階はそのまま復元)
-  S.coding._restored = {profile: r.profile_id, model: p.model || "",
-                        thinking: p.thinking || "off"};
-  cbLoadModelOptions();
+  if (r.external) {
+    $("#cb-target").value = "external";
+    set("#cb-ext-base", r.external.base_url); set("#cb-ext-model", r.external.model);
+    set("#cb-ext-name", r.external.name); set("#cb-ext-ctx", p.external && p.external.context_window);
+    $("#cb-ext-key").value = "";   // キーは履歴に残らないので再入力
+    cbTargetChange();
+    toast("外部 API 設定を読み込みました (API キーは再入力してください)");
+  } else {
+    $("#cb-target").value = "profile";
+    cbTargetChange();
+    set("#cb-profile", r.profile_id);
+    $("#cb-autostart").checked = p.auto_start !== false;
+    $("#cb-stopafter").checked = !!p.stop_after;
+    // モデル / thinking は選択肢ロード後に適用 (effort 段階はそのまま復元)
+    S.coding._restored = {profile: r.profile_id, model: p.model || "",
+                          thinking: p.thinking || "off"};
+    cbLoadModelOptions();
+    toast("実行フォームに読み込みました");
+  }
   cbPromptCount(); cbSetTab("run"); cbPersist();
-  toast("実行フォームに読み込みました");
 }
 /* 履歴から選んでビューアーで起動 (「履歴で選択して起動」の入口) */
 async function cbViewRun(id) {
@@ -860,6 +989,201 @@ function renderCodingViewer() {
   if (d.modeA === "files") cbEnsureFiles("A");
   if (d.modeB === "files") cbEnsureFiles("B");
 }
+/* ------------------------------------------------------------- AI 評価 (2 実行の定量診断) */
+/* 完了済み 2 実行のメトリクス + 実装ファイルを judge モデル (稼働中プロファイル /
+   外部 API) に渡し、軸別スコア・欠陥・総合判定を JSON で得る。ビューアーと同じ
+   A/B 選択 (selA/selB) を使う。評価自体も履歴として保存・閲覧できる。 */
+const CB_AXES = [
+  {k: "requirements", label: "要件充足"},
+  {k: "correctness", label: "正確性・堅牢性"},
+  {k: "code_quality", label: "コード品質"},
+  {k: "frontend", label: "フロントエンド品質"},
+  {k: "verification", label: "自己検証"},
+  {k: "efficiency", label: "効率"},
+];
+function cbEvalSel(side, rid) {
+  S.coding["sel" + side] = rid;
+  cbPersist(); renderCodingEval();
+}
+function cbEvalSwap() {
+  const d = S.coding;
+  [d.selA, d.selB] = [d.selB, d.selA];
+  cbPersist(); renderCodingEval();
+}
+function cbEvalJudgeSync() {
+  const d = S.coding;
+  d.judgeKind = $("#cb-ev-kind").value;
+  d.judgePid = $("#cb-ev-pid") ? $("#cb-ev-pid").value : d.judgePid;
+  d.judgeExtBase = $("#cb-ev-base") ? $("#cb-ev-base").value : d.judgeExtBase;
+  d.judgeExtModel = $("#cb-ev-model") ? $("#cb-ev-model").value : d.judgeExtModel;
+  d.judgeThinking = $("#cb-ev-thinking").value;
+  cbPersist(); renderCodingEval();
+}
+async function cbEvalStart() {
+  const d = S.coding;
+  if (!d.selA || !d.selB || d.selA === d.selB) { toast("異なる 2 つの実行を選択してください"); return; }
+  const judge = {};
+  if (d.judgeKind === "external") {
+    if (!d.judgeExtBase.trim()) { toast("judge の Base URL を入力してください"); return; }
+    judge.external = {base_url: d.judgeExtBase.trim(), api_key: $("#cb-ev-key").value,
+                      model: d.judgeExtModel.trim()};
+  } else {
+    if (!d.judgePid) { toast("judge プロファイルを選択してください"); return; }
+    judge.profile_id = d.judgePid;
+  }
+  d.evalBusy = true; renderCodingEval();
+  try {
+    await api("/api/coding/evals", {method: "POST", body: {
+      run_a: d.selA, run_b: d.selB, judge, thinking: d.judgeThinking}});
+    toast("AI 評価を開始しました (完了まで数分かかります)");
+    await cbPoll(true);
+  } catch (e) { toast("評価開始失敗: " + e.message); }
+  finally { d.evalBusy = false; renderCodingEval(); }
+}
+async function cbEvalDelete(id) {
+  if (!confirm("この評価履歴を削除しますか?")) return;
+  try { await api(`/api/coding/evals/${id}`, {method: "DELETE"}); toast("削除しました"); }
+  catch (e) { toast("削除失敗: " + e.message); }
+  cbPoll(true);
+}
+function cbEvalToggle(id) {
+  S.coding.evalOpen = S.coding.evalOpen === id ? "" : id;
+  renderCodingEval();
+}
+function cbEvalBar(v, side, best) {
+  return `<div class="cb-ev-bar ${best === side ? "cb-best" : ""}">
+    <div class="cb-ev-fill ${side}" style="width:${Math.max(0, Math.min(100, v))}%"></div>
+    <span class="cb-ev-num">${v}</span></div>`;
+}
+function cbEvalCard(ev) {
+  const d = S.coding;
+  const open = d.evalOpen === ev.id;
+  const res = ev.result;
+  const winner = res && res.verdict ? res.verdict.winner : "";
+  const wBadge = winner === "A" ? `<span class="badge ok"><span class="dot"></span>A 勝ち</span>`
+    : winner === "B" ? `<span class="badge ok"><span class="dot"></span>B 勝ち</span>`
+    : winner === "tie" ? `<span class="badge info"><span class="dot"></span>引き分け</span>` : "";
+  const stBadge = ev.status === "running" ? `<span class="badge warn"><span class="dot"></span>評価中…</span>`
+    : ev.status === "failed" ? `<span class="badge err"><span class="dot"></span>失敗</span>`
+    : `<span class="badge ok"><span class="dot"></span>完了</span>`;
+  let body = "";
+  if (ev.status === "failed") body = `<div class="cb-warn">${IC("alert")} ${esc(ev.error || "不明なエラー")}</div>`;
+  if (res && open) {
+    const scoreRows = CB_AXES.map(ax => {
+      const s = res.scores[ax.k] || {a: 0, b: 0, reason: ""};
+      const best = s.a === s.b ? "" : (s.a > s.b ? "a" : "b");
+      return `<tr><td class="cb-metric">${ax.label}</td>
+        <td>${cbEvalBar(s.a, "a", best)}</td><td>${cbEvalBar(s.b, "b", best)}</td>
+        <td class="muted" style="font-size:11.5px">${esc(s.reason || "")}</td></tr>`;
+    }).join("");
+    const totalA = CB_AXES.reduce((t, ax) => t + ((res.scores[ax.k] || {}).a || 0), 0);
+    const totalB = CB_AXES.reduce((t, ax) => t + ((res.scores[ax.k] || {}).b || 0), 0);
+    const defects = side => (res.defects[side] || []).map(df =>
+      `<div class="cb-ev-defect"><span class="badge ${df.severity === "high" ? "err" : df.severity === "medium" ? "warn" : ""}">${esc(df.severity)}</span>
+       <span class="mono">${esc(df.file || "-")}</span> — ${esc(df.detail)}</div>`).join("")
+      || `<div class="muted">欠陥の指摘なし</div>`;
+    const highlights = side => (res.highlights[side] || []).map(h => `<li>${esc(h)}</li>`).join("");
+    body = `
+    <div class="bm-wrap" data-scrollkey="ev:${esc(ev.id)}:scores"><table class="cb-table cb-ev-table">
+      <thead><tr><th class="cb-metric">評価軸 (0-100)</th><th>A: ${esc(ev.run_a.name)}</th><th>B: ${esc(ev.run_b.name)}</th><th>根拠</th></tr></thead>
+      <tbody>${scoreRows}
+      <tr><td class="cb-metric"><b>合計 (参考)</b></td><td><b>${totalA}</b> / 600</td><td><b>${totalB}</b> / 600</td><td></td></tr></tbody>
+    </table></div>
+    ${res.verdict ? `<div class="cb-ev-verdict">${wBadge} <span class="muted">確信度 ${res.verdict.confidence}%</span> — ${esc(res.verdict.reason || "")}</div>` : ""}
+    ${res.summary ? `<div class="cb-ev-summary">${esc(res.summary)}</div>` : ""}
+    <div class="cb-grid" style="margin-top:8px">
+      <div><b style="font-size:12px">A の欠陥</b>${defects("a")}
+        ${highlights("a") ? `<b style="font-size:12px">A の長所</b><ul class="cb-ev-hl">${highlights("a")}</ul>` : ""}</div>
+      <div><b style="font-size:12px">B の欠陥</b>${defects("b")}
+        ${highlights("b") ? `<b style="font-size:12px">B の長所</b><ul class="cb-ev-hl">${highlights("b")}</ul>` : ""}</div>
+    </div>
+    <details class="adv" data-detailkey="ev:${ev.id}:raw"><summary class="muted">judge 生出力 (JSON)</summary>
+      <div class="inner"><pre class="cb-code mono">${esc(ev.raw || "")}</pre></div></details>`;
+  } else if (res && !open) {
+    const totalA = CB_AXES.reduce((t, ax) => t + ((res.scores[ax.k] || {}).a || 0), 0);
+    const totalB = CB_AXES.reduce((t, ax) => t + ((res.scores[ax.k] || {}).b || 0), 0);
+    body = `<div class="muted" style="margin-top:4px">合計スコア A <b>${totalA}</b> / B <b>${totalB}</b> (600 満点) ・クリックで軸別スコア・欠陥・判定を表示</div>`;
+  }
+  const mats = ev.materials
+    ? `<span class="muted">材料: A ${ev.materials.a.files} ファイル / B ${ev.materials.b.files} ファイル${ev.materials.a.truncated || ev.materials.b.truncated ? " (切り詰めあり)" : ""}</span>` : "";
+  return `
+  <div class="card cb-hrow" data-row="${esc(ev.id)}">
+    <div class="row" style="cursor:pointer" onclick="cbEvalToggle('${ev.id}')">
+      <b class="grow ellip">${esc(ev.run_a.name)} ⇔ ${esc(ev.run_b.name)}</b>
+      ${wBadge}${stBadge}
+    </div>
+    <div class="muted" style="margin-top:4px">judge: ${esc(ev.judge.name)}${ev.judge.model ? " / " + esc(ev.judge.model) : ""}
+      [${ev.judge.kind === "external" ? "外部 API" : "プロファイル"}] ・ thinking ${esc(ev.thinking)} ・ ${fmtDT(ev.created_at)}
+      ${ev.secs != null ? " ・ " + fmtUp(ev.secs) : ""}</div>
+    <div class="row" style="gap:10px;margin-top:2px">${mats}</div>
+    ${body}
+    <div class="row" style="gap:6px;margin-top:8px">
+      <button class="ghost" onclick="cbEvalToggle('${ev.id}')" style="min-height:32px;padding:4px 10px">${IC("article")} ${open ? "閉じる" : "詳細"}</button>
+      <button class="ghost" onclick="cbEvalDelete('${ev.id}')" style="min-height:32px;padding:4px 10px;color:var(--err)">${IC("trash")} 削除</button>
+    </div>
+  </div>`;
+}
+function renderCodingEval() {
+  const el = $("#cb-eval");
+  if (!el) return;
+  const d = S.coding;
+  if (uiBusyIn(el) && el.childElementCount) { deferRender("cb-eval", renderCodingEval); return; }
+  const ra = d.runs.find(r => r.id === d.selA), rb = d.runs.find(r => r.id === d.selB);
+  const opts = cbViewerOptions(d.selA);
+  const profs = S.state ? (S.state.profiles || []) : [];
+  const judgeForm = d.judgeKind === "external" ? `
+    <div class="row" style="gap:8px;flex-wrap:wrap;margin-top:6px">
+      <div class="grow" style="min-width:200px"><label class="f">Base URL</label>
+        <input type="text" id="cb-ev-base" class="mono" value="${esc(d.judgeExtBase)}" placeholder="https://api.openai.com/v1" onchange="cbEvalJudgeSync()" style="width:100%"></div>
+      <div class="grow" style="min-width:160px"><label class="f">API キー</label>
+        <input type="password" id="cb-ev-key" class="mono" autocomplete="off" placeholder="sk-..." style="width:100%"></div>
+      <div class="grow" style="min-width:150px"><label class="f">モデル名 (空 = 先頭)</label>
+        <input type="text" id="cb-ev-model" class="mono" value="${esc(d.judgeExtModel)}" onchange="cbEvalJudgeSync()" style="width:100%"></div>
+    </div>` : `
+    <div class="row" style="gap:8px;margin-top:6px">
+      <select id="cb-ev-pid" class="grow" onchange="cbEvalJudgeSync()">
+        <option value="">(judge プロファイルを選択 — 起動済みのもの)</option>
+        ${profs.map(p => `<option value="${p.id}" ${p.id === d.judgePid ? "selected" : ""}>${esc(p.name)} ${liveOf(p.id) ? "● 起動中" : ""}</option>`).join("")}
+      </select>
+    </div>`;
+  const html = `
+  <div class="card">
+    <div class="row cb-selrow">
+      <div class="grow"><label class="f">実装 A</label><select id="cb-ev-selA" onchange="cbEvalSel('A', this.value)">${opts}</select></div>
+      <button class="ghost" onclick="cbEvalSwap()" title="A/B 入れ替え" style="align-self:flex-end">${IC("refresh")} 入替</button>
+      <div class="grow"><label class="f">実装 B</label><select id="cb-ev-selB" onchange="cbEvalSel('B', this.value)">${cbViewerOptions(d.selB)}</select></div>
+    </div>
+    ${ra && rb ? `<div style="margin-top:8px">${cbMetricsTable([ra, rb], "cbm:eval")}</div>
+      <div class="muted" style="font-size:11px;margin-top:4px">上の定量メトリクスに加え、実装ファイルの内容を AI が診断します (要件充足・正確性・品質・検証・効率を 0-100 で採点)。</div>`
+      : `<div class="muted" style="margin-top:6px">完了済みの実行を 2 つ選ぶと、定量メトリクス比較と AI 診断の準備ができます。ビューアーと同じ選択が共有されます。</div>`}
+    <div style="margin-top:10px;border-top:1px solid var(--line);padding-top:8px">
+      <div class="row" style="gap:8px;flex-wrap:wrap">
+        <label class="f" style="margin:0">judge モデル</label>
+        <select id="cb-ev-kind" onchange="cbEvalJudgeSync()">
+          <option value="profile" ${d.judgeKind !== "external" ? "selected" : ""}>起動プロファイル (ローカル)</option>
+          <option value="external" ${d.judgeKind === "external" ? "selected" : ""}>外部 API</option>
+        </select>
+        <label class="f" style="margin:0">thinking</label>
+        <select id="cb-ev-thinking" onchange="cbEvalJudgeSync()">
+          ${["off", "minimal", "low", "medium", "high", "xhigh", "max"].map(l =>
+            `<option value="${l}" ${d.judgeThinking === l ? "selected" : ""}>${l}</option>`).join("")}
+        </select>
+        <span class="muted" style="font-size:11px">judge の対応段階に従います (非対応値はエラーまたはサーバー側で丸め)</span>
+      </div>
+      ${judgeForm}
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="cb-ev-start" onclick="cbEvalStart()" ${d.evalBusy || !ra || !rb || d.selA === d.selB ? "disabled" : ""}>
+          <svg class=ic aria-hidden=true><use href=#i-chart /></svg> AI で定量評価</button>
+        <span class="muted" style="font-size:11px">実装内容は 1 実行あたり最大 160K 文字まで judge に渡されます。ローカル judge は GPU 実走ロックを共有します。</span>
+      </div>
+    </div>
+  </div>
+  <div class="row" style="margin:10px 0 6px"><b class="grow">${IC("article")} 評価履歴 (${d.evals.length})</b></div>
+  ${d.evals.length ? d.evals.map(cbEvalCard).join("") : `<div class="card muted">まだ AI 評価がありません。2 つの実行を選んで「AI で定量評価」を押してください。</div>`}`;
+  if (html === d._eval && el.childElementCount) return;
+  d._eval = html;
+  el.innerHTML = html;
+}
 /* ------------------------------------------------------------- dispatch */
 function renderCoding() {
   const d = S.coding;
@@ -913,6 +1237,7 @@ function renderCoding() {
   renderCodingActive(d.runs.find(r => r.id === d.active) || null);
   renderCodingHistory();
   renderCodingViewer();
+  renderCodingEval();
   if (d.logOpen && d.active) cbFetchLog().then(() => {
     const pre = $(".cb-log");
     const txt = d.logText || "(まだログがありません)";
