@@ -1,7 +1,9 @@
 """FreeToken (fork) バックエンドのプロファイル項目 — 投機的デコード回帰テスト。
 
 fork は upstream 統合で `--speculative {none,mtp,lookup}` を廃止し、
-`--speculative-algorithm` (mtp / dflash、既定 OFF) に置き換えた。launcher 側は
+`--speculative-algorithm` (mtp / dflash / dspark、既定 OFF) に置き換えた。
+dspark は Inkling-2-Mini 公式の DSpark drafter (checkpoint 同梱 mtp.safetensors、
+TP1 専用)。launcher 側は
   1. 正表 fields/freetoken-fork.json に fork ソースの定義が反映されている
   2. プロファイル編集画面の項目 (select / exec セクション / 既定 OFF) に出る
   3. ON のときだけ argv に付く (OFF はサーバー既定に譲る)
@@ -38,13 +40,38 @@ def test_speculative_field_exposed_only_on_fork():
     f = _field("freetoken-fork", "speculative_algorithm")
     assert f["flag"] == "--speculative-algorithm"
     assert f["type"] == "select"
-    assert f["options"] == ["", "mtp", "dflash"]   # 空 = 送信しない (サーバー既定 OFF)
+    assert f["options"] == ["", "mtp", "dflash", "dspark"]   # 空 = 送信しない (サーバー既定 OFF)
     assert f["section"] == "exec"
     assert f["default_on"] is False                 # auto 導出項目は既定 OFF
     assert "speculative_algorithm" in backends.DEFAULT_OFF_KEYS["freetoken-fork"]
     # upstream FreeToken の正表にはまだ無い項目
     assert "--speculative-algorithm" not in backends.load_table("freetoken")
     assert all(x["key"] != "speculative_algorithm" for x in backends.BACKENDS["freetoken"]["fields"])
+
+
+def test_draft_model_path_field_exposed_only_on_fork():
+    f = _field("freetoken-fork", "speculative_draft_model_path")
+    assert f["flag"] == "--speculative-draft-model-path"
+    assert f["section"] == "exec"
+    assert f["default_on"] is False
+    assert "speculative_draft_model_path" in backends.DEFAULT_OFF_KEYS["freetoken-fork"]
+    assert all(x["key"] != "speculative_draft_model_path"
+               for x in backends.BACKENDS["freetoken"]["fields"])
+    b = backends.BACKENDS["freetoken-fork"]
+    profile = {
+        "command": "",
+        "values": {"model_path": "/models/x", "host": "0.0.0.0", "port": "1919",
+                   "speculative_algorithm": "dspark", "speculative_draft_model_path": "/drafts/mtp"},
+        "on": {"model_path": True, "host": True, "port": True,
+               "speculative_algorithm": True, "speculative_draft_model_path": True},
+        "extra_args": "",
+    }
+    argv = backends.render_argv(b, profile, python="py", binary="", root=ROOT)
+    i = argv.index("--speculative-draft-model-path")
+    assert argv[i:i + 2] == ["--speculative-draft-model-path", "/drafts/mtp"]
+    profile["on"]["speculative_draft_model_path"] = False
+    assert "--speculative-draft-model-path" not in backends.render_argv(
+        b, profile, python="py", binary="", root=ROOT)
 
 
 def _argv(*, on: bool = True, value: str = "mtp") -> list[str]:
@@ -66,7 +93,7 @@ def test_speculative_sent_only_when_toggled_on():
     assert "--speculative-algorithm" not in _argv(on=False)
 
 
-@pytest.mark.parametrize("value", ["mtp", "dflash"])
+@pytest.mark.parametrize("value", ["mtp", "dflash", "dspark"])
 def test_speculative_accepts_table_choices(value: str):
     argv = _argv(on=True, value=value)
     assert argv[argv.index("--speculative-algorithm") + 1] == value

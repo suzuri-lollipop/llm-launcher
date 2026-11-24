@@ -128,7 +128,7 @@ CHOICE_SUPPLEMENT: dict[str, dict[str, list[str]]] = {
     },
     "freetoken": {
         "--model-source": ["", "huggingface", "modelscope"],
-        "--ple-backend": ["", "pinned", "disk"],
+        # --ple-backend は正表の choices が権威 (fork は gpu を持つため補完で潰さない)
         "--nvfp4-backend": ["", "auto", "marlin", "flashinfer", "triton"],
         "--moe-cache-policy": ["", "lru"],
         "--cache-type": ["", "radix"],
@@ -476,10 +476,15 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
         F("--num-tokens", "KVトークン数指定", section="sched", placeholder="自動"),
         F("--kv-reserve-tokens", "KV予約トークン", section="sched", help="--moe-cache-auto 時のKV下限"),
         F("--cache-type", "KVキャッシュ型", section="sched"),
-        F("--moe-strategy", "MoE戦略", section="cache"),
+        F("--moe-strategy", "MoE戦略", section="cache",
+          help="エキスパートの配置: offload=RAMにピン留めし頻用分をVRAMキャッシュ / fused=全量VRAM常駐 / "
+               "auto=エンジンがGPUで判定 (離散GPU→offload、統合メモリGB10→fused)。cpu/hybrid も選択可"),
         F("--expert-load", "エキスパート読込", section="cache"),
         F("--quant-backend", "量子化バックエンド", section="cache", help="moe.nvfp4=... 形式も可"),
-        F("--ple-backend", "PLEオフロード", section="cache"),
+        F("--ple-backend", "PLE配置" if bid == "freetoken-fork" else "PLEオフロード", section="cache",
+          help="PLE n-gramテーブルの配置 (Qwen3.8-Flash-Next系・約48GiB): disk=必要時にチェックポイントから読む (既定) / "
+               "pinned=ピン留めホストRAM / gpu=VRAM常駐" if bid == "freetoken-fork" else
+               "PLE n-gramテーブルの配置: disk=必要時にチェックポイントから読む (既定) / pinned=ピン留めホストRAM"),
         F("--nvfp4-backend", "NVFP4バックエンド", section="cache"),
         F("--moe-cache-size", "MoEキャッシュサイズ", section="cache", placeholder="0=自動", help="--moe-cache-rate / --moe-cache-auto と排他"),
         F("--moe-cache-rate", "MoEキャッシュ比率", section="cache", ftype="float", placeholder="例 0.5", help="--moe-cache-size と排他"),
@@ -528,9 +533,13 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
             F("--no-decode-fetch-overlap", "デコードfetch overlap無効", section="exec", ftype="bool",
               help="MoEデコードのhit/missフェッチオーバーラップを無効化 (既定ON、無効化で直列化し低速)"),
             F("--speculative-algorithm", "推測的デコード", section="exec",
-              choices=["mtp", "dflash"],
-              help="mtp = チェックポイントの MTP ヘッドで先読みしデコードを高速化 (qwen4_exp)。"
-                   "dflash は別途ドラフト checkpoint (--speculative-draft-model-path) が必要。空=無効"),
+              choices=["mtp", "dflash", "dspark"],
+              help="mtp = チェックポイントの MTP ヘッドで先読みしデコードを高速化 (Qwen3.5 / 3.6 / 3.8 系)。"
+                   "dflash は別途ドラフト checkpoint (--speculative-draft-model-path) が必要。"
+                   "dspark = Inkling-2-Mini 公式の DSpark drafter (checkpoint 同梱の mtp.safetensors、TP1 専用)。空=無効"),
+            F("--speculative-draft-model-path", "ドラフトモデルパス", section="exec",
+              placeholder="空=チェックポイント同梱",
+              help="ドラフト重みの置き場。dflash は必須。mtp / dspark は同梱 drafter の代わりに外部指定も可"),
             # カーネル最適化選択 (fork独自)
             {"key": "kernel_optimization", "flag": "", "type": "select",
              "label": "カーネル最適化", "section": "exec",
@@ -541,7 +550,8 @@ def build_freetoken(bid: str = "freetoken") -> dict[str, Any]:
         ]
         DEFAULT_OFF_KEYS[bid] |= {"image_max_tokens", "image_min_tokens", "kv_cache_dtype",
                                   "kv_cache_quant_scale", "mm_embed_cache_device", "mm_encoder_weights",
-                                  "prefill_decode_interval", "speculative_algorithm"}
+                                  "prefill_decode_interval", "speculative_algorithm",
+                                  "speculative_draft_model_path"}
     return _backend_meta(b, fields)
 
 

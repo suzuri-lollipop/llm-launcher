@@ -97,7 +97,8 @@ const CAL_STEPS = { prepare: "調整の準備", auto: "最適構成を自動で�
                     sweep: "実際に測る", create: "プロファイルを更新", adjust: "調整を反映",
                     calibrate: "実測調整", speed: "drafter 速度計測",
                     "calibrate-lookup": "lookup sweep", "calibrate-multi": "multi 並行校正",
-                    "phase-mtp": "MTP 実測", "phase-lookup": "lookup 実測", tournament: "決勝",
+                    "phase-mtp": "MTP 実測", "phase-dspark": "DSpark 実測",
+                    "phase-lookup": "lookup 実測", tournament: "決勝",
                     restart: "サーバーを起動し直す" };
 const STEP_NAMES = { queued: "待機しています", running: "", done: "完了", failed: "失敗",
                      cancelled: "中断しました", lost: "サーバー再起動で中断されました" };
@@ -651,6 +652,55 @@ $("#dl-next").addEventListener("click", () => { renderConfig(); go("s-config"); 
    repo id 直接入力は「その他」の details に格納し、既定の導線にはしない。 */
 let mdLocal = [];                                   // /api/hf-models のダウンロード済み一覧
 const mdMode = () => ($$("#md-modes input").find(i => i.checked) || {}).value || "dl";
+/* ---- GGUF 量子化の選択 (DL 前) --------------------------------------------
+   GGUF repo は全量子化が 1 repo に入る (safetensors 配布と違う) ので、ファイル
+   一覧を HF から取って量子化を選ばせ、選択パスだけ allow_patterns で落とす。
+   レイアウト (ルート / サブフォルダ / .gguf_file / 分割) の分類はサーバー側。 */
+let mdRepoFiles = null;                             // 直近 fetch の {repo_id, groups, mmproj}
+let mdRepoTok = 0;
+let mdRepoTimer = null;
+const fmtSize = b => b > (1 << 30) ? (b / (1 << 30)).toFixed(1) + "GB" : b > (1 << 20) ? Math.round(b / (1 << 20)) + "MB" : Math.round(b / 1024) + "KB";
+function mdGgufHide() {
+  mdRepoFiles = null;
+  $("#md-gguf-field").classList.add("hidden");
+  $("#md-gguf-mmproj-row").classList.add("hidden");
+  $("#md-gguf-note").classList.add("hidden");
+}
+async function mdFetchRepoFiles(repo) {
+  const tok = ++mdRepoTok;
+  mdGgufHide();
+  if (!repo || mdMode() !== "dl" || W.backend === "basalt"
+      || W.backend === "strata" || W.backend === "maya") return;
+  const note = $("#md-gguf-note");
+  note.textContent = "HF のファイル一覧を取得中…";
+  note.classList.remove("hidden");
+  try {
+    const d = await api(`/api/hf-repo-files?repo_id=${encodeURIComponent(repo)}`);
+    if (tok !== mdRepoTok) return;                  // 入力連打の古い応答は捨てる
+    if (d.ok && (d.groups || []).length) {
+      mdRepoFiles = d;
+      $("#md-gguf").innerHTML = d.groups.map((g, i) =>
+        `<option value="${i}">${esc(g.name)} — ${fmtSize(g.size)}${g.parts > 1 ? ` (分割 ${g.parts} ファイル)` : ""}</option>`).join("");
+      $("#md-gguf-field").classList.remove("hidden");
+      $("#md-gguf-mmproj-row").classList.toggle("hidden", !(d.mmproj || []).length);
+      if ((d.mmproj || []).length)
+        $("#md-gguf-mmproj-row .lab").textContent = `mmproj も取得 (${d.mmproj[0].path} — 画像入力)`;
+      note.textContent = "GGUF リポジトリ: 選択した量子化だけ取得します (repo 全体は全量子化入りで巨大)。";
+    } else if (d.ok) {
+      note.classList.add("hidden");                 // GGUF でない repo = 従来どおり全体
+    } else {
+      note.textContent = `ファイル一覧を取得できませんでした (${d.error || "不明"}) — repo 全体を取得します。`;
+    }
+  } catch (e) {
+    if (tok !== mdRepoTok) return;
+    note.textContent = `ファイル一覧を取得できませんでした (${e.message}) — repo 全体を取得します。`;
+  }
+}
+function mdRepoChanged() {
+  clearTimeout(mdRepoTimer);
+  const repo = $("#md-repo").value.trim() || $("#md-sel").value;
+  mdRepoTimer = setTimeout(() => mdFetchRepoFiles(repo), 350);
+}
 /* ---- Strata / Maya: 純正セットアップを --yes (非対話) で走らせる選択面板 --------
    面板 (家系/サイズ/コンテキスト/ビジョン) は共通。表の単一の源は submodule で、
    Strata は strata_setup / Maya は maya_setup が読み出す (mdT() が現在バックエンドの表)。 */
@@ -900,7 +950,7 @@ function mdSync() {
   });
   const adv = $("#md-adv");
   adv.hidden = mode !== "dl";
-  if (mode !== "dl") $("#md-repo").value = "";       // 直接入力はダウンロード時のみ意味を持つ
+  if (mode !== "dl") { $("#md-repo").value = ""; mdGgufHide(); }   // 直接入力 / GGUF 選択は DL 時のみ
   $("#md-strata").classList.add("hidden");
   $("#md-strata-exist-field").classList.add("hidden");
   $("#md-dl-field").classList.toggle("hidden", mode !== "dl");
@@ -920,7 +970,7 @@ function mdSync() {
   } else {
     btn.textContent = "このモデルを使う";
     btn.disabled = !$("#md-local").value;
-    const m = mdLocal.find(x => x.repo_id === $("#md-local").value);
+    const m = mdLocal.find(x => x.snapshot === $("#md-local").value);
     $("#md-dest").textContent = m ? `場所: ${m.snapshot}` : "";
   }
 }
@@ -965,6 +1015,21 @@ async function renderModel() {
       : shape === "gguf" ? ((m.gguf || []).length || m.has_weights)
       : m.has_weights));
   } catch { mdLocal = []; }
+  /* GGUF をファイルで読むバックエンド (FreeToken 系 / llama.cpp) はファイル単位に展開:
+     repo DIR をそのまま --model-path に渡すとエンジンが config.json を探して落ちる。
+     量子化が複数あればユーザーが選ぶ (value は snapshot パス = 一意) */
+  if (W.backend === "freetoken" || W.backend === "freetoken-fork" || W.backend === "llamacpp")
+    mdLocal = mdLocal.flatMap(m => {
+      /* drafter sidecar (dspark-* / mtp-*) は単体では起動できない companions なので
+         モデル択に出さない (本文量子化の選択と混同するため) */
+      const files = (m.gguf || [])
+        .filter(g => !/^(dspark|mtp)-/i.test(String(g.name).split("/").pop()))
+        .map(g => ({ ...m, snapshot: `${m.snapshot}/${g.name}`,
+          ggufFile: g.name + (g.parts > 1 ? ` (分割 ${g.parts} ファイル)` : "") }));
+      // safetensors 等 DIR 正体の重みもあれば DIR 指定を残す (NVFP4 + GGUF 併存 repo)
+      const dirOk = m.dir_weights || (!(m.gguf || []).length && m.has_weights);
+      return dirOk ? [...files, m] : (files.length ? files : [m]);
+    });
   /* ダウンロード択の一覧: 取得済みは選択不可 (グレー) — 済みモデルは
      「ダウンロード済みのモデルを使う」側で選ぶ (再ダウンロードの誤起動防止) */
   const haveRepo = r => mdLocal.some(x => x.repo_id === r);
@@ -977,10 +1042,11 @@ async function renderModel() {
       }).join("")
     : '<option value="">このバックエンドに対応モデル一覧がありません</option>';
   $("#md-local").innerHTML = mdLocal.length
-    ? mdLocal.map((m, i) => `<option value="${esc(m.repo_id)}"${i === 0 ? " selected" : ""}>`
+    ? mdLocal.map((m, i) => `<option value="${esc(m.snapshot)}"${i === 0 ? " selected" : ""}>`
         + `${esc(m.repo_id)}`
+        + (m.ggufFile ? ` · ${esc(m.ggufFile)}` : "")
         + (W.backend === "basalt" && (m.basalt || []).length ? ` · ${esc(m.basalt[0].name)}` : "")
-        + `${m.source === "data" ? " — 導入済みモデルフォルダ" : ""}</option>`).join("")
+        + `${m.source === "data" && !m.ggufFile ? " — 導入済みモデルフォルダ" : ""}</option>`).join("")
     : '<option value="">このバックエンドで使えるダウンロード済みモデルが見つかりません</option>';
   /* 済みモデルが 0 件ならその選択を不可にしてダウンロード択に寄せる
      (profile モードはダウンロード択が無いので切り替えない — 開始ボタンだけ無効) */
@@ -1002,14 +1068,16 @@ async function renderModel() {
     : "モデルをダウンロードするか、この PC にあるモデルを使うかを選べます。ダウンロード済みのモデルは再取得しません。")
     + (dirsNote ? "\n" + dirsNote : ""));
   mdSync();
+  mdFetchRepoFiles($("#md-repo").value.trim() || $("#md-sel").value);
   if (profileFlow() && !mdLocal.length)
     $("#md-dest").textContent = "ダウンロード済みのモデルが見つかりません。先に通常のセットアップでモデルをダウンロードしてください。"
       + (dirsNote ? " " + dirsNote : "");
 }
 $$("#md-modes input").forEach(i => i.addEventListener("change", mdSync));
-$("#md-sel").addEventListener("change", mdSync);
+$("#md-sel").addEventListener("change", () => { mdSync(); mdRepoChanged(); });
 $("#md-local").addEventListener("change", mdSync);
-$("#md-repo").addEventListener("input", mdSync);
+$("#md-repo").addEventListener("input", () => { mdSync(); mdRepoChanged(); });
+$("#md-gguf").addEventListener("change", mdSync);
 /* Strata 面板の選択変更 */
 $("#md-family").addEventListener("change", () => {
   W.mdStFam = $("#md-family").value; W.mdStModel = ""; mdStFillSizes(); mdSync(); });
@@ -1166,11 +1234,17 @@ $("#md-start").addEventListener("click", async () => {
     /* 済みモデルは「完了済みのダウンロードジョブ」に化かして後続 (稼働設定の
        プロファイル名 / model_path 解決) をそのまま通す。待ち時間が無いので
        設定は従来どおりジョブ後 (③) に聞く */
-    const m = mdLocal.find(x => x.repo_id === $("#md-local").value);
+    const m = mdLocal.find(x => x.snapshot === $("#md-local").value);
     if (!m) return;
+    /* GGUF はファイル単位に展開済み (ggufFile 持ち = snapshot がファイルパス)。
+       名前は選択ファイルそのものから。DIR 正体 (safetensors 等) はテキスト本体が
+       一意のときのみファイル単位にする (dspark-* / mtp-* sidecar は除外) */
+    const bs = ggufTextBases(m.gguf);
+    const gguf = m.ggufFile ? ggufBase(m.snapshot) : (bs.length === 1 ? bs[0] : "");
     W.kind = "download";
     W.job = { id: "", kind: "download", status: "done", backend: W.backend,
-              repo_id: m.repo_id, result: { path: m.snapshot }, local_dir: m.snapshot };
+              repo_id: m.repo_id, gguf,
+              result: { path: m.snapshot }, local_dir: m.snapshot };
     W.preJob = false; W.modelSkipped = false;
     W.cfgProfId = null; W.cfgProfNew = false;
     W.summary.push({ ok: true, t: `ダウンロード済みのモデル ${m.repo_id} を使用します` });
@@ -1184,11 +1258,21 @@ $("#md-start").addEventListener("click", async () => {
     const repo = $("#md-repo").value.trim() || $("#md-sel").value;
     if (!repo) return;
     /* 一覧から選んだモデルは既定ファイル (pack 1 個) だけ取得する。repo 全体 (1 TB) を
-       落とさないための allow_patterns。repo id を手入力したときは指定なし = 全体 */
+       落とさないための allow_patterns。repo id を手入力したときは指定なし = 全体。
+       GGUF repo は選択した量子化 (+ mmproj) だけ — 全量子化入りで巨大なので */
     const entry = (W.mdList || []).find(m => m.repo_id === repo) || null;
+    let pats = (entry && entry.include) || [];
+    let gguf = "";
+    if (mdRepoFiles && mdRepoFiles.repo_id === repo && (mdRepoFiles.groups || []).length) {
+      const g = mdRepoFiles.groups[parseInt($("#md-gguf").value, 10) || 0];
+      pats = [...g.paths];
+      gguf = ggufBase(g.name);            // プロファイル名既定 = 選択ファイル単位
+      if ($("#md-gguf-mmproj").checked && (mdRepoFiles.mmproj || []).length)
+        pats.push(mdRepoFiles.mmproj[0].path);   // 優先順 (BF16 > F32 > F16) の先頭 1 つ
+    }
     const sp = spec();
     W.dlReq = { repo_id: repo, revision: "", backend: (sp && sp.model_data) ? sp.id : "",
-                allow_patterns: (entry && entry.include) || [],
+                allow_patterns: pats, gguf,
                 max_kbps: parseInt($("#md-speed").value, 10) || 0 };
     W.tableReq = null;
     W.tableCtxPick = false;
@@ -1354,6 +1438,13 @@ const CF_KV = [["fp8", "fp8", ""], ["bf16", "bf16", ""], ["auto", "auto", ""]];
    はどちらも TP 可。auto / fp8_per_token_head (TP1 + bf16 専用)。bf16 は無い。 */
 const CF_KV_FT = [["fp8", "fp8", ""], ["int8", "int8", ""], ["auto", "auto", ""],
                   ["fp8_per_token_head", "fp8/head", ""]];
+/* FreeToken (fork) のエキスパート配置 (--moe-strategy): offload = RAM オフロード +
+   GPU スロットキャッシュ / fused = 全量 VRAM 常駐 / auto = エンジンが GPU で判定。
+   cpu / hybrid は上級ノブなのでウィザードには出さない (プロファイル編集で選択可)。 */
+const CF_MOE_FT = [["auto", "auto", "既定"], ["offload", "offload", ""], ["fused", "VRAM常駐", ""]];
+/* PLE 配置 (--ple-backend): disk = 必要時にチェックポイントから読む (エンジン既定) /
+   pinned = ピン留めホスト RAM に一括ロード / gpu = VRAM 常駐 (fork 独自)。 */
+const CF_PLE_FT = [["disk", "disk", "既定"], ["pinned", "RAM", ""], ["gpu", "VRAM", ""]];
 const CF_PAR = [["1", "1", ""], ["2", "2", ""], ["4", "4", ""], ["8", "8", ""]];
 const CF_TP = [["1", "1", ""], ["2", "2", ""], ["4", "4", ""], ["8", "8", ""]];
 /* 最大出力トークン (max_tokens 省略時の生成上限)。コード生成は1応答が長くなりやすいので
@@ -1363,7 +1454,7 @@ const CF_OUT = [["8192", "8K", ""], ["16384", "16K", ""], ["32768", "32K", ""],
                 ["65536", "64K", ""], ["131072", "128K", ""]];
 /* 質問の固定順 (FreeToken 基準)。描画/補足/保存の 3 ループはリテラルのまま、
    推奨計算などの追加ループはこちらを使う。 */
-const CF_ORDER = ["ctx","out","kv","tp","par","vis"];
+const CF_ORDER = ["ctx","out","kv","moe","ple","tp","par","vis"];
 
 /* ---------------------------------------------------------------- 環境適応の推奨 (純粋関数)
    色々な環境で使うため、「推奨」はコードに焼いた固定値ではなく、この PC の
@@ -1396,24 +1487,64 @@ function cfKvBytes(kv) {
   return 96 * 1024;   // bf16 / fp16 / auto / 不明 = 非圧縮 (保守的)
 }
 
+/* GGUF ファイルパス → プロファイル名既定 (basename から .gguf / .gguf_file と
+   分割サフィックス (-00001-of-0000N) を除く)。GGUF repo は全量子化が 1 repo に
+   まとまるので、名前は repo 単位でなくファイル単位にする。非 GGUF は ""。 */
+function ggufBase(fname) {
+  const s = String(fname || "");
+  if (!/\.gguf(_file)?$/i.test(s)) return "";
+  return s.split("/").pop().replace(/\.gguf(_file)?$/i, "").replace(/-\d{5}-of-\d{5}$/, "");
+}
+
+/* GGUF 一覧 → テキスト本体の basename 候補 (dedup)。drafter sidecar (dspark-* / mtp-*)
+   はテキスト量子化ではないので除外。済みスナップショットのファイル単位命名に使う。 */
+function ggufTextBases(ggufList) {
+  return [...new Set((ggufList || [])
+    .filter(f => !/^(dspark|mtp)-/i.test(String(f.name).split("/").pop()))
+    .map(f => ggufBase(f.name)).filter(Boolean))];
+}
+
+/* freetoken-fork の選択モデル家系 (docs/models.md 表 = mdList が正)。
+   PLE は Qwen3.8-Flash-Next 系だけ / Inkling-2-Mini は K/V が L2・RMS 正規化済みで
+   int8 KV が fp8 より高精度。known=false (表に無い手入力 repo 等) のときは
+   質問を絞らない (保守側 — PLE 搭載かも知れないので質問は残す)。 */
+function ftModelInfo(dlReq, job, mdList, modelPath, localList) {
+  let repo = String((dlReq || {}).repo_id || (job || {}).repo_id || "");
+  if (!repo && modelPath) {
+    const hit = (localList || []).find(m => m.snapshot && String(modelPath).startsWith(String(m.snapshot)));
+    if (hit) repo = String(hit.repo_id || "");
+  }
+  const ent = (mdList || []).find(m => m.repo_id === repo);
+  const name = ent ? String(ent.name) : "";
+  const src = name || repo;
+  return { name, repo, ple: /qwen3\.8-flash-next/i.test(src),
+           inkling: /inkling/i.test(src), known: !!ent };
+}
+
 /* backend + 環境 + 現在の選択 + Strata / Maya エンジン値 → 質問ごとの推奨 {v, why}。
    sel = {ctx, kv, tp, par, gpu} (ctx は freetoken では 1 人あたり)、
    engine = {parallel, recContext} (strata / maya の config 由来。無ければ null)。
    ctxList = 実際に描画するコンテキスト選択肢 (数値の昇順配列。省略時は CF_CTX
    相当 — 家系ホワイトリストを描く経路ではその範囲内で推奨する)。
+   model = ftModelInfo の結果 (freetoken-fork の家系別推奨。無ければ null)。
    予算則 (2026-11-15 方針): VRAM は LLM 専用なので、選択中カードの VRAM 全量を
    KV 予算の上限とする (一律の重み予約は計算外 — 重みの配置と起動時の実空き検査は
    エンジンの仕事。Strata は config の parallel / rec_context が常に優先)。
    推奨は上限目安であり、最適値はキャリブレーション (⑤) が実測する。 */
-function cfRecommend(backend, hw, sel, engine, ctxList) {
+function cfRecommend(backend, hw, sel, engine, ctxList, model) {
   sel = sel || {};
-  const rec = { ctx: null, kv: null, par: null, out: null, vis: null };
+  const rec = { ctx: null, kv: null, par: null, out: null, vis: null, moe: null, ple: null };
   const ctxN = Number(sel.ctx) > 0 ? Number(sel.ctx) : 131072;
   /* out: コード生成既定 32K (workload 推奨・環境非依存)。選択 ctx は超えない。 */
   const outOpts = [8192, 16384, 32768, 65536, 131072];
   const outFit = outOpts.filter(n => n <= ctxN);
   rec.out = { v: String(outFit.includes(32768) ? 32768 : (outFit[outFit.length - 1] || 8192)),
               why: "コード生成向け既定 — エンジン既定と同じ" };
+  /* Inkling-2-Mini の KV: K/V が L2・RMS 正規化済み (値域が揃う) なので、一様量子化の
+     int8 (per-token-head) が fp8 (仮数 3bit) より高精度。モデル固有の事実なので
+     環境非依存の推奨 (out と同じ立場)。 */
+  if (backend === "freetoken-fork" && model && model.inkling)
+    rec.kv = { v: "int8", why: "Inkling-2-Mini の K/V は L2・RMS 正規化済み — 一様量子化の int8 が fp8 (仮数3bit) より高精度" };
   if (backend === "basalt")
     rec.vis = { v: "dynamic", why: "エンジンが必要時に読む — 常駐VRAMなし" };
   if (!hw) return rec;   // GPU 不明 → 環境ベースの推奨は出さない (workload 推奨だけ)
@@ -1482,7 +1613,7 @@ function cfRecommend(backend, hw, sel, engine, ctxList) {
     rec.kv = tight && ccMin >= 8
       ? { v: "fp8", why: `${vramTxt} はタイト + fp8 対応 GPU → メモリ半減` }
       : { v: "bf16", why: tight ? "GPU の fp8 対応が不明 → 安全な形式" : `${vramTxt} に余裕 → 品質優先` };
-  else if (backend === "freetoken-fork")
+  else if (backend === "freetoken-fork" && !(model && model.inkling))
     rec.kv = tight && ccMin >= 8
       ? { v: "fp8", why: `${vramTxt} はタイト + fp8 対応 GPU → メモリ半減` }
       : tight && ccMin >= 7.5
@@ -1491,6 +1622,17 @@ function cfRecommend(backend, hw, sel, engine, ctxList) {
   else if (backend === "strata" || backend === "maya" || backend === "basalt")
     rec.kv = tight ? { v: "int8", why: `${vramTxt} はタイト → メモリ半減` }
            : { v: "fp16", why: `${vramTxt} に余裕 → 品質優先` };
+
+  /* エキスパート配置 / PLE 配置 (freetoken fork): エキスパートは auto = エンジン判定
+     (離散 GPU → offload、統合メモリ → fused) に任せるのを推奨。PLE テーブルは約 48GiB —
+     RAM に余裕 (96GiB 以上) があれば pinned で取得を速く、無ければ既定の disk。
+     VRAM 常駐は 1 枚あたり約 48GiB の空きが必要なので自動推奨しない (明示選択に任せる)。 */
+  if (backend === "freetoken-fork") {
+    rec.moe = { v: "auto", why: "エンジン判定に任せる — 離散GPU→offload (RAM+VRAMキャッシュ)、統合メモリ (GB10)→VRAM常駐" };
+    rec.ple = (hw.ramGiB || 0) >= 96
+      ? { v: "pinned", why: `RAM ${Math.round(hw.ramGiB)}GB に余裕 — 約48GiBのテーブルをRAMへ一括ロードして取得を高速化` }
+      : { v: "disk", why: "エンジン既定 — 約48GiBのテーブルを必要時にチェックポイントから読み、RAM/VRAMを節約" };
+  }
 
   /* Strata / Maya: エンジン自身が決めた値 (config の parallel / 純正公式の rec_context) が
      あれば、こちらの目安より優先する (純正の VRAM/RAM 計算が単一の源)。 */
@@ -1558,7 +1700,7 @@ function cfCtxList() {
    ユーザーの選択自体は動かさない (タグと根拠の表示だけ)。 */
 function cfApplyRec() {
   const cfg = W.cfgRendered || RUNCFG[W.backend] || {};
-  const recs = cfRecommend(W.backend, W.hw, cfSelNow(), W.cfgEngine, cfCtxList());
+  const recs = cfRecommend(W.backend, W.hw, cfSelNow(), W.cfgEngine, cfCtxList(), W.ftModel);
   for (const id of CF_ORDER) {
     const el = document.querySelector(`#cf-${id}`);
     if (!el || !cfg[id]) continue;
@@ -1586,7 +1728,7 @@ function hwSummary(hw) {
 function cfSyncHints() {
   const cfg = W.cfgRendered || RUNCFG[W.backend] || {};
   const recs = cfApplyRec();
-  for (const id of ["ctx", "out", "kv", "tp", "par", "vis"]) {
+  for (const id of ["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"]) {
     const sec = cfg[id]; const hint = document.querySelector(`#cf-${id}-hint`);
     if (!sec || !hint) continue;
     let info = sec.hint || "";
@@ -1609,7 +1751,7 @@ function cfSyncHints() {
   }
 }
 /* 稼働設定 (③) の質問セット。画面の質問順は全バックエンド共通で
-   ctx → kv → tp → par → vis の固定順 (FreeToken のセットアップが基準)。
+   ctx → out → kv → moe → ple → tp → par → vis の固定順 (FreeToken のセットアップが基準)。
    バックエンド追加時は実在するフラグの項目だけを入れる (順序は定義側に依存しない)。 */
 const RUNCFG = {
   "freetoken-fork": { regen: true, model: true,
@@ -1621,6 +1763,12 @@ const RUNCFG = {
     kv: { key: "kv_cache_dtype", label: "KVキャッシュ形式",
           hint: "会話履歴の格納精度です。fp8とint8はメモリ半減でTPも可。fp8/headはTP1+bf16専用です",
           opts: CF_KV_FT, cur: v => v },
+    moe: { key: "moe_strategy", label: "エキスパート配置", short: "エキスパート",
+           hint: "MoEモデルのエキスパートの置き場所です。offload=RAMにピン留めし、よく使う分をVRAMキャッシュに置いて必要時に取得/計算 (VRAM節約) / VRAM常駐=全エキスパートをVRAMに読み込み (最速・十分なVRAMが必要) / auto=エンジンが判定 (離散GPU→offload、統合メモリGB10→VRAM常駐)。MoEモデルでのみ効果があります",
+           opts: CF_MOE_FT, cur: v => v },
+    ple: { key: "ple_backend", label: "PLE配置", short: "PLE",
+           hint: "PLE n-gramテーブルの置き場所です (Qwen3.8-Flash-Next系などのPLE搭載モデルのみ・テーブル約48GiB)。disk=必要時にチェックポイントから読む (既定・RAM/VRAM節約) / RAM=ピン留めRAMに一括ロード (取得が速い) / VRAM=VRAMに常駐 (最速・GPU1枚あたり約48GiBのVRAMを消費)。PLE非搭載モデルでは無視されます",
+           opts: CF_PLE_FT, cur: v => v },
     tp: { key: "tp_size", label: "GPU分割数", short: "GPU分割",
           hint: "モデルを何枚のGPUに分割するか。VRAMが足りない場合は増やします", opts: CF_TP, cur: CF_NUM },
     par: { key: "max_running_requests", label: "並列推論数",
@@ -1726,7 +1874,9 @@ function preJobName() {
     return mdCfgKey(f, W.tableReq.model)
       .replace(/^strata-/, "").replace(/^maya-/, "").replace(/\.json$/, "");
   }
-  if (W.dlReq) return String(W.dlReq.repo_id).split("/").pop();
+  if (W.dlReq) {
+    return String(W.dlReq.gguf || "") || String(W.dlReq.repo_id).split("/").pop();
+  }
   return specName(W.backend);
 }
 async function renderConfig() {
@@ -1756,7 +1906,7 @@ async function renderConfig() {
       // プロファイルの設定 (コンテキスト長 / 並列など) と JSON を上書きして
       // しまい、設定違いのプロファイルを増やせなくなる。
       const nm = (j && j.config_name) ? String(j.config_name).replace(/^strata-/, "").replace(/^maya-/, "").replace(/\.json$/, "")
-                 : (j && j.repo_id) ? String(j.repo_id).split("/").pop()
+                 : (j && j.repo_id) ? (String(j.gguf || "") || String(j.repo_id).split("/").pop())
                  : W.preJob ? preJobName()
                  : specName(W.backend);
       // config 主体 (strata/maya) は ② の成果物 (config JSON) を作成時から結びつける。
@@ -1925,6 +2075,13 @@ async function renderConfig() {
                       recContext: recCtx };
     }
   }
+  /* freetoken-fork: 家系別の質問出し分けと推奨 (docs/models.md 表が正)。
+     PLE 非搭載と判明しているモデル (Inkling 等) には PLE 配置を聞かない。
+     表に無い不明 repo は質問を残す (保守側 — PLE 搭載かも知れない)。 */
+  if (W.backend === "freetoken-fork") {
+    W.ftModel = ftModelInfo(W.dlReq, W.job, W.mdList, (p.values || {}).model_path, mdLocal);
+    if (W.ftModel.known && !W.ftModel.ple) delete cfg.ple;
+  }
   /* 実際に描画する質問セットを記録する: 保存 (cf-go) / 推奨タグ / 補足は
      この出し分け込みの定義を使う (RUNCFG の静的定義だと Maya GLM で
      「GPU の使い方」の選択を --tp として書いてしまう) */
@@ -1965,11 +2122,11 @@ async function renderConfig() {
       const jp = (W.job || {}).result || {};
       return Number((W.cfgEngine || {}).parallel) || Number(jp.parallel) || 1;
     }
-    const r0 = cfRecommend(W.backend, W.hw, cfSelFrom(curs, 1), W.cfgEngine, cfCtxList());
+    const r0 = cfRecommend(W.backend, W.hw, cfSelFrom(curs, 1), W.cfgEngine, cfCtxList(), W.ftModel);
     return parseInt((r0.par || {}).v, 10) || parseInt((cfg.par.opts[0] || ["1"])[0], 10) || 1;
   })();
-  const recs = cfRecommend(W.backend, W.hw, cfSelFrom(curs, parInit), W.cfgEngine, cfCtxList());
-  for (const id of ["ctx", "out", "kv", "tp", "par", "vis"]) {
+  const recs = cfRecommend(W.backend, W.hw, cfSelFrom(curs, parInit), W.cfgEngine, cfCtxList(), W.ftModel);
+  for (const id of ["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     if (sec.flag === "gpu" && (W.cfgArgs.gpus || []).length < 2) continue;  // 純正同じく2枚以上でだけ聞く
     if (sec.gpusFrom === "system" && (W.sysGpus || []).length < 2) continue;
@@ -2046,7 +2203,7 @@ $("#cf-go").addEventListener("click", async () => {
   const chosen = [];
   const updates = {};   // config args への書き戻し (strata/maya の ctx/kv/tp)
   const par = cfParNow();   // 一人あたり項目が合計を書き込むときに使う並列数 (フォームの選択)
-  for (const id of ["ctx", "out", "kv", "tp", "par", "vis"]) {
+  for (const id of ["ctx", "out", "kv", "moe", "ple", "tp", "par", "vis"]) {
     const sec = cfg[id]; if (!sec) continue;
     const el = document.querySelector(`#cf-groups select#cf-${id}`);
     if (!el || !el.value) continue;
@@ -2351,6 +2508,30 @@ async function bindSetupResult(r) {
   }
 }
 
+/* freetoken 系 / llama.cpp: GGUF repo の DL 成果物 (snapshot DIR) はファイルへ解決。
+   DL ジョブが選んだファイル (allow_patterns) を最優先、無ければ一覧の先頭。
+   DIR のまま渡すとエンジンが config.json を探して起動が落ちる */
+async function resolveGgufFile(mp, patterns) {
+  if (!mp || /\.(gguf|basalt)$/i.test(mp)) return { path: mp, many: false };
+  if (!(W.backend === "freetoken" || W.backend === "freetoken-fork" || W.backend === "llamacpp"))
+    return { path: mp, many: false };
+  let files = [];
+  try {
+    const hm = await api("/api/hf-models?refresh=1");   // 取得直後でキャッシュが古い可能性
+    const snap = (hm.models || []).find(m => m.snapshot === mp);
+    files = ((snap && snap.gguf) || []).map(f => f.name);
+  } catch { return { path: mp, many: false }; }
+  if (!files.length) return { path: mp, many: false };
+  const base = mp.replace(/\/+$/, "");
+  // 選択 DL のパス (.gguf_file はスキャナが .gguf symlink を準備した後の名前で照合)
+  const wanted = (patterns || [])
+    .filter(p => /\.gguf(_file)?$/i.test(p) && !/mmproj/i.test(p))
+    .map(p => p.replace(/\.gguf_file$/i, ".gguf"));
+  const hit = wanted.find(w => files.includes(w));
+  if (hit) return { path: base + "/" + hit, many: false };
+  return { path: base + "/" + files[0], many: files.length > 1 };
+}
+
 async function bindDownloadResult(r) {
   /* 他バックエンド: DL の成果物 → プロファイルの model_path + 起動 JSON 再生成 */
   try {
@@ -2361,6 +2542,8 @@ async function bindDownloadResult(r) {
     const modelKey = cfg.model === true ? "model_path" : (cfg.model || "model_path");
     let mp = String((r.result || {}).path || r.local_dir || "");
     mp = await resolveBasaltPack(mp, r.repo_id);
+    const gg = await resolveGgufFile(mp, r.allow_patterns);
+    mp = gg.path;
     if (mp) { vals[modelKey] = mp; if (on) on[modelKey] = true; }
     await api(`/api/profiles/${p.id}`, { method: "PUT", body: profBody(p, vals, on) });
     if (cfg.regen && cfg.regen !== "config-args") {
@@ -2369,6 +2552,8 @@ async function bindDownloadResult(r) {
     }
     await refreshProf(p);
     W.summary.push({ ok: true, t: "モデルをプロファイルに紐付けました" + (mp ? " — " + mp.split("/").pop() : "") });
+    if (gg.many)
+      W.summary.push({ ok: true, t: "GGUF が複数あります — 先頭のファイルを設定しました。プロファイル編集の HF ピッカーで選択し直せます" });
   } catch (e) {
     W.summary.push({ ok: false, t: "モデルの紐付けに失敗しました: " + e.message + " — プロファイル編集から設定できます" });
   }
@@ -2423,6 +2608,8 @@ async function renderCal() {
       caInfo += "\nInkling 2 Mini: エンジン本体の調整は不要です (起動ごとにこの PC へ合わせます)。drafting が auto のときはここで計測記録を消し、次回起動時にエンジンが再計測します (~1 分・最初の回答の前)。";
     if (W.backend === "strata" && /^strata-(hy4-flash|inkling-2-mini)/.test(cn))
       caInfo += "\nこのモデルは調整不要です (エンジンが起動ごとに速度とメモリ配置をこの PC へ自動で合わせます)。スキップしてください。";
+    if (calIsFt() && ftIsInkling((W.calPick || {}).values, (W.calPick || {}).name))
+      caInfo += "\nInkling-2-Mini: MTP ヘッドは無いため、single は DSpark (公式 drafter) vs none の自動選定になります (DSpark は TP1 専用)。multi は並行 / MoE ノブを校正します。";
     setInfo("#ca-info", caInfo);
     /* FreeToken 系: 校正対象 (single / multi) の説明 — ダッシュボードの
        「キャリブレーション」タブと同じ問いをウィザードでも出す (2026-11-17 報告:
@@ -2449,16 +2636,26 @@ async function renderCal() {
 /* FreeToken 系 (本家 / fork) の校正対象: single (auto) / multi。
    ダッシュボードの「キャリブレーション」タブの #cal-mode と同じ値を送る */
 const calIsFt = () => W.backend === "freetoken" || W.backend === "freetoken-fork";
+/* Inkling-2-Mini 判定 (表示の出し分け用): 投機現在値が dspark、またはモデル参照に
+   inkling を含む (起動 JSON 主体モードでは config のファイル名がモデル名由来)。
+   校正の実判定はサーバー側 (calibrate._ft_phase_a_spec) が起動 JSON / config.json で行う */
+const ftIsInkling = (v, name) => {
+  v = v || {};
+  return String(v.speculative_algorithm || "") === "dspark"
+    || /inkling/i.test(`${v.model_path || ""} ${v.config || ""} ${v.served_model_name || ""} ${name || ""}`);
+};
 /* 選択中の校正対象に合わせて所要時間目安 (ca-time) と 1 行補足を出し分ける。
    single = 全部測りの 1 発 (3〜4 時間) / multi = 4 腕 × エンジン再起動 (15〜25 分) */
 function syncCalTime() {
   if (!calIsFt()) return;   // 他バックエンドの ca-time は renderCal が設定する
   const multi = $("#ca-mode").value === "multi";
+  const ik = ftIsInkling((W.calPick || {}).values, (W.calPick || {}).name);
   $("#ca-time").textContent = multi
     ? "multi は目安 15〜25 分かかります (4 腕 × エンジン再起動)"
     : "FreeToken は目安 3〜4 時間かかります (全部測りの 1 発)";
   $("#ca-mode-hint").textContent = multi
     ? "none / mixed / piped / piped+short-first を全並列数の 2 プローブで実測し、合算 tok/s 優先で選定 (stall は悪化ガード) して勝者の並行ノブ一式を書き戻します"
+    : ik ? "none / DSpark (Inkling-2-Mini 公式 drafter) から自動選定し、勝者の --speculative-algorithm と env を書き戻します"
     : "none / MTP / lookup から自動選定し、勝者の --speculative と env を書き戻します";
 }
 function syncCalSel() {

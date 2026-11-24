@@ -88,6 +88,19 @@ def test_scaled_checkpoint_is_left_alone(tmp_path: Path):
     assert "--hf-overrides" not in _render(_vals(mp, "1048576"))
 
 
+def test_nope_checkpoint_has_no_override(tmp_path: Path):
+    # Inkling-2-Mini (inkling2_loop): NoPE = 位置情報は学習済み相対位置バイアスが運び
+    # rope が無い。config に max_position_embeddings も無いので、1M を選んでも
+    # YaRN を足さない (エンジンの上限は checkpoint の model_max_length 1M)
+    cfg = {"model_type": "inkling2_loop",
+           "text_config": {"model_type": "inkling2_loop_text",
+                           "model_max_length": 1048576, "sliding_window_size": 1024}}
+    d = tmp_path / "model"
+    d.mkdir(exist_ok=True)
+    (d / "config.json").write_text(json.dumps(cfg), "utf-8")
+    assert "--hf-overrides" not in _render(_vals(str(d), "1048576"))
+
+
 def test_flat_config_writes_top_level_rope(tmp_path: Path):
     argv = _render(_vals(_checkpoint(tmp_path, nested=False), "524288"))
     payload = json.loads(argv[argv.index("--hf-overrides") + 1])

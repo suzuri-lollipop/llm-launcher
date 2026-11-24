@@ -82,7 +82,7 @@ def test_nested_weights_one_level(tmp_path):
           {"rev": {"config.json": 100, "gguf/model.gguf": W}}, {"main": "rev"})
     m = _by_repo(models.scan_hf_cache(hub))["Org/G"]
     assert m["has_weights"] is True
-    assert m["gguf"] == [{"name": "gguf/model.gguf", "size": W}]
+    assert m["gguf"] == [{"name": "gguf/model.gguf", "size": W, "parts": 1}]
     # ウィザードの pack パス結合 (snapshot + "/" + name) が実ファイルを指す
     assert (Path(m["snapshot"]) / m["gguf"][0]["name"]).is_file()
 

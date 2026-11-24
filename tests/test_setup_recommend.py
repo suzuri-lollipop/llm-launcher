@@ -43,10 +43,13 @@ const items = JSON.parse(require("fs").readFileSync(0, "utf8"));
 const out = items.map(it => {
   if (it.kind === "hw") return { name: it.name, hw: hwFromSystem(it.sys) };
   if (it.kind === "kvbytes") return { name: it.name, bytes: cfKvBytes(it.kv) };
+  if (it.kind === "ggufbase") return { name: it.name, base: ggufBase(it.fname) };
+  if (it.kind === "gguftext") return { name: it.name, bases: ggufTextBases(it.gguf) };
+  if (it.kind === "ftmodel") return { name: it.name, mi: ftModelInfo(it.dlReq, it.job, it.mdList, it.modelPath, it.localList) };
   const hw = it.sys ? hwFromSystem(it.sys) : null;
-  const r = cfRecommend(it.backend, hw, it.sel, it.engine, it.ctxList);
+  const r = cfRecommend(it.backend, hw, it.sel, it.engine, it.ctxList, it.model);
   const rec = {}, why = {};
-  for (const k of ["ctx", "kv", "par", "out", "vis"]) {
+  for (const k of ["ctx", "kv", "par", "out", "vis", "moe", "ple"]) {
     rec[k] = r[k] ? r[k].v : null;
     why[k] = r[k] ? r[k].why : null;
   }
@@ -439,3 +442,124 @@ def test_strata_basalt_card_selection_changes_budget():
     got = _run(items)
     assert got["one"]["rec"]["par"] == "4"        # 1 枚 24GB → 6GiB/slot × 4
     assert got["both"]["rec"]["par"] == "8"       # 2 枚 48GB → 6GiB/slot × 8
+
+
+def test_fork_expert_and_ple_placement_recommendations():
+    """fork のエキスパート配置 / PLE 配置の推奨:
+    - エキスパートは auto (エンジン判定: 離散 GPU → offload、統合メモリ → fused)
+    - PLE (約 48GiB) は RAM に余裕 (96GiB 以上) があれば pinned、無ければ既定 disk
+    - VRAM 常駐 (gpu) は自動推奨しない (1 枚あたり約 48GiB の空きが必要な明示選択)
+    - GPU 不明環境では環境ベースの推奨なし / fork 以外のバックエンドには出さない"""
+    items = [
+        {"kind": "rec", "name": "small_ram", "backend": "freetoken-fork",
+         "sys": _hw([_gpu(24, cc=12.0)], ram_gib=64), "sel": _sel(), "engine": None},
+        {"kind": "rec", "name": "big_ram", "backend": "freetoken-fork",
+         "sys": _hw([_gpu(96, cc=9.0)], ram_gib=128), "sel": _sel(), "engine": None},
+        {"kind": "rec", "name": "no_gpu", "backend": "freetoken-fork",
+         "sys": None, "sel": _sel(), "engine": None},
+        {"kind": "rec", "name": "sglang", "backend": "sglang",
+         "sys": _hw([_gpu(24)]), "sel": _sel(), "engine": None},
+    ]
+    got = _run(items)
+    assert got["small_ram"]["rec"]["moe"] == "auto"
+    assert got["small_ram"]["rec"]["ple"] == "disk"
+    assert got["big_ram"]["rec"]["moe"] == "auto"
+    assert got["big_ram"]["rec"]["ple"] == "pinned"
+    assert "RAM 128GB" in got["big_ram"]["why"]["ple"]
+    assert got["no_gpu"]["rec"]["moe"] is None
+    assert got["no_gpu"]["rec"]["ple"] is None
+    assert got["sglang"]["rec"]["moe"] is None
+    assert got["sglang"]["rec"]["ple"] is None
+
+
+# ---------------------------------------------------------------- GGUF ファイル単位の名前 / 家系判定
+
+def test_gguf_base_extraction():
+    """プロファイル名既定 = 選択ファイルの basename (.gguf / 分割サフィックス除去)。
+    GGUF repo は全量子化が 1 repo にまとまるため repo 名でなくファイル単位。"""
+    got = _run([{"kind": "ggufbase", "name": n, "fname": f} for n, f in [
+        ("q8", "Inkling-2-Mini-Q8_0.gguf"),
+        ("ud", "Mainline_Support/Inkling-2-Mini-UD-Q8_K_XL.gguf"),
+        ("gguf_file", "Mainline_Support/Inkling-2-Mini-UD-Q4_K_M.gguf_file"),
+        ("split", "model-Q4_K_M-00001-of-00003.gguf"),
+        ("bf16", "model-BF16.gguf"),
+        ("none", "model.safetensors"),
+        ("empty", ""),
+    ]])
+    assert got["q8"]["base"] == "Inkling-2-Mini-Q8_0"
+    assert got["ud"]["base"] == "Inkling-2-Mini-UD-Q8_K_XL"
+    assert got["gguf_file"]["base"] == "Inkling-2-Mini-UD-Q4_K_M"
+    assert got["split"]["base"] == "model-Q4_K_M"
+    assert got["bf16"]["base"] == "model-BF16"
+    assert got["none"]["base"] == ""
+    assert got["empty"]["base"] == ""
+
+
+def test_gguf_text_bases_excludes_drafter_sidecars():
+    """済みスナップショット採用時: drafter sidecar (dspark-* / mtp-*) が混在しても
+    テキスト本体が一意ならファイル単位で名付けられる (2026-11-24 報告: Inkling の
+    dspark-Q8_0 sidecar で量子化が一意判定されず名前が repo 名になっていた)。"""
+    got = _run([
+        {"kind": "gguftext", "name": "with_dspark", "gguf": [
+            {"name": "Mainline_Support/Inkling-2-Mini-UD-Q8_K_XL.gguf"},
+            {"name": "dspark-Inkling-2-Mini-Q8_0.gguf"}]},
+        {"kind": "gguftext", "name": "split_parts", "gguf": [
+            {"name": "model-Q4_K_M-00001-of-00002.gguf"},
+            {"name": "model-Q4_K_M-00002-of-00002.gguf"}]},
+        {"kind": "gguftext", "name": "two_quants", "gguf": [
+            {"name": "model-Q8_0.gguf"}, {"name": "model-Q4_K_M.gguf"}]},
+        {"kind": "gguftext", "name": "empty", "gguf": []},
+    ])
+    assert got["with_dspark"]["bases"] == ["Inkling-2-Mini-UD-Q8_K_XL"]
+    assert got["split_parts"]["bases"] == ["model-Q4_K_M"]
+    assert got["two_quants"]["bases"] == ["model-Q8_0", "model-Q4_K_M"]
+    assert got["empty"]["bases"] == []
+
+
+def test_ft_model_info_family_detection():
+    md = [{"name": "Inkling-2-Mini", "repo_id": "unsloth/Inkling-2-Mini-GGUF"},
+          {"name": "Qwen3.8-Flash-Next", "repo_id": "RadixArk/Qwen3.8-Flash-Next-NVFP4"}]
+    got = _run([
+        {"kind": "ftmodel", "name": "inkling", "mdList": md,
+         "dlReq": {"repo_id": "unsloth/Inkling-2-Mini-GGUF"}},
+        {"kind": "ftmodel", "name": "qwen", "mdList": md,
+         "dlReq": {"repo_id": "RadixArk/Qwen3.8-Flash-Next-NVFP4"}},
+        {"kind": "ftmodel", "name": "unknown", "mdList": md,
+         "dlReq": {"repo_id": "someone/Unknown-Model"}},
+        {"kind": "ftmodel", "name": "local", "mdList": md, "dlReq": None, "job": None,
+         "modelPath": "/data/snap/abc", "localList": [
+             {"repo_id": "unsloth/Inkling-2-Mini-GGUF", "snapshot": "/data/snap/abc"}]},
+        {"kind": "ftmodel", "name": "gguf_repo_name", "mdList": [],
+         "dlReq": {"repo_id": "org/Qwen3.8-Flash-Next-GGUF"}},
+    ])
+    assert got["inkling"]["mi"] == {"name": "Inkling-2-Mini", "repo": "unsloth/Inkling-2-Mini-GGUF",
+                                    "ple": False, "inkling": True, "known": True}
+    assert got["qwen"]["mi"]["ple"] is True and got["qwen"]["mi"]["inkling"] is False
+    # 表に無い repo は known=false (質問を絞らない保守側)。repo 名からの家系判定は効く
+    assert got["unknown"]["mi"]["known"] is False
+    assert got["unknown"]["mi"]["ple"] is False and got["unknown"]["mi"]["inkling"] is False
+    # 済みモデル採用 (job/dlReq 無し) は model_path → スキャン一覧で repo を復元
+    assert got["local"]["mi"]["inkling"] is True and got["local"]["mi"]["known"] is True
+    assert got["gguf_repo_name"]["mi"]["ple"] is True
+
+
+def test_inkling_kv_recommends_int8_over_fp8():
+    """Inkling-2-Mini は K/V が L2・RMS 正規化済み — int8 (一様量子化) が fp8 より高精度。
+    環境非依存のモデル固有推奨 (GPU 不明でも int8)。他家系の fp8 推奨は変わらない。"""
+    ink = {"inkling": True, "ple": False, "known": True}
+    got = _run([
+        {"kind": "rec", "name": "ink_tight", "backend": "freetoken-fork",
+         "sys": _hw([_gpu(24, cc=12.0)]), "sel": _sel(), "engine": None, "model": ink},
+        {"kind": "rec", "name": "ink_ampble", "backend": "freetoken-fork",
+         "sys": _hw([_gpu(96, cc=9.0)]), "sel": _sel(), "engine": None, "model": ink},
+        {"kind": "rec", "name": "ink_no_gpu", "backend": "freetoken-fork",
+         "sys": None, "sel": _sel(), "engine": None, "model": ink},
+        {"kind": "rec", "name": "qwen_tight", "backend": "freetoken-fork",
+         "sys": _hw([_gpu(24, cc=12.0)]), "sel": _sel(), "engine": None,
+         "model": {"inkling": False, "ple": True, "known": True}},
+    ])
+    assert got["ink_tight"]["rec"]["kv"] == "int8"
+    assert "正規化" in got["ink_tight"]["why"]["kv"]
+    assert got["ink_ampble"]["rec"]["kv"] == "int8"
+    assert got["ink_no_gpu"]["rec"]["kv"] == "int8"
+    assert got["qwen_tight"]["rec"]["kv"] == "fp8"   # 他家系の環境ベース推奨は不変
