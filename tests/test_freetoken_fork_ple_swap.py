@@ -150,3 +150,32 @@ def test_launch_json_export_bakes_placement_choices(tmp_path: Path, monkeypatch)
         assert argv[argv.index("--moe-strategy") + 1] == "fused"
         assert argv[argv.index("--ple-backend") + 1] == "gpu"
     asyncio.run(go())
+
+
+def test_launch_json_export_bakes_inkling_gpu_mode_and_kernel(tmp_path: Path, monkeypatch):
+    """Inkling の複数 GPU 方式 / カーネル回答 (tp_size + env) も起動 JSON に焼かれる。
+    layer split = --tp-size 2 + FREETOKEN_LAYER_SPLIT=1 / Vulkan = FREETOKEN_GGML_BACKEND=vulkan。"""
+    import asyncio
+    import json
+
+    from test_auth_users import Client
+
+    from llm_launcher import app as app_mod
+    (tmp_path / "data").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "module" / "fork" / "freetoken").mkdir(parents=True)
+    (tmp_path / "data" / "profiles.json").write_text(json.dumps([
+        {"id": "p_ik", "name": "Inkling-2-Mini-UD-Q8_K_XL", "backend": "freetoken-fork",
+         "values": {"port": "1919", "model_path": "/m/model.gguf", "tp_size": "2"},
+         "on": {"tp_size": True},
+         "env": {"FREETOKEN_LAYER_SPLIT": "1", "FREETOKEN_GGML_BACKEND": "vulkan"}}]), "utf-8")
+    monkeypatch.setattr(app_mod.ProcessManager, "resolve_python", lambda self, bid: "/fake/py")
+    client = Client(app_mod.create_app(tmp_path))
+
+    async def go():
+        st, r = await client.post("/api/profiles/p_ik/launch-json")
+        assert st == 200 and r["ok"], r
+        doc = json.loads(Path(r["path"]).read_text("utf-8"))
+        assert doc["argv"][doc["argv"].index("--tp-size") + 1] == "2"
+        assert doc["env"]["FREETOKEN_LAYER_SPLIT"] == "1"
+        assert doc["env"]["FREETOKEN_GGML_BACKEND"] == "vulkan"
+    asyncio.run(go())
