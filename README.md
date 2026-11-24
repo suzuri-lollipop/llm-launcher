@@ -340,12 +340,37 @@ launcher と同一オリジン**で動く点には注意してください (信�
 **「外部 API (OpenAI 互換)」** を選ぶと、ローカルサーバーの代わりに
 クラウド等の OpenAI 互換 API でベンチを実行できます:
 
-- **Base URL** (例 `https://api.openai.com/v1` — `/v1` は省略可)・**API キー**・
-  **モデル名** (空 = `/v1/models` の先頭)・表示ラベル・コンテキスト長を指定。
-  「接続テスト」ボタンが `/v1/models` を叩いて到達性とモデル一覧を確認します。
-- thinking は OpenAI 標準の `reasoning_effort` 配線 (off / minimal / low / medium / high)。
-  サーバー側テンプレートが未知なので `chat_template_kwargs` は送りません。
-  プロバイダが対応しない段階はエラーになります (例: OpenAI に xhigh は送らない)。
+- **Base URL**・**API キー**・**モデル**・表示ラベル・コンテキスト長を指定。
+  Base URL は**エンドポイントを丸ごと貼っても可** (`https://api.openai.com/v1/chat/completions`
+  → `https://api.openai.com` に自動で畳む。`/v1` / `/models` も同様)。
+- **モデルは自動取得して選択**: URL / キーの入力確定で `/v1/models` を自動 probe
+  (debounce・再取得ボタン・「接続テスト」) し、**セレクトボックス**に一覧を入れて先頭を
+  自動選択します。一覧に無いモデルを提供する API 向けに「一覧に無いモデルを手入力」も選べます。
+- **コンテキスト長は 4 段階で解決** (API が返さない値は根拠を明示して補う):
+  ① `/v1/models` のメタデータ (`context_length` / `max_model_len` / `context_window` 等)
+  ② `/v1/models/{id}` の詳細 (OpenRouter / LiteLLM 等。一覧のみの API には投げない)
+  ③ **公開カタログ [models.dev](https://models.dev)** (24h キャッシュ。プロバイダを
+     base URL から判定してその実測値を優先、無ければ最頻値。`qwen4-max-preview` のような
+     プレビュー版 / 日付スナップショットは基底モデル名に落として引く)。
+     画面には「(models.dev カタログ …)」と根拠を表示
+  ④ どれも無ければ「未取得 — 実際の値を入力すると保存されます」
+  **実際の値を一度入力すればそのモデルの確定値として `settings.json` に保存**され、
+  次回から自動適用されます。以前の手書き推定表は値が誤りやすかったため廃止し、
+  正確なカタログ源に置き換えました (例: qwen3.8-max / glm-5.3 / deepseek-v4.1-flash は
+  いずれも 1,000,000 で、旧推定表の 131072 / 128000 は誤りだった)。
+- **thinking は「実測」で確定できます**: サーバーが effort 語彙
+  (`supported_reasoning_efforts`) を公開すればその段階を表示 (ローカルと同じ根拠)。
+  **DashScope / Token Plan / OpenAI など `/v1/models` が id しか返さない API は
+  公開情報からは判定できない**ため、**「パラメータを実測」ボタン**を用意しました —
+  不正な `reasoning_effort` を 1 回送り、検証する API が返すエラー本文の許容値一覧
+  (例: `must be one of low, medium, xhigh`) から語彙を確定します。一覧を返さない
+  API は候補を 1 つずつ送って 200/4xx で判定 (最大 7 リクエスト)。**不正値でも 200 を
+  返す API は「語彙を検証しない」と正直に表示**します (見かけ上の語彙を作らない)。
+  実測結果は `settings.json` の `coding.external_models` に保存され、次回から自動適用。
+  配線は語彙があるサーバーにはローカルと同じ語彙配線 (off を `enable_thinking=false` /
+  `reasoning_effort="none"` で確実に切る)、語彙の無い API には OpenAI 標準
+  `reasoning_effort` のみ (`chat_template_kwargs` は送らない。プロバイダが対応しない
+  段階はエラーになります)。
 - **API キーの扱い**: 履歴 (`data/coding.json`) にはマスク (先頭 4 文字 + 末尾 2 文字)
   だけ保存し、実キーは実行中メモリのみ。pi に渡す `pi-home/models.json` には
   実行中だけ実キーを書き (0600)、**完了 / 失敗 / 中断後に自動で消去**します。
@@ -365,7 +390,8 @@ launcher と同一オリジン**で動く点には注意してください (信�
 - 選択はビューアーと共有 (A/B ドロップダウン・入替)。選ぶと即座に
   メトリクス比較表 (実装時間 / ターン / トークン / ツールミス等) が出ます。
 - **judge モデル** は「起動プロファイル (ローカル・要起動)」または「外部 API」を選択。
-  thinking 段階も指定可能 (judge の対応に従います)。
+  **外部 API でも実行タブと同じ自動取得** (URL / キー入力で `/v1/models` を probe →
+  モデルをセレクトから選択、一覧に無ければ手入力) が使えます。thinking 段階も指定可能です。
 - 「AI で定量評価」を押すと、両実行の **メトリクス + 要件プロンプト + 実装ファイル内容**
   (1 実行あたり最大 160K 文字・大きいファイル優先で切り詰め) を judge に渡し、
   **6 軸 (要件充足 / 正確性・堅牢性 / コード品質 / フロントエンド品質 / 自己検証 / 効率)
@@ -480,7 +506,9 @@ API は `/api/coding/*` (権限キー `bench`): `assets` (デフォルト資材)
 - `GET /api/coding/assets` — コーディングベンチのデフォルト資材 `{skills_dir, agents_path, extension_path, backend_prompt, frontend_prompt, skills:[{name,description,dir}]}` (無いときは生成して返す)
 - `GET /api/coding/status` — `{pi:{available,command,version,package,install}, sandbox:{bwrap,hint}, active, exclusive_owner}`。`POST /api/coding/pi/install` で pi の npm インストールジョブを開始
 - `GET /api/coding/runs` — コーディングベンチ履歴 `{runs:[...], active, exclusive_owner}`。`POST /api/coding/runs` `{profile_id, name?, model?, skills_dir?, agents_path?, backend_prompt?, frontend_prompt?, thinking?, phase_timeout?, ready_timeout?, auto_start?, stop_after?, sandbox?}` で開始 (空の資材指定はデフォルトで補完。pi 未導入 / bwrap 未導入 (sandbox ON) / 実走排他衝突は 409)。**`profile_id` の代わりに `external: {base_url, api_key?, model?, name?, context_window?}` で外部 OpenAI 互換 API を対象にできる** (両方指定 / 両方省略は 422。外部実行は実走排他ロック不要・auto_start/stop_after 無効・API キーはマスク保存 + 実行後破棄)。`GET /api/coding/runs/{id}` / `POST …/cancel` / `DELETE …/{id}` (実装ファイルも削除) / `DELETE /api/coding/runs` (完了分の一括クリア)
-- `POST /api/coding/external-check` `{base_url, api_key?, model?}` — 外部 API の接続テスト (`/v1/models` を叩き `{ok, models, error, status, warning?}` を返す。キーは保存しない)
+- `POST /api/coding/external-check` `{base_url, api_key?, model?}` — 外部 API の接続テスト (`/v1/models` を叩き `{ok, models, model_cards, error, status, warning?}` を返す。`model_cards` は `context_length` / `context_source` (`api`/`guess`/`saved`) / `supported_reasoning_efforts` を含む。キーは保存しない)
+- `POST /api/coding/external-capabilities` `{base_url, api_key?, model}` — **reasoning_effort の語彙を実測** (`{efforts, validated, unknown, requests, note}`。不正値 1 回で確定する API は 1 リクエスト。結果は自動保存され次回から適用)
+- `POST /api/coding/external-model` `{base_url, model, context_length}` — コンテキスト長の確定値を保存 (次回の接続テストで `context_source: "saved"` として適用)
 - `GET /api/coding/evals` — AI 評価履歴。`POST /api/coding/evals` `{run_a, run_b, judge: {profile_id | external:{base_url, api_key?, model?}}, thinking?, timeout?}` で 2 実行の定量診断を開始 (完了済み実行のみ・同一実行は不可。ローカル judge は要起動 + 実走排他ロック共有、外部 judge はロック不要)。`GET /api/coding/evals/{id}` / `DELETE /api/coding/evals/{id}` (実行中は削除不可)
 - `GET /api/coding/runs/{id}/files` — workspace のファイル一覧 `{files:[{path,size}]}`。`GET …/file?path=` でテキスト取得 (512KB 上限・トラバーサル拒否)。`GET …/log?phase=backend|frontend|preview` で pi ログ末尾。`GET …/transcript?phase=backend|frontend` でモデル出力履歴 `{messages:[{i,ts,text,thinking,tools:[{name,args}],tokens_in,tokens_out,stop_reason,error}], total, truncated, missing}` (生 JSONL の message_end から抽出。本文 4MB 上限)
 - `POST /api/coding/runs/{id}/preview` `{command?}` — 生成アプリのプレビュー起動 (エントリ自動検出 → サンドボックス内で `PORT` 付き実行。バックエンド無しは `frontend/` 静的配信)。`DELETE …/preview` で停止。`GET/POST/… …/proxy/{path}` が起動中アプリへ透過中継 (iframe を同一オリジンに保つ)、`GET …/static/{path}` が静的配信。権限キーはすべて `bench`
