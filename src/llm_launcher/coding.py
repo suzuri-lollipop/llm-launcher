@@ -37,6 +37,7 @@ import signal
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
@@ -774,7 +775,8 @@ class PiTool:
 # 自動選択: bwrap が「実際に動く」なら bwrap、駄目なら docker、どちらも駄目なら
 # サンドボックス ON の実行を拒否する (OFF 明示時のみ隔離なしで実行)。
 
-SANDBOX_IMAGE_DEFAULT = "python:3.12-slim"   # glibc + python3 (生成アプリの preview 用)
+SANDBOX_IMAGE_DEFAULT = "llm-launcher/coding-sandbox:1"   # python3 + curl + git + procps
+SANDBOX_IMAGE_FALLBACK = "python:3.12-slim"               # 未ビルド時のフォールバック (python3 は在る)
 CONTAINER_PREFIX = "llmcb-"
 _probe_cache: dict[str, Any] = {}
 
@@ -822,6 +824,20 @@ def sandbox_image(settings: dict[str, Any] | None = None) -> str:
                or "").strip() or SANDBOX_IMAGE_DEFAULT
 
 
+def effective_sandbox_image(settings: dict[str, Any] | None = None) -> str:
+    """実際に使うイメージ。既定 (coding-sandbox) が未ビルドなら python:3.12-slim へ
+    フォールバックする (pi の mount はパッケージ単体なので python3 は消えない)。
+    明示指定 (coding.sandbox_image) が無ければ従来どおり未取得 = 起動拒否 + hint。"""
+    img = sandbox_image(settings)
+    if docker_image_present(img):
+        return img
+    explicit = str(((settings or {}).get("coding") or {}).get("sandbox_image")
+                   or "").strip()
+    if not explicit and docker_image_present(SANDBOX_IMAGE_FALLBACK):
+        return SANDBOX_IMAGE_FALLBACK
+    return img
+
+
 def docker_image_present(image: str) -> bool:
     key = f"image:{image}"
     if key not in _probe_cache:
@@ -838,23 +854,28 @@ def sandbox_backend(settings: dict[str, Any] | None = None) -> str:
     """使えるサンドバックエンドを自動選択 ("bwrap" | "docker" | "")。"""
     if bwrap_works():
         return "bwrap"
-    if docker_works() and docker_image_present(sandbox_image(settings)):
+    if docker_works() and docker_image_present(effective_sandbox_image(settings)):
         return "docker"
     return ""
 
 
 def sandbox_info(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     backend = sandbox_backend(settings)
-    img = sandbox_image(settings)
+    img = effective_sandbox_image(settings)
     hint = ""
     if not backend:
         if docker_works() and not docker_image_present(img):
-            hint = f"docker pull {img}"
+            hint = (f"./scripts/coding-sandbox-build.sh で {SANDBOX_IMAGE_DEFAULT} を"
+                    f"ビルドするか docker pull {img}")
         elif bwrap_available() and not bwrap_works():
             hint = ("bwrap は userns 制限で動作しません。Docker を導入するか "
-                    f"docker pull {img} でイメージを取得してください")
+                    f"./scripts/coding-sandbox-build.sh で {SANDBOX_IMAGE_DEFAULT} を"
+                    "ビルドしてください")
         else:
             hint = "sudo apt install bubblewrap / Docker のいずれかを導入してください"
+    elif img == SANDBOX_IMAGE_FALLBACK:
+        hint = (f"{SANDBOX_IMAGE_DEFAULT} 未ビルドのため {SANDBOX_IMAGE_FALLBACK} で実行中"
+                " (curl / git は入りません)。./scripts/coding-sandbox-build.sh でビルドできます")
     return {"bwrap": bwrap_available(), "bwrap_ok": bwrap_works(),
             "docker": docker_available(), "docker_ok": docker_works(),
             "backend": backend, "image": img,
@@ -896,21 +917,28 @@ def sandbox_argv(run_dir: Path, cwd: Path, *, ro_binds: list[Path] | None = None
 def pi_runtime_mounts(pi_cmd: str) -> list[Path]:
     """docker に読み取り専用で渡す pi 実行環境のパス。
 
-    pi.dev インストーラの standalone 配置 (~/.local/bin/pi/ 一式) はディレクトリごと、
-    npm グローバル (/usr/local/bin/pi → node_modules) は /usr/local ごと bind する。"""
+    pi.dev インストーラの standalone 配置 (~/.local/bin/pi/ 一式) はディレクトリごと。
+    npm グローバル等は **パッケージ本体だけ** を bind する。/usr/local ごと bind すると
+    イメージの /usr/local が上書きされ、python:3.12-slim の python3
+    (/usr/local/bin/python3) が消えて「サンドボックスに Python が無い」になる
+    (2026-11-24 のベンチで両モデルとも python3 を見つけられなかった実害)。
+    node はホストバイナリをファイル mount する (bookworm glibc と互換)。
+    ランチャ symlink は mount しない: ファイル mount だと cli.js がパッケージ外に
+    単体配置され、ESM の相対 import (./chunks/...) が解決できなくなる。
+    代わりに docker 側は解決済み実パス (パッケージ mount 内) を実行する。"""
     p = Path(pi_cmd).resolve()
     if p.parent.name == "pi" and (p.parent / "package.json").exists():
         return [p.parent]
     mounts: list[Path] = []
-    if str(p).startswith("/usr/local/"):
-        mounts.append(Path("/usr/local"))
-    else:
-        mounts.append(p.parent)
+    pkg = p.parent
+    while pkg != pkg.parent and not (pkg / "package.json").exists():
+        pkg = pkg.parent
+    mounts.append(pkg if (pkg / "package.json").exists() else p.parent)
     node = shutil.which("node")
     if node:
-        np = Path(node).resolve()
-        if not str(np).startswith("/usr/local/") and np.parent not in mounts:
-            mounts.append(np.parent)
+        np = Path(node)
+        if not any(np == m or np.is_relative_to(m) for m in mounts if m.is_dir()):
+            mounts.append(np)
     return mounts
 
 
@@ -1119,6 +1147,48 @@ def model_ids(base: str, auth: dict[str, str] | None = None) -> list[str]:
     return out
 
 
+# ------------------------------------------------------------------ 外部 API ターゲット
+
+def normalize_external_base(url: str) -> str:
+    """外部 API の base URL を /v1 無し形に正規化 (pi 配線が /v1 を付加する)。
+    https://api.openai.com/v1 → https://api.openai.com"""
+    u = (url or "").strip().rstrip("/")
+    if u.endswith("/v1"):
+        u = u[:-3]
+    return u
+
+
+def mask_secret(key: str) -> str:
+    """API キーの履歴保存用マスク (先頭 4 文字 + 末尾 2 文字だけ残す)。"""
+    k = (key or "").strip()
+    if not k:
+        return ""
+    if len(k) <= 8:
+        return k[:2] + "…"
+    return k[:4] + "…" + k[-2:]
+
+
+def external_probe(base: str, auth: dict[str, str] | None = None,
+                   timeout: float = 15.0) -> dict[str, Any]:
+    """外部 API の /v1/models を叩いて (ok, models, error, status) を返す。
+    接続テストと起動待ちの両方で使う。認証エラーは即失敗扱い。"""
+    try:
+        req = urllib.request.Request(f"{base}/v1/models", headers=auth or {})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "replace"))
+        models = [str(it.get("id") or it.get("model") or it.get("name") or "")
+                  for it in (data.get("data") or []) if isinstance(it, dict)]
+        return {"ok": True, "models": [m for m in models if m], "error": "", "status": 200}
+    except urllib.error.HTTPError as e:
+        detail = ""
+        with contextlib.suppress(Exception):
+            detail = e.read().decode("utf-8", "replace")[:300]
+        return {"ok": False, "models": [], "status": e.code,
+                "error": f"HTTP {e.code}: {detail or e.reason}"}
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as e:
+        return {"ok": False, "models": [], "status": 0, "error": str(e)}
+
+
 # ------------------------------------------------------------------ マネージャー
 
 
@@ -1140,6 +1210,8 @@ class CodingManager:
         self._dead: set[str] = set()
         self._last_save: dict[str, float] = {}
         self._previews: dict[str, dict[str, Any]] = {}   # rid -> {proc, port, mode, ...}
+        # 外部 API キーは履歴 (runs.json) に残さず実行中だけメモリで持つ
+        self._ext_keys: dict[str, str] = {}
 
     def attach_exclusive(self, lock: Any) -> None:
         """ベンチ / キャリブレーションと同じ実走排他ロックを共有する。"""
@@ -1189,28 +1261,36 @@ class CodingManager:
     def run_dir(self, rid: str) -> Path:
         return self.assets.runs_dir / rid
 
-    async def start(self, profile: dict[str, Any], params: dict[str, Any],
+    async def start(self, profile: dict[str, Any] | None, params: dict[str, Any],
                     backend_name: str) -> dict[str, Any]:
+        """profile=None + params["external"] で外部 API ターゲットの実行。
+        外部実行は GPU を使わないため実走排他ロックを取らない (ベンチ / キャリブと共存可)。"""
+        ext = params.get("external")
         if self.active_id:
             raise CodingError("他のコーディングベンチマークが実行中です。完了を待つか取り消してください")
-        if self.exclusive is not None and not self.exclusive.acquire(f"coding:{profile['id']}"):
+        if not ext and self.exclusive is not None and not self.exclusive.acquire(
+                f"coding:{(profile or {}).get('id', '')}"):
             raise CodingError("ベンチマーク / キャリブレーションが実行中です。完了を待つか中断してください"
                              " (同じ GPU を使うため同時に実走できません)")
         if params.get("sandbox", True):
             backend = sandbox_backend(self.pi.settings.load())
             if not backend:
-                self.exclusive and self.exclusive.release()
+                not ext and self.exclusive and self.exclusive.release()
                 info = sandbox_info(self.pi.settings.load())
                 raise CodingError(
                     "サンドボックス (bubblewrap / Docker) が使えません。"
                     + (f" 対処: {info['hint']}" if info["hint"] else "")
                     + " / サンドボックス OFF でも実行できます")
         if not self.pi.available():
-            self.exclusive and self.exclusive.release()
+            not ext and self.exclusive and self.exclusive.release()
             raise CodingError("pi が見つかりません。コーディングベンチ画面の「pi をインストール」を押すか、"
                               "npm install -g --ignore-scripts " + PI_PKG + " を実行してください")
-        name = str(params.get("name") or "").strip() or \
-            f"{profile.get('name', '')} {time.strftime('%m/%d %H:%M')}"
+        if ext:
+            label = ext.get("name") or ext.get("model") or ext.get("base_url", "external")
+            default_name = f"{label} {time.strftime('%m/%d %H:%M')}"
+        else:
+            default_name = f"{(profile or {}).get('name', '')} {time.strftime('%m/%d %H:%M')}"
+        name = str(params.get("name") or "").strip() or default_name
         run = {
             "id": new_id("cb"),
             "name": name[:120],
@@ -1219,11 +1299,11 @@ class CodingManager:
             "finished_at": None,
             "status": "queued",
             "error": "",
-            "profile_id": profile["id"],
-            "profile_name": profile.get("name", ""),
-            "backend": profile.get("backend", ""),
+            "profile_id": (profile or {}).get("id", ""),
+            "profile_name": (profile or {}).get("name", "") or (ext or {}).get("name", ""),
+            "backend": (profile or {}).get("backend", "") or "external",
             "backend_name": backend_name,
-            "model": params.get("model") or "",
+            "model": params.get("model") or (ext or {}).get("model", ""),
             "session_id": None,
             "port": None,
             "auto_started": False,
@@ -1237,13 +1317,21 @@ class CodingManager:
             "files": {"count": 0, "bytes": 0},
             "preview": None,
         }
+        if ext:
+            run["external"] = {"base_url": ext.get("base_url", ""),
+                               "model": ext.get("model", ""),
+                               "name": ext.get("name", ""),
+                               "api_key": mask_secret(ext.get("api_key", ""))}
+            self._ext_keys[run["id"]] = ext.get("api_key", "")
+            params["external"] = {**ext, "api_key": mask_secret(ext.get("api_key", ""))}
         try:
             self.store.mutate(lambda lst: lst.append(run))
             self._trim()
             self.active_id = run["id"]
             self._tasks[run["id"]] = asyncio.create_task(self._job(run, profile, params))
         except BaseException:
-            self.exclusive and self.exclusive.release()
+            not ext and self.exclusive and self.exclusive.release()
+            self._ext_keys.pop(run["id"], None)
             raise
         return run
 
@@ -1346,7 +1434,11 @@ class CodingManager:
             self.active_id = None
             self._cancel.discard(run["id"])
             self._tasks.pop(run["id"], None)
-            self.exclusive and self.exclusive.release()
+            if not run.get("external"):
+                self.exclusive and self.exclusive.release()
+            if run.get("external"):
+                self._ext_keys.pop(run["id"], None)
+                self._scrub_pi_home(self.run_dir(run["id"]))
             if ((params.get("stop_after") or run.get("status") in ("failed", "cancelled"))
                     and run.get("auto_started") and run.get("session_id")
                     and not run.get("stopped_after")):
@@ -1357,38 +1449,53 @@ class CodingManager:
                     run["stop_error"] = f"{type(e).__name__}: {e}"
                 self._save(run, force=True)
 
-    async def _run(self, run: dict[str, Any], profile: dict[str, Any],
+    async def _run(self, run: dict[str, Any], profile: dict[str, Any] | None,
                    params: dict[str, Any]) -> None:
         run["started_at"] = now()
         run["status"] = "running"
         self._save(run, force=True)
-        sess = await self._resolve_session(run, profile, params)
-        port = sess.get("port")
-        if not port:
-            raise CodingError("このセッションはポートを解決できていません "
-                              "(プロファイルの port 設定を確認してください)")
-        base = f"http://127.0.0.1:{port}"
-        auth = {"Authorization": f"Bearer {api_key_from_argv(sess.get('argv') or [])}"} \
-            if api_key_from_argv(sess.get("argv") or []) else {}
-        run["port"] = port
-        run["progress"]["phase"] = "waiting"
-        self._save(run, force=True)
-        await self._wait_ready(run, base, sess.get("health_path") or "/health",
-                               int(params["ready_timeout"]), sess["id"], auth)
-        model = params.get("model") or await self._resolve_model(base, auth)
-        if not model:
-            raise CodingError("サーバーからモデル名を解決できません (/v1/models が空です)。"
-                              "モデル名を明示指定してください")
+        ext = params.get("external")
+        if ext:
+            # 外部 API ターゲット: ローカルセッション不要。/v1/models が応答するまで待つ
+            base = ext.get("base_url", "")
+            key = self._ext_keys.get(run["id"], "")
+            auth = {"Authorization": f"Bearer {key}"} if key else {}
+            run["progress"]["phase"] = "waiting"
+            self._save(run, force=True)
+            await self._wait_ready_external(run, base, auth, int(params["ready_timeout"]))
+            model = ext.get("model") or params.get("model") or await self._resolve_model(base, auth)
+            if not model:
+                raise CodingError("外部 API からモデル名を解決できません (/v1/models が空です)。"
+                                  "モデル名を明示指定してください")
+            efforts: list[str] = []
+        else:
+            sess = await self._resolve_session(run, profile, params)
+            port = sess.get("port")
+            if not port:
+                raise CodingError("このセッションはポートを解決できていません "
+                                  "(プロファイルの port 設定を確認してください)")
+            base = f"http://127.0.0.1:{port}"
+            auth = {"Authorization": f"Bearer {api_key_from_argv(sess.get('argv') or [])}"} \
+                if api_key_from_argv(sess.get("argv") or []) else {}
+            run["port"] = port
+            run["progress"]["phase"] = "waiting"
+            self._save(run, force=True)
+            await self._wait_ready(run, base, sess.get("health_path") or "/health",
+                                   int(params["ready_timeout"]), sess["id"], auth)
+            model = params.get("model") or await self._resolve_model(base, auth)
+            if not model:
+                raise CodingError("サーバーからモデル名を解決できません (/v1/models が空です)。"
+                                  "モデル名を明示指定してください")
+            key = api_key_from_argv(sess.get("argv") or [])
+            efforts, _ = await asyncio.to_thread(model_efforts, base, auth)
         run["model"] = model
-        key = api_key_from_argv(sess.get("argv") or [])
-        efforts, _ = await asyncio.to_thread(model_efforts, base, auth)
         rd = self.run_dir(run["id"])
         ws = rd / "workspace"
         ws.mkdir(parents=True, exist_ok=True)
         (rd / "home").mkdir(exist_ok=True)
         (rd / "sessions").mkdir(exist_ok=True)
         (rd / "logs").mkdir(exist_ok=True)
-        self._prepare_pi_home(rd, base, model, key, params, efforts)
+        self._prepare_pi_home(rd, base, model, key, params, efforts, external=bool(ext))
         # 選択された AGENTS.md を workspace にコピー (pi が cwd から自動発見する)
         agents_src = Path(params["agents_path"])
         shutil.copyfile(agents_src, ws / "AGENTS.md")
@@ -1474,8 +1581,36 @@ class CodingManager:
             await asyncio.sleep(1.0)
         return ""
 
+    async def _wait_ready_external(self, run: dict[str, Any], base: str,
+                                   auth: dict[str, str], timeout: int) -> None:
+        """外部 API の /v1/models が 200 を返すまで待つ。認証エラー (401/403) は即失敗。"""
+        t0 = time.monotonic()
+        while True:
+            self._check_cancel(run)
+            probe = await asyncio.to_thread(external_probe, base, auth, 15.0)
+            if probe["ok"]:
+                return
+            if probe["status"] in (401, 403):
+                raise CodingError(f"外部 API の認証に失敗しました: {probe['error']}")
+            if time.monotonic() - t0 > timeout:
+                raise CodingError(f"{timeout}s 経っても外部 API が応答しません: {probe['error']}")
+            await asyncio.sleep(2.0)
+
+    def _scrub_pi_home(self, rd: Path) -> None:
+        """外部 API 実行後、pi の models.json から実キーを消す (実行中だけ必要)。"""
+        p = rd / "pi-home" / "models.json"
+        try:
+            cfg = json.loads(p.read_text(encoding="utf-8"))
+            for prov in (cfg.get("providers") or {}).values():
+                if isinstance(prov, dict) and prov.get("apiKey") not in ("", "local", None):
+                    prov["apiKey"] = "(removed-after-run)"
+            p.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        except (OSError, json.JSONDecodeError):
+            pass
+
     def _prepare_pi_home(self, rd: Path, base: str, model: str, key: str,
-                         params: dict[str, Any], efforts: list[str] | None = None) -> None:
+                         params: dict[str, Any], efforts: list[str] | None = None,
+                         external: bool = False) -> None:
         """pi の models.json: launcher が起動したサーバーを OpenAI 互換プロバイダとして登録。
 
         Qwen3 系は enable_thinking の ON/OFF が実体なので、thinkingFormat を
@@ -1491,18 +1626,24 @@ class CodingManager:
         effort 語彙 ("none" 含む) を公開する非 Qwen モデル (Inkling-2) は pi 既定の
         reasoning_effort 配線を使う: thinkingLevelMap.off を "none" に割り当て、
         off でも reasoning=True にして pi が reasoning_effort="none" を送るようにする
-        (テンプレート既定の effort 0.9 を確実に切る)。"""
+        (テンプレート既定の effort 0.9 を確実に切る)。
+
+        外部 API (external=True) はサーバー側テンプレートが未知なので、OpenAI 標準の
+        reasoning_effort 配線だけを使う (chat_template_kwargs は送らない)。
+        off は reasoning=False で何も送らない ("none" は OpenAI が拒否するため)。"""
         pi_home = rd / "pi-home"
         pi_home.mkdir(exist_ok=True)
         thinking = str(params.get("thinking") or "off")
-        qwen = bool(QWEN_THINKING_RE.search(model or ""))
+        qwen = bool(QWEN_THINKING_RE.search(model or "")) and not external
         effort_wired = bool(efforts) and "none" in efforts and not qwen
+        ctx = int((params.get("external") or {}).get("context_window") or 128000) \
+            if external else 128000
         entry: dict[str, Any] = {
             "id": model,
             "name": model,
             "reasoning": True if (qwen or effort_wired) else thinking != "off",
             "input": ["text"],
-            "contextWindow": 128000,
+            "contextWindow": ctx,
             # 思考 ON では thinking が出力枠を食う。8192 固定だと thinking=max で
             # 思考だけで枠を使い切り length 打ち切り → ツール呼び出しの無いターンで
             # pi が終了し、ファイルが 1 つも生成されない (2026-11-24 Inkling 実測)。
@@ -1510,7 +1651,11 @@ class CodingManager:
             "maxTokens": 8192 if thinking == "off" else 32768,
             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
         }
-        if qwen and efforts:
+        if external:
+            entry["compat"] = {"supportsReasoningEffort": True, "supportsDeveloperRole": False}
+            entry["thinkingLevelMap"] = {
+                name: name for name in ("minimal", "low", "medium", "high", "xhigh", "max")}
+        elif qwen and efforts:
             # 語彙はサーバー probe 済み (例: xhigh/medium/low)。pi の extended
             # レベル (xhigh/max) は明示 map が無いと unsupported 扱いなので、
             # 語彙の名前は全部明示する。high は旧 "on" の読み替え先として
@@ -1547,7 +1692,7 @@ class CodingManager:
         cfg = {
             "providers": {
                 PI_PROVIDER: {
-                    "name": "LLM Launcher",
+                    "name": "External API" if external else "LLM Launcher",
                     "baseUrl": f"{base}/v1",
                     "api": "openai-completions",
                     "apiKey": key or "local",
@@ -1556,8 +1701,10 @@ class CodingManager:
                 },
             },
         }
-        (pi_home / "models.json").write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
-                                             encoding="utf-8")
+        out = pi_home / "models.json"
+        out.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        if external:
+            out.chmod(0o600)   # 実キーを含むため所有者のみ (実行後に _scrub_pi_home で消去)
 
     def _skill_dirs(self, folder: Path) -> list[Path]:
         """--skill に渡すディレクトリ列挙 (SKILL.md を持つものだけ)。"""
@@ -1608,8 +1755,11 @@ class CodingManager:
         backend = sandbox_backend(self.pi.settings.load())
         if backend == "docker":
             name = f"{CONTAINER_PREFIX}{run['id']}-{phase}"
+            # ランチャ symlink (/usr/local/bin/pi 等) はコンテナに無い。パッケージ
+            # mount 内の解決済み実パスを実行する (ESM 相対 import はパッケージ構造が要る)
+            inner = [str(Path(pi_cmd).resolve()), *inner[1:]]
             argv = docker_argv(rd, ws, ro_binds=ro_binds, env=env,
-                               image=sandbox_image(self.pi.settings.load()), name=name,
+                               image=effective_sandbox_image(self.pi.settings.load()), name=name,
                                pi_mounts=pi_runtime_mounts(pi_cmd)) + inner
             return argv, dict(os.environ), name
         # bwrap (動くことは start() で確認済み)
@@ -1892,7 +2042,7 @@ class CodingManager:
         if backend == "docker":
             container = f"{CONTAINER_PREFIX}pv-{rid}"
             docker_rm(container)                      # 前回の残骸があれば消す
-            argv = docker_argv(rd, ws, env=env, image=sandbox_image(settings),
+            argv = docker_argv(rd, ws, env=env, image=effective_sandbox_image(settings),
                                name=container) + cmd_argv
             cli_env = dict(os.environ)
         elif backend == "bwrap":

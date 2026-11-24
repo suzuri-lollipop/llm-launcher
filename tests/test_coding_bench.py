@@ -188,6 +188,9 @@ class _FakeManager:
         self.sessions[sid] = s
         return s
 
+    def find_profile(self, pid: str):
+        return PROFILE if pid == PROFILE["id"] else None
+
     async def start(self, profile, *, force=False, actor=None, via=""):
         return self._session("s_new")
 
@@ -442,6 +445,289 @@ def test_docker_argv_and_pi_mounts(tmp_path):
     assert "HOME=" + str(rd / "home") in argv
     assert argv[-1] == "python:3.12-slim"
     assert "--init" in argv and "--user" in argv
+
+
+def test_pi_mounts_npm_global_keeps_image_python(tmp_path, monkeypatch):
+    """npm グローバル pi はパッケージ単体 + node のファイル mount。
+    /usr/local ごと bind するとイメージの python3 (/usr/local/bin/python3) が
+    上書きされて消えるため、ディレクトリごと渡さない (2026-11-24 ベンチ実害)。
+    ランチャ symlink のファイル mount もしない (cli.js がパッケージ外へ単体配置され
+    ESM 相対 import が壊れる)。docker 側は解決済み実パスを実行する。"""
+    pkg = tmp_path / "usr" / "local" / "lib" / "node_modules" / "@e" / "pi-coding-agent"
+    (pkg / "dist" / "bundle").mkdir(parents=True)
+    (pkg / "package.json").write_text("{}")
+    exe = pkg / "dist" / "bundle" / "cli.js"
+    exe.write_text("#!/usr/bin/env node\n")
+    bin_dir = tmp_path / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True)
+    launcher = bin_dir / "pi"
+    launcher.symlink_to(exe)
+    node = bin_dir / "node"
+    node.write_text("x")
+    monkeypatch.setattr(coding_mod.shutil, "which",
+                        lambda name: str(node) if name == "node" else None)
+    mounts = coding_mod.pi_runtime_mounts(str(launcher))
+    assert mounts == [pkg, node]
+    assert Path(tmp_path / "usr" / "local") not in mounts
+    rd = tmp_path / "run"
+    ws = rd / "workspace"
+    ws.mkdir(parents=True)
+    argv = coding_mod.docker_argv(rd, ws, image="python:3.12-slim",
+                                  name="llmcb-x-backend", pi_mounts=mounts)
+    assert f"{pkg}:{pkg}:ro" in argv
+    assert f"{node}:{node}:ro" in argv
+    assert f"{launcher}:{launcher}:ro" not in argv
+    assert f"{tmp_path / 'usr' / 'local'}:{tmp_path / 'usr' / 'local'}:ro" not in argv
+
+
+def test_effective_sandbox_image_fallback(monkeypatch):
+    present = {coding_mod.SANDBOX_IMAGE_FALLBACK}
+    monkeypatch.setattr(coding_mod, "docker_image_present", lambda img: img in present)
+    # 既定 (coding-sandbox) 未ビルド → slim へフォールバック
+    assert coding_mod.effective_sandbox_image({}) == coding_mod.SANDBOX_IMAGE_FALLBACK
+    present.add(coding_mod.SANDBOX_IMAGE_DEFAULT)
+    assert coding_mod.effective_sandbox_image({}) == coding_mod.SANDBOX_IMAGE_DEFAULT
+    # 明示指定は黙ってフォールバックしない (未取得 = 起動拒否 + hint の従来動作)
+    s = {"coding": {"sandbox_image": "custom:1"}}
+    assert coding_mod.effective_sandbox_image(s) == "custom:1"
+    present.add("custom:1")
+    assert coding_mod.effective_sandbox_image(s) == "custom:1"
+
+
+# ------------------------------------------------------------------ 外部 API ターゲット
+
+
+def test_external_helpers():
+    assert coding_mod.normalize_external_base("https://api.openai.com/v1/") == "https://api.openai.com"
+    assert coding_mod.normalize_external_base("https://x.example/v1") == "https://x.example"
+    assert coding_mod.normalize_external_base("https://x.example/") == "https://x.example"
+    assert coding_mod.mask_secret("sk-abcdef123456") == "sk-a…56"
+    assert coding_mod.mask_secret("short") == "sh…"
+    assert coding_mod.mask_secret("") == ""
+
+
+def test_external_probe(server):
+    _, port = server
+    ok = coding_mod.external_probe(f"http://127.0.0.1:{port}", {})
+    assert ok["ok"] and ok["models"] == ["test-model"]
+    bad = coding_mod.external_probe("http://127.0.0.1:1", {}, timeout=2.0)
+    assert not bad["ok"] and bad["error"]
+
+
+def test_external_run_flow_masks_key(tmp_path, server):
+    """外部 API 対象の実行: セッション不要・キーはマスク保存・実行後に pi-home から消去。"""
+    _, port = server
+    mgr = _manager(tmp_path, _FakeManager(port), _write_fake_pi(tmp_path))
+    params = _params(mgr, thinking="high", external={
+        "base_url": f"http://127.0.0.1:{port}", "api_key": "sk-secret123456",
+        "model": "test-model", "name": "外部テスト", "context_window": 128000})
+
+    async def go():
+        run = await mgr.start(None, params, "外部 API")
+        await mgr._tasks[run["id"]]
+        return mgr.get(run["id"])
+    run = asyncio.run(go())
+    assert run["status"] == "completed", run["error"]
+    assert run["backend"] == "external" and run["port"] is None
+    assert run["model"] == "test-model"
+    # 履歴 (runs.json 相当) に実キーが残らない
+    assert "sk-secret123456" not in json.dumps(run, ensure_ascii=False)
+    assert run["external"]["api_key"] == coding_mod.mask_secret("sk-secret123456")
+    assert mgr.exclusive.owner == ""          # 外部実行はロックを取らない
+    # pi の models.json は実行後にスクラブされる (実キーだった apiKey が消える)
+    cfg = json.loads((mgr.run_dir(run["id"]) / "pi-home" / "models.json").read_text())
+    prov = cfg["providers"]["launcher"]
+    assert prov["apiKey"] == "(removed-after-run)"
+    assert prov["baseUrl"] == f"http://127.0.0.1:{port}/v1"
+    entry = prov["models"][0]
+    # 外部は OpenAI 標準 reasoning_effort 配線 (chat_template_kwargs は使わない)
+    assert entry["compat"] == {"supportsReasoningEffort": True, "supportsDeveloperRole": False}
+    assert entry["thinkingLevelMap"]["high"] == "high"
+    assert entry["reasoning"] is True
+
+
+def test_external_run_skips_exclusive_lock(tmp_path, server):
+    """GPU 実走ロックが埋まっていても外部 API 実行は開始できる (GPU を使わない)。"""
+    _, port = server
+    mgr = _manager(tmp_path, _FakeManager(port), _write_fake_pi(tmp_path))
+    assert mgr.exclusive.acquire("bench:other")
+    params = _params(mgr, external={"base_url": f"http://127.0.0.1:{port}",
+                                    "api_key": "", "model": "test-model", "name": "",
+                                    "context_window": 128000})
+
+    async def go():
+        run = await mgr.start(None, params, "外部 API")
+        await mgr._tasks[run["id"]]
+        return mgr.get(run["id"])
+    run = asyncio.run(go())
+    assert run["status"] == "completed", run["error"]
+    assert mgr.exclusive.owner == "bench:other"   # 他人のロックは解放しない
+
+
+def test_coding_body_requires_one_target():
+    from llm_launcher.app import CodingBody
+    with pytest.raises(ValueError):
+        CodingBody()                                   # どちらも無い
+    with pytest.raises(ValueError):
+        CodingBody(profile_id="p1", external={"base_url": "https://x.example/v1"})  # 両方
+    ok = CodingBody(external={"base_url": "https://x.example/v1"})
+    assert ok.external is not None and ok.profile_id == ""
+
+
+# ------------------------------------------------------------------ AI 評価
+
+
+class _JudgeHandler(_ModelHandler):
+    """/v1/chat/completions に構造化評価 JSON を返す偽 judge サーバー。"""
+
+    def do_POST(self):  # noqa: N802
+        if self.path == "/v1/chat/completions":
+            n = int(self.headers.get("Content-Length", 0))
+            req = json.loads(self.rfile.read(n))
+            assert req["messages"][0]["role"] == "system"
+            assert "実装 A" in req["messages"][1]["content"]
+            from llm_launcher.coding_eval import EVAL_AXES
+            result = {
+                "scores": {ax["key"]: {"a": 80, "b": 70, "reason": "テスト根拠"} for ax in EVAL_AXES},
+                "defects": {"a": [], "b": [{"severity": "high", "file": "backend/server.py",
+                                            "detail": "テスト欠陥"}]},
+                "highlights": {"a": ["長所A"], "b": []},
+                "verdict": {"winner": "A", "confidence": 85, "reason": "テスト判定"},
+                "summary": "テスト所見",
+            }
+            body = json.dumps({"choices": [{"message": {"content": json.dumps(result, ensure_ascii=False)},
+                                            "finish_reason": "stop"}],
+                               "usage": {"completion_tokens": 100}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+    def log_message(self, *a):
+        pass
+
+
+@pytest.fixture
+def judge_server():
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _JudgeHandler)
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    yield srv, srv.server_address[1]
+    srv.shutdown()
+
+
+def _two_finished_runs(tmp_path, server):
+    mgr = _manager(tmp_path, _FakeManager(server[1]), _write_fake_pi(tmp_path))
+    a = _run_to_finish(mgr, _params(mgr, name="実行A"))
+    b = _run_to_finish(mgr, _params(mgr, name="実行B"))
+    assert a["status"] == "completed" and b["status"] == "completed"
+    return mgr, a, b
+
+
+def test_eval_flow_external_judge(tmp_path, judge_server):
+    from llm_launcher.coding_eval import CodingEvalManager
+    mgr, a, b = _two_finished_runs(tmp_path, judge_server)
+    evmgr = CodingEvalManager(JsonStore(tmp_path / "data" / "coding_evals.json", []),
+                              mgr, mgr.manager)
+    evmgr.attach_exclusive(mgr.exclusive)
+
+    async def go():
+        ev = await evmgr.start({"run_a": a["id"], "run_b": b["id"],
+                                "judge": {"external": {"base_url": f"http://127.0.0.1:{judge_server[1]}",
+                                                       "api_key": "sk-judgekey9999", "model": "test-model"}},
+                                "thinking": "off"})
+        await evmgr._tasks[ev["id"]]
+        return evmgr.get(ev["id"])
+    ev = asyncio.run(go())
+    assert ev["status"] == "completed", ev["error"]
+    assert ev["result"]["scores"]["requirements"] == {"a": 80, "b": 70, "reason": "テスト根拠"}
+    assert ev["result"]["verdict"]["winner"] == "A"
+    assert ev["result"]["defects"]["b"][0]["file"] == "backend/server.py"
+    assert ev["materials"]["a"]["files"] >= 1
+    assert "sk-judgekey9999" not in json.dumps(ev, ensure_ascii=False)
+    assert evmgr.exclusive.owner == ""         # 外部 judge はロック不要
+    assert evmgr.list_evals()[0]["id"] == ev["id"]
+
+
+def test_eval_flow_local_judge_uses_lock(tmp_path, judge_server):
+    from llm_launcher.coding_eval import CodingEvalManager
+    mgr, a, b = _two_finished_runs(tmp_path, judge_server)
+    evmgr = CodingEvalManager(JsonStore(tmp_path / "data" / "coding_evals.json", []),
+                              mgr, mgr.manager)
+    evmgr.attach_exclusive(mgr.exclusive)
+    mgr.manager._session("sj")                 # judge プロファイルの稼働中セッション
+
+    async def go():
+        ev = await evmgr.start({"run_a": a["id"], "run_b": b["id"],
+                                "judge": {"profile_id": "p1"}, "thinking": "off"})
+        await evmgr._tasks[ev["id"]]
+        return evmgr.get(ev["id"])
+    ev = asyncio.run(go())
+    assert ev["status"] == "completed", ev["error"]
+    assert ev["judge"]["kind"] == "profile" and ev["judge"]["model"] == "test-model"
+    assert evmgr.exclusive.owner == ""         # 完了で解放済み
+
+
+def test_eval_validation(tmp_path, judge_server):
+    from llm_launcher.coding_eval import CodingEvalManager
+    mgr, a, b = _two_finished_runs(tmp_path, judge_server)
+    evmgr = CodingEvalManager(JsonStore(tmp_path / "data" / "coding_evals.json", []),
+                              mgr, mgr.manager)
+
+    async def go(body):
+        return await evmgr.start(body)
+    with pytest.raises(CodingError):
+        asyncio.run(go({"run_a": a["id"], "run_b": a["id"], "judge": {"profile_id": "p1"}}))
+    with pytest.raises(CodingError):
+        asyncio.run(go({"run_a": "cb_missing", "run_b": b["id"], "judge": {"profile_id": "p1"}}))
+    with pytest.raises(CodingError):
+        asyncio.run(go({"run_a": a["id"], "run_b": b["id"], "judge": {"profile_id": "p_nope"}}))
+
+
+def test_judge_json_parse_and_clamp():
+    from llm_launcher.coding_eval import _parse_judge_json, _validate_result
+    obj = {"scores": {"requirements": {"a": 150, "b": -5, "reason": "x"}},
+           "verdict": {"winner": "a", "confidence": 200}}
+    fenced = "前置き\n```json\n" + json.dumps(obj) + "\n```\n後書き"
+    parsed = _parse_judge_json(fenced)
+    res = _validate_result(parsed)
+    assert res["scores"]["requirements"]["a"] == 100   # 0-100 に量子化
+    assert res["scores"]["requirements"]["b"] == 0
+    assert res["scores"]["efficiency"] == {"a": 0, "b": 0, "reason": ""}  # 欠落軸は 0
+    assert res["verdict"]["winner"] == "A" and res["verdict"]["confidence"] == 100
+
+
+def test_judge_thinking_wiring_local_off_really_off(monkeypatch):
+    """ローカル judge の thinking=off はテンプレート既定の ON を確実に切る
+    (Qwen3.8 は enable_thinking=false、Inkling は reasoning_effort=none)。
+    外部 API は OpenAI 標準 reasoning_effort のみ (chat_template_kwargs 禁止)。"""
+    from llm_launcher import coding_eval as ce
+    monkeypatch.setattr(ce, "model_efforts",
+                        lambda base, auth: (["xhigh", "medium", "low"], "xhigh"))
+    extra = ce._judge_thinking_extra("http://x", {}, "Qwen3.8-Flash-Next", "off", True)
+    assert extra == {"chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": True}}
+    extra = ce._judge_thinking_extra("http://x", {}, "Qwen3.8-Flash-Next", "xhigh", True)
+    assert extra["chat_template_kwargs"]["enable_thinking"] is True
+    assert extra["chat_template_kwargs"]["reasoning_effort"] == "xhigh"
+    monkeypatch.setattr(ce, "model_efforts",
+                        lambda base, auth: (["none", "low", "high", "max"], "high"))
+    assert ce._judge_thinking_extra("http://x", {}, "Inkling-2-Mini", "off", True) == \
+        {"reasoning_effort": "none"}
+    # 語彙を公開するサーバーなら外部指定でも kwargs 配線 (ローカル FreeToken 等)
+    monkeypatch.setattr(ce, "model_efforts",
+                        lambda base, auth: (["xhigh", "medium", "low"], "xhigh"))
+    assert ce._judge_thinking_extra("http://x", {}, "RadixArk--Qwen3.8-Flash-Next", "off", False) == \
+        {"chat_template_kwargs": {"enable_thinking": False, "preserve_thinking": True}}
+    # 語彙の無い外部 API は OpenAI 標準のみ (kwargs は送らない)
+    monkeypatch.setattr(ce, "model_efforts", lambda base, auth: ([], None))
+    assert ce._judge_thinking_extra("http://x", {}, "gpt-5.2", "off", False) == {}
+    assert ce._judge_thinking_extra("http://x", {}, "gpt-5.2", "high", False) == \
+        {"reasoning_effort": "high"}
+    assert ce._judge_thinking_extra("http://x", {}, "qwen3-max", "off", False) == {}
 
 
 def test_pi_failure_marks_run_failed(tmp_path, server):
