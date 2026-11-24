@@ -21,7 +21,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field, ValidationError, model_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from . import __version__
 from .auth import (COOKIE_NAME, REMEMBER_TTL, TOKEN_TTL, AuthError, AuthManager)
@@ -34,7 +34,8 @@ from .store import JsonStore, new_id, now
 from .bench import MAX_STAGES, BenchError, BenchManager, BenchProfileError, BenchProfiles
 from .calibrate import CAL_BACKENDS, CalibrateError, CalibrationManager
 from .coding import (CodingAssets, CodingError, CodingManager, PiTool,
-                     PROXY_BODY_MAX, guess_type, safe_join, sandbox_info)
+                     PROXY_BODY_MAX, guess_type, model_efforts, model_ids, safe_join,
+                     sandbox_info, thinking_capability)
 from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallManager,
                         cached_tags, clone_exists, current_ref, fork_tags, install_tool)
 from .models import (ModelError, build_inventory, classify_gguf_files, delete_entry,
@@ -232,7 +233,7 @@ class CodingBody(BaseModel):
     agents_path: str = ""                 # 空 = デフォルトの AGENTS.md
     backend_prompt: str = ""              # 空 = デフォルトプロンプト
     frontend_prompt: str = ""
-    thinking: str = "off"                 # off | minimal | low | medium | high
+    thinking: str = "off"                 # off | minimal | low | medium | high | xhigh | max
     phase_timeout: int = Field(default=1800, ge=30, le=14400)   # pi 1 フェーズの上限秒
     ready_timeout: int = Field(default=600, ge=10, le=3600)
     auto_start: bool = True
@@ -241,8 +242,8 @@ class CodingBody(BaseModel):
 
     @model_validator(mode="after")
     def _normalize(self) -> "CodingBody":
-        if self.thinking not in ("off", "minimal", "low", "medium", "high"):
-            raise ValueError("thinking は off / minimal / low / medium / high です")
+        if self.thinking not in ("off", "minimal", "low", "medium", "high", "xhigh", "max"):
+            raise ValueError("thinking は off / minimal / low / medium / high / xhigh / max です")
         if len(self.backend_prompt) > 32000 or len(self.frontend_prompt) > 32000:
             raise ValueError("プロンプトは 32000 文字までです")
         return self
@@ -334,6 +335,15 @@ class PlaygroundChatBody(BaseModel):
     max_tokens: int | None = Field(default=None, ge=1)
     # None = サーバー既定 (Qwen3 系は思考 ON)。False で本文前の思考を省略できる
     enable_thinking: bool | None = None
+    # effort 段階を公開するモデル (Inkling-2) 向け。"none" が off 歯車
+    reasoning_effort: str | None = None
+
+    @field_validator("reasoning_effort")
+    @classmethod
+    def _effort_name(cls, v: str | None) -> str | None:
+        if v is not None and v not in ("none", "off", "minimal", "low", "medium", "high", "xhigh", "max"):
+            raise ValueError("reasoning_effort は none / minimal / low / medium / high / xhigh / max です")
+        return v
 
 
 # --------------------------------------------------------------- 認証のボディ
@@ -2523,10 +2533,17 @@ def create_app(root: Path) -> FastAPI:
             v = getattr(body, key)
             if v is not None:
                 payload[key] = v
-        if body.enable_thinking is not None:
+        if body.enable_thinking is not None or body.reasoning_effort:
             # 思考 ON のモデルは本文より先に reasoning が流れる。テンプレート引数を
-            # 転送しないとプレイグラウンドから思考を切れず、開始が遅く見える
-            payload["chat_template_kwargs"] = {"enable_thinking": body.enable_thinking}
+            # 転送しないとプレイグラウンドから思考を切れず、開始が遅く見える。
+            # enable_thinking は Qwen 系、reasoning_effort は effort 段階を持つ
+            # モデル (Inkling-2: off = "none") が読むので、両方をそのまま転送する
+            ctk: dict[str, Any] = {}
+            if body.enable_thinking is not None:
+                ctk["enable_thinking"] = body.enable_thinking
+            if body.reasoning_effort:
+                ctk["reasoning_effort"] = body.reasoning_effort
+            payload["chat_template_kwargs"] = ctk
         req = urllib.request.Request(
             f"{base}/v1/chat/completions",
             data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
@@ -2723,6 +2740,36 @@ def create_app(root: Path) -> FastAPI:
         return {"pi": await coding_pi.info(), "sandbox": sandbox_info(settings_store.load()),
                 "active": coding.active_id, "exclusive_owner": coding.exclusive_owner}
 
+    @app.get("/api/coding/model-options")
+    async def coding_model_options(profile_id: str) -> dict[str, Any]:
+        """プロファイルに対するモデル名自動取得 + thinking 選択肢。
+
+        モデル名は稼働中サーバーの /v1/models から取得 (未起動なら空 = 開始時に解決)。
+        thinking はプロファイルの reasoning-parser / reasoning 設定とモデル名から
+        「設定できるものだけ」返す (非思考モデルは off のみ)。"""
+        profile = manager.find_profile(profile_id)
+        if not profile:
+            raise HTTPException(404, "プロファイルが見つかりません")
+        live = next((s for s in manager.sessions.values()
+                     if s["profile_id"] == profile_id and s["status"] in ("running", "starting")),
+                    None)
+        models: list[str] = []
+        efforts: list[str] = []
+        default_effort: str | None = None
+        if live and live.get("port"):
+            key = api_key_from_argv(live.get("argv") or [])
+            auth = {"Authorization": f"Bearer {key}"} if key else {}
+            base = f"http://127.0.0.1:{live['port']}"
+            models = await asyncio.to_thread(model_ids, base, auth)
+            efforts, default_effort = await asyncio.to_thread(model_efforts, base, auth)
+        try:
+            argv = manager.build_argv(profile)
+        except Exception:  # noqa: BLE001 — 描画失敗時はモデル名だけで判定
+            argv = []
+        cap = thinking_capability(argv, models[0] if models else "", efforts, default_effort)
+        return {"models": models, "model": models[0] if models else "",
+                "live": bool(live), "thinking": cap}
+
     @app.post("/api/coding/pi/install")
     async def coding_pi_install() -> dict[str, Any]:
         try:
@@ -2817,6 +2864,16 @@ def create_app(root: Path) -> FastAPI:
             raise HTTPException(404, "コーディングベンチマークが見つかりません")
         try:
             return coding.log_tail(rid, phase)
+        except CodingError as e:
+            raise HTTPException(422, str(e))
+
+    @app.get("/api/coding/runs/{rid}/transcript")
+    async def coding_transcript(rid: str, phase: str = "backend") -> dict[str, Any]:
+        """モデルが出力したトークン内容 (text / thinking / ツール引数) の履歴。"""
+        if not coding.get(rid):
+            raise HTTPException(404, "コーディングベンチマークが見つかりません")
+        try:
+            return await asyncio.to_thread(coding.transcript, rid, phase)
         except CodingError as e:
             raise HTTPException(422, str(e))
 

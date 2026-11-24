@@ -530,13 +530,15 @@ function parSpark(values, max){
 // 毎の独立グラフ) / Output tok / Context。行は常に全スロット分keepingし、待機行は
 // 値を薄くして最後の数字だけ残す (グリッドの形を変えない)。Accept 列は
 // Strata の /metrics がスロット毎の下書き数を出さないため無い。
+function parSlotNote(latest){
+  const live = latest && latest.live || {};
+  const active = parNum(live.active);
+  return `<div class="par-note">このサーバーはスロット毎の内訳を出していません。${active != null ? "アクティブ " + parInt(active) + " 本・" : ""}全スロット合算のデコード速度だけを描いています。</div>`;
+}
+/* 行 (head + 各スロット) だけの HTML。容器 (.par-slots) は呼び出し側が持ち、
+   patchRows で行単位の選択的更新をする (1 行の選択で他のスロットを止めない)。 */
 function parSlotTable(latest, series, p){
   const slots = latest && Array.isArray(latest.slots) ? latest.slots : [];
-  if (!slots.length){
-    const live = latest && latest.live || {};
-    const active = parNum(live.active);
-    return `<div class="par-note">このサーバーはスロット毎の内訳を出していません。${active != null ? "アクティブ " + parInt(active) + " 本・" : ""}全スロット合算のデコード速度だけを描いています。</div>`;
-  }
   const st = {
     idle: ["待機", ""], reading: ["読み込み", "warn"], prefill: ["読み込み", "warn"],
     generating: ["生成中", "ok"], decoding: ["生成中", "ok"],   // basalt/Strata とも decoding を返す
@@ -556,7 +558,7 @@ function parSlotTable(latest, series, p){
     const mut = busy ? "" : " mut";
     const ctx = busy ? prompt : (s.held_tokens != null ? s.held_tokens : shown.prompt);
     const acc = s.accept != null ? s.accept + "%" : "-";
-    return `<div class="par-srow" role="row">
+    return `<div class="par-srow" data-row="slot-${idx}" role="row">
       <span class="par-slotid"><span class="nm">Slot ${idx + 1}</span><i class="${cls}">${esc(label)}</i></span>
       <span class="par-num${mut}">${parF1(shown.tok_s)}</span>
       <span class="par-sk">${parSpark(series[k] || [], max)}</span>
@@ -565,13 +567,15 @@ function parSlotTable(latest, series, p){
       <span class="par-num par-acc${mut}">${acc}</span>
     </div>`;
   }).join("");
-  const busyN = slots.filter(s => (s.state || "") !== "idle").length;
-  return `<div class="par-slots" role="table" aria-label="スロット別の稼働と直近 60 秒">
-    <div class="par-srow par-head" role="row">
+  return `<div class="par-srow par-head" data-row="head" role="row">
       <span>Slot</span><span>tok/s</span><span>Last 60 s</span><span class="par-gen">Output tok</span><span class="par-ctx">Context</span><span class="par-acc">Accept</span>
-    </div>${rows}
-  </div>
-  <div class="par-foot">${busyN} / ${slots.length} スロット稼働${parNum(latest.live && latest.live.queued) > 0 ? ` · 待ち ${parInt(latest.live.queued)}` : ""}</div>`;
+    </div>${rows}`;
+}
+function parSlotFoot(latest){
+  const slots = latest && Array.isArray(latest.slots) ? latest.slots : [];
+  if (!slots.length) return "";
+  const busyN = slots.filter(s => (s.state || "") !== "idle").length;
+  return `<div class="par-foot">${busyN} / ${slots.length} スロット稼働${parNum(latest.live && latest.live.queued) > 0 ? ` · 待ち ${parInt(latest.live.queued)}` : ""}</div>`;
 }
 function renderHomeParallel(){
   const el = $("#home-par"), sel = $("#home-par-select"), dailyEl = $("#home-par-daily");
@@ -666,9 +670,25 @@ function renderHomeParallel(){
     <span>max ${parInt(max)} tok/s</span>
     <span>${p.samples.length} 点 / ${PAR_HIST} 秒</span>
   </div>`;
-  setHtml(el, `<div class="par-chart-wrap">${meta}${chart}
+  /* チャート (毎秒のライブ) とスロット表を別容器に: 表でテキスト選択して読んで
+     いる間は表だけ後回しになり、チャートと現在値は動き続ける。 */
+  if (!el.querySelector("[data-par-chart]")) el.innerHTML = `<div data-par-chart></div><div data-par-slots></div>`;
+  const chEl = el.querySelector("[data-par-chart]"), slEl = el.querySelector("[data-par-slots]");
+  const chartHtml = `<div class="par-chart-wrap">${meta}${chart}
     <div class="par-axis"><span>60 秒前</span><span>30 秒</span><span>現在</span></div>
-  </div>${errNote}${parSlotTable(latest, slotSeries, p)}`, "home-par", renderHomeParallel);
+  </div>${errNote}`;
+  if (chEl._html !== chartHtml) { chEl._html = chartHtml; chEl.innerHTML = chartHtml; }
+  /* スロット表は行単位: 1 行を選択して読んでいても、他のスロットの数値は進む */
+  if (!slEl.querySelector("[data-par-tbl]")) slEl.innerHTML = `<div data-par-tbl></div><div data-par-foot></div>`;
+  const tblEl = slEl.querySelector("[data-par-tbl]");
+  if (latest && Array.isArray(latest.slots) && latest.slots.length) {
+    if (!tblEl.querySelector(".par-slots")) tblEl.innerHTML = `<div class="par-slots" role="table" aria-label="スロット別の稼働と直近 60 秒"></div>`;
+    patchRows(tblEl.querySelector(".par-slots"), parSlotTable(latest, slotSeries, p), "par-slots", renderHomeParallel);
+  } else {
+    setHtml(tblEl, parSlotNote(latest), "par-slots", renderHomeParallel);
+  }
+  const ftEl = slEl.querySelector("[data-par-foot]"), ft = parSlotFoot(latest);
+  if (ftEl._html !== ft) { ftEl._html = ft; ftEl.innerHTML = ft; }
 }
 
 /* ---------------- dashboard: 平均アクティブ数 (1 日窓) ----------------
