@@ -49,9 +49,17 @@ def main(argv: list[str] | None = None) -> None:
     applied = apply_shell_env()
 
     root = find_root()
+    # 実行データは data/ (gitignore 済み) に集約する: HF キャッシュと fork の
+    # モデル置き場が明示設定 (env / シェル設定) で無ければ data/ 配下を既定にする。
+    # 旧置き場からの移行は起動時に datadir.migrate_data_layout が行う。
+    if not os.environ.get("HF_HOME", "").strip() and not os.environ.get("HF_HUB_CACHE", "").strip():
+        os.environ["HF_HOME"] = str(root / "data" / "hf")
+    if not os.environ.get("FREETOKEN_DATA_DIR", "").strip():
+        os.environ["FREETOKEN_DATA_DIR"] = str(root / "data" / "Freetoken-data")
     app = create_app(root)
     print(f"llm-launcher v{__version__}")
     print(f"  project root : {root}")
+    print(f"  data         : {root / 'data'} (モデル / 起動 JSON・sh / HF キャッシュ)")
     if applied:
         print(f"  shell env    : ~/.bashrc 等から補完 (サービスはシェル設定を読まないため): "
               f"{describe_applied(applied)}")

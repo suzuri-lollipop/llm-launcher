@@ -839,7 +839,7 @@ class InstallManager:
             raise InstallError("Strata の実行環境 (.venv) がまだありません。"
                                "先に ① インストールを実行してください")
         try:
-            argv, config_name = strata_setup.build_argv(module_dir, opts or {})
+            argv, config_name = strata_setup.build_argv(module_dir, opts or {}, root=self.root)
         except ValueError as e:
             raise InstallError(str(e)) from None
         fam = str((opts or {}).get("family") or "")
@@ -880,7 +880,7 @@ class InstallManager:
             raise InstallError("Maya の実行環境 (.venv) がまだありません。"
                                "先に ① インストールを実行してください")
         try:
-            argv, config_name = maya_setup.build_argv(module_dir, opts or {})
+            argv, config_name = maya_setup.build_argv(module_dir, opts or {}, root=self.root)
         except ValueError as e:
             raise InstallError(str(e)) from None
         fam = str((opts or {}).get("family") or "")

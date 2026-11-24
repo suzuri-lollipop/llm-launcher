@@ -1,8 +1,8 @@
 """UI モデルダウンロードの Freetoken-data 連携の回帰テスト。
 
-セットアップタブのダウンロードは backend を指定すると setup.sh と同じ
-<data>/models/<org>--<name> へ落ち、完了後に起動 JSON へ記入する。この 3 点
-  1. fork_model_root: clone 隣接の既定 + FREETOKEN_DATA_DIR 上書き (setup.sh と同じ規則)
+セットアップタブのダウンロードは backend を指定すると data/ (gitignore 済み)
+配下の <data>/models/<org>--<name> へ落ち、完了後に起動 JSON へ記入する。この 3 点
+  1. fork_model_root: data/ 配下の既定 + FREETOKEN_DATA_DIR 上書き (setup.sh と同じ規則)
   2. record_launch_json_model: --model-path / model_name だけ更新し、他鍵や
      未導入モジュール (JSON 無し) を触らない
   3. scan_data_models: /api/hf-models がマージするデータフォルダ由来レコード
@@ -24,7 +24,7 @@ def test_fork_model_root_default_and_env(monkeypatch, tmp_path: Path):
     root = tmp_path / "root"
     spec = BACKENDS["freetoken-fork"]
     assert fork_model_root(root, spec) == (
-        root / "module" / "fork" / "Freetoken-data" / "models")
+        root / "data" / "Freetoken-data" / "models")
     monkeypatch.setenv("FREETOKEN_DATA_DIR", str(tmp_path / "data"))
     assert fork_model_root(root, spec) == tmp_path / "data" / "models"
     assert fork_model_root(root, BACKENDS["freetoken"]) is None

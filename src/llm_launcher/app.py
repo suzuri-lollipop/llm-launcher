@@ -38,6 +38,7 @@ from .installer import (INSTALL_SPECS, ActiveJobError, InstallError, InstallMana
 from .models import (ModelError, build_inventory, classify_gguf_files, delete_entry,
                      hf_hub_cache_dir, profile_cache_misses, scan_data_models,
                      scan_hf_cache)
+from . import datadir
 from . import maya_setup
 from . import oom
 from . import parallel_metrics as pm
@@ -626,6 +627,19 @@ def create_app(root: Path) -> FastAPI:
         except Exception as e:  # noqa: BLE001 — 移行失敗で起動を止めない (ログに正直に)
             print(f"strata: レイアウト移行に失敗 (起動は続行): {type(e).__name__}: {e}",
                   file=sys.stderr)
+        # 実行データ置き場の data/ 一本化: 旧 *-data / module 内の起動 JSON・sh /
+        # 既定 HF キャッシュを data/ へ移し、参照パスを書き換える (同一 fs なら
+        # rename で瞬時。起動毎に冪等 — 中断された移行の続きも吸収する)。
+        try:
+            st = datadir.migrate_data_layout(root, profiles_store.load())
+            if st["profiles"]:
+                profiles_store.save()
+            if any(st.values()):
+                print(f"data レイアウト移行: ディレクトリ {st['dirs']} / 起動 JSON・sh {st['pairs']} 組 / "
+                      f"参照書き換え {st['files']} ファイル / プロファイル {st['profiles']} 件 → data/")
+        except Exception as e:  # noqa: BLE001 — 移行失敗で起動を止めない (ログに正直に)
+            print(f"data レイアウト移行に失敗 (起動は続行): {type(e).__name__}: {e}",
+                  file=sys.stderr)
         bench.on_startup()
         # キャリブレーションは 10-40 分の fire-and-forget ジョブ。launcher が OOM kill / restart されると
         # task は死ぬがファイル上の status は "running" のまま残るので、起動時に "lost" へ回復する。
@@ -1118,22 +1132,48 @@ def create_app(root: Path) -> FastAPI:
             before = len(lst)
             gone = [p for p in lst if p["id"] == profile_id]
             lst[:] = [p for p in lst if p["id"] != profile_id]
-            # 生成した basalt の設定 JSON は孤立ファイルとして残さない
-            # (data/launch/basalt-<id>.json のみ。ユーザーの手書き JSON には触らない)
+            # 生成した設定 JSON / 起動 JSON は孤立ファイルとして残さない。
+            # 起動 JSON は同名の .sh と一組で削除する (data/launch/ の生成物だけ。
+            # ユーザーの手書き JSON には触らない)。まだ他のプロファイルが参照して
+            # いる共有 config は削除しない (残るプロファイルの起動を壊さない)。
+            launch = datadir.launch_dir(root).resolve()
+            still_referenced: set[Path] = set()
+            for p in lst:
+                raw = str((p.get("values") or {}).get("config") or "").strip()
+                if raw:
+                    rp = Path(raw).expanduser()
+                    try:
+                        still_referenced.add((rp if rp.is_absolute() else root / rp).resolve())
+                    except OSError:
+                        pass
             for p in gone:
-                if p.get("backend") == "basalt":
+                bid = p.get("backend")
+                if bid == "basalt":
+                    # data/launch/basalt-<id>.json のみ
                     with contextlib.suppress(OSError):
                         _basalt_config_path(profile_id).unlink(missing_ok=True)
-                elif p.get("backend") in ("maya", "strata", "strata-fork"):
-                    # プロファイル専用 config (data/launch/<backend>-<slug>-<uuid8>.json) は
-                    # 孤立ファイルとして残さない (ユーザーの手書き JSON には触らない)
-                    cp = Path(str((p.get("values") or {}).get("config") or ""))
-                    if not cp.is_absolute():
-                        cp = root / cp
-                    if cp.resolve().parent == (root / "data" / "launch").resolve() \
-                            and cp.name.startswith(f"{p.get('backend')}-"):
+                    continue
+                cp = Path(str((p.get("values") or {}).get("config") or ""))
+                if not cp.is_absolute():
+                    cp = root / cp
+                if cp.resolve().parent != launch or cp.resolve() in still_referenced:
+                    continue
+                sh = cp.with_suffix(".sh")
+                if bid in ("maya", "strata", "strata-fork"):
+                    # プロファイル専用 config (data/launch/<backend>-<slug>-<uuid8>.json)
+                    if cp.name.startswith(f"{bid}-"):
                         with contextlib.suppress(OSError):
                             cp.unlink(missing_ok=True)
+                        if datadir.sh_owned(sh):
+                            with contextlib.suppress(OSError):
+                                sh.unlink(missing_ok=True)
+                elif bid in ("freetoken", "freetoken-fork"):
+                    # 起動 JSON + 同名 .sh の一組。生成物だけ削除する
+                    # (.sh の生成目印 か freetoken-<id>.json の固定名で判定)
+                    if datadir.sh_owned(sh) or cp.name == f"freetoken-{profile_id}.json":
+                        with contextlib.suppress(OSError):
+                            cp.unlink(missing_ok=True)
+                            sh.unlink(missing_ok=True)
             return len(lst) < before
         if not profiles_store.mutate(_del):
             raise HTTPException(404, "プロファイルが見つかりません")
@@ -1156,22 +1196,23 @@ def create_app(root: Path) -> FastAPI:
 
     def _launch_new_path(prof: dict[str, Any], b: dict[str, Any],
                          profile_id: str) -> Path:
-        """起動 JSON の保存先。freetoken-fork は Strata 方式にならい
-        プロジェクトルート (module/fork/freetoken) へ「モデル名-uuid」の
-        一意なベース名で置く (同名の .sh と一組)。すでにルート配下に
-        あれば再生成でも同じ名前を使い続ける。他バックエンドは従来通り
+        """起動 JSON の保存先。data/launch/ (gitignore 済み) へ「モデル名-uuid」の
+        一意なベース名で置く (同名の .sh と一組)。すでに data/launch/ 配下に
+        あれば再生成でも同じ名前を使い続ける。freetoken-fork は以前
+        module/fork/freetoken に置いていたが data/launch/ へ移した
+        (既存分は datadir.migrate_data_layout が移行)。他バックエンドは
         values.config か data/launch/freetoken-<id>.json。"""
         v = prof.get("values") or {}
         cur = launch_json_path(root, prof)
+        launch = datadir.launch_dir(root).resolve()
+        if cur is not None and launch in cur.resolve().parents:
+            return cur
         if prof.get("backend") == "freetoken-fork":
-            mod = (root / b["module_path"]).resolve()
-            if cur is not None and mod in cur.resolve().parents:
-                return cur
             label = str(v.get("served_model_name") or prof.get("name")
                         or Path(str(v.get("model_path") or "")).name or "freetoken")
             slug = re.sub(r"[^A-Za-z0-9._-]+", "-", label.replace("\\", "/")
                           .rstrip("/").split("/")[-1]).strip("-.")[:48]
-            return mod / f"{slug or 'freetoken'}-{uuid.uuid4().hex[:8]}.json"
+            return launch / f"{slug or 'freetoken'}-{uuid.uuid4().hex[:8]}.json"
         return cur if cur is not None else root / "data" / "launch" / f"freetoken-{profile_id}.json"
 
     def _launch_sh_text(path: Path, doc: dict[str, Any]) -> str:
@@ -1232,8 +1273,8 @@ def create_app(root: Path) -> FastAPI:
     async def export_launch_json(profile_id: str) -> dict[str, Any]:
         """全項目モードの現値を argv/env へレンダリングして起動 JSON に書き出し、
         プロファイルを config 主体モードへ切り替える (values.config = JSON パス)。
-        freetoken-fork では Strata 方式にならい プロジェクトルートへ
-        「モデル名-uuid」同名の .json / .sh 一組として保存する。"""
+        data/launch/ (gitignore 済み) へ「モデル名-uuid」同名の .json / .sh
+        一組として保存する (freetoken-fork も同じ置き場)。"""
         prof = _launch_profile(profile_id)
         # モデルなしの起動JSONは argparse エラーで起動不能になるため生成しない
         # (セットアップ画面の守卫と二重の防御。2026-10-30 の起動失敗の実例)。
@@ -1259,7 +1300,7 @@ def create_app(root: Path) -> FastAPI:
             "model_name": str((prof.get("values") or {}).get("served_model_name")
                               or prof.get("name") or ""),
         }
-        # freetoken-fork はプロジェクトルートへ モデル名+uuid 一組 (json/sh) で保存
+        # data/launch/ へ モデル名+uuid 一組 (json/sh) で保存
         path = _launch_new_path(prof, b, profile_id)
         sh = _launch_write_pair(path, launch)
 
