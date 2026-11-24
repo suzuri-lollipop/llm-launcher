@@ -41,7 +41,7 @@ def _hf_repo(base: Path, repo: str, files: dict[str, int]) -> Path:
 
 
 def _data_model(root: Path, name: str, files: dict[str, int]) -> Path:
-    d = root / "module" / "fork" / "Freetoken-data" / "models" / name
+    d = root / "data" / "Freetoken-data" / "models" / name
     d.mkdir(parents=True)
     for fname, size in files.items():
         (d / fname).write_bytes(b"x" * size)
@@ -82,11 +82,11 @@ def test_inventory_covers_all_storage_kinds(tmp_path):
     _hf_repo(root / "hub", "jesdga/Qwen3.8-Flash-Next-Basalt",
              {"Qwen3.8-FN-NVFP4-DQ6_K.basalt": 2 << 20})
     _data_model(root, "org--Data", {"model.safetensors": 2 << 20})
-    pack = root / "module" / "Strata-data" / "packs" / "testpack"
+    pack = root / "data" / "Strata-data" / "packs" / "testpack"
     pack.mkdir(parents=True)
     (pack / "w.gguf").write_bytes(b"x" * (2 << 20))
     cfg = _strata_config(root, "test", pack, model_name="test-model")
-    maya_weights = root / "module" / "Maya-data" / "models" / "ds4"
+    maya_weights = root / "data" / "Maya-data" / "models" / "ds4"
     maya_weights.mkdir(parents=True)
     (maya_weights / "w.safetensors").write_bytes(b"x" * (2 << 20))
     maya_mod = root / "module" / "maya"
@@ -159,7 +159,7 @@ def test_inventory_used_by_via_launch_json_and_config(tmp_path):
     prof = {"id": "p1", "name": "FT", "backend": "freetoken-fork",
             "values": {"config": str(launch)}}
     # strata: config JSON の --pack 経由
-    pack = root / "module" / "Strata-data" / "packs" / "pk"
+    pack = root / "data" / "Strata-data" / "packs" / "pk"
     pack.mkdir(parents=True)
     (pack / "w.gguf").write_bytes(b"x" * (2 << 20))
     cfg = _strata_config(root, "pk", pack)
@@ -250,7 +250,7 @@ def test_config_json_is_not_managed_by_models_api(tmp_path):
     """config JSON はプロファイル側の設定: 棚卸しに出ず、モデル API からも削除できない。
     重みの削除ガードは config 経由のプロファイル参照を引き続き守る。"""
     root = tmp_path
-    pack = root / "module" / "Strata-data" / "packs" / "pk"
+    pack = root / "data" / "Strata-data" / "packs" / "pk"
     pack.mkdir(parents=True)
     (pack / "w.gguf").write_bytes(b"x" * (2 << 20))
     cfg = _strata_config(root, "pk", pack)
@@ -273,7 +273,7 @@ def test_delete_never_touches_storage_roots(tmp_path):
     # 置き場ルートそのものを指す細工は棚卸しに現れない (エントリは必ずその配下)
     roots = mm.allowed_delete_roots(tmp_path)
     assert (tmp_path / "hub").resolve() in roots
-    assert (tmp_path / "module" / "Maya-data").resolve() in roots
+    assert (tmp_path / "data" / "Maya-data").resolve() in roots
     # config JSON の置き場 (module 直下) は削除を許さない = プロファイル側
     assert (tmp_path / "module" / "strata").resolve() not in roots
     assert (tmp_path / "module" / "maya").resolve() not in roots

@@ -106,7 +106,9 @@ except Exception:
 # --yes の GPU 既定は「usable 全部」(choose_gpus の推奨)。推奨コンテキストの計算も同じ立场
 vram_total = sum(g["vram_gb"] for g in usable)
 ram = pc.get("ram_gb") or 0.0
-data = M.ROOT.parent / "Maya-data"
+# モデル置き場は launcher の data/Maya-data (cwd = module/maya → root は 2 つ上)。
+# 純正既定 (clone 隣接 Maya-data) ではなく launcher が --models-dir で渡す先を報告する。
+data = Path.cwd().parent.parent / "data" / "Maya-data"
 models = data / "models"
 try:
     pc["data_dir"] = str(data)
@@ -665,13 +667,14 @@ def _merge_config_ready(module_dir: Path, data: dict[str, Any]) -> None:
                 d["have"] = {"files": 1, "found": 1, "gb": w.get("size_gb")}
 
 
-def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
+def build_argv(module_dir: Path, opts: dict[str, Any], *,
+               root: Path | None = None) -> tuple[list[str], str]:
     """UI の選択を純正 maya.py の argv と、できるはずの設定 JSON 名に直す。
 
     ホワイトリスト: family / model は load_options() が submodule から読んだ表のキー、
     context は家系別 CONTEXTS の値、vision は VISIONS。どれか一つでも外れたら
     InstallError 相当の ValueError を投げる (argv 化の前に必ず here を通すこと)。
-    """
+    root は launcher のプロジェクトルート (モデル置き場 data/Maya-data の解決用)。"""
     fam = str(opts.get("family") or "").strip()
     model = str(opts.get("model") or "").strip()
     vision = str(opts.get("vision") or "").strip().lower()
@@ -788,6 +791,10 @@ def build_argv(module_dir: Path, opts: dict[str, Any]) -> tuple[list[str], str]:
                 argv += ["--gpu", str(sel[0])]      # 単一カード指定は純正 --gpu
             else:
                 argv += ["--gpus", ",".join(str(i) for i in sel)]
+    # モデル置き場は launcher の data/ (gitignore 済み) 配下へ明示指定する。
+    # maya.py は config の installer.models_dir に記録するので、起動時もそこを見る。
+    r = root if root is not None else module_dir.parent.parent
+    argv += ["--models-dir", str(r / "data" / "Maya-data" / "models")]
     # 完全非対話: --yes (全質問が既定確定) + --no-start (起動しない) + --plain (TUI でなく
     # プレーンテキスト) + --download-model (モデルダウンロードの確認なし。再開対応は純正)
     argv += ["--yes", "--no-start", "--plain", "--download-model"]

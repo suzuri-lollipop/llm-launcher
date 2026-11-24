@@ -41,7 +41,7 @@ def _layout(root: Path) -> dict:
     """Maya / Strata の最小レイアウト (installer config + 重み + pack メタデータ)。"""
     maya_mod = root / "module" / "maya"
     maya_mod.mkdir(parents=True)
-    quant = root / "module" / "Maya-data" / "models" / "Org" / "Quant"
+    quant = root / "data" / "Maya-data" / "models" / "Org" / "Quant"
     pack = quant / "maya-ds4"
     pack.mkdir(parents=True)
     (quant / "model-00001-of-00002.gguf").write_bytes(b"x" * (2 << 20))
@@ -62,7 +62,7 @@ def _layout(root: Path) -> dict:
     }), "utf-8")
     st_mod = root / "module" / "strata"
     st_mod.mkdir(parents=True)
-    st_data = root / "module" / "Strata-data" / "models" / "org--name"
+    st_data = root / "data" / "Strata-data" / "models" / "org--name"
     st_data.mkdir(parents=True)
     (st_data / "weights.gguf").write_bytes(b"x" * (2 << 20))
     st_cfg = st_mod / "strata-x.json"
@@ -244,7 +244,7 @@ def test_strata_personalization_and_isolation(tmp_path):
 
 def test_migration_at_startup_idempotent(tmp_path):
     lay = _layout(tmp_path)
-    (tmp_path / "data").mkdir()
+    (tmp_path / "data").mkdir(exist_ok=True)
     (tmp_path / "data" / "profiles.json").write_text(json.dumps([
         {"id": "p_m1", "backend": "maya", "name": "m1",
          "values": {"config": str(lay["maya_cfg"])}},

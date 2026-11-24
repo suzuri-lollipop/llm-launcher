@@ -230,9 +230,9 @@ def test_md_dirs_note_pure_function():
         import pytest
         pytest.skip("node not available")
     cases = [
-        {"hm": {"cache_dir": "/home/u/.cache/huggingface/hub",
-                "model_dirs": ["/proj/module/fork/Freetoken-data/models"]},
-         "want": "探索先: /home/u/.cache/huggingface/hub ・ /proj/module/fork/Freetoken-data/models"},
+        {"hm": {"cache_dir": "/proj/data/hf/hub",
+                "model_dirs": ["/proj/data/Freetoken-data/models"]},
+         "want": "探索先: /proj/data/hf/hub ・ /proj/data/Freetoken-data/models"},
         {"hm": {"cache_dir": "/a", "model_dirs": ["/a", "/b"]},
          "want": "探索先: /a ・ /b"},                       # 重複は畳む
         {"hm": None, "want": ""},

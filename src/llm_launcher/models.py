@@ -3,10 +3,13 @@
 対応バックエンド (vLLM / SGLang / llama.cpp / FreeToken 系 / Strata 系 / Maya / Basalt)
 のモデル置き場はそれぞれ違う:
 
-  * HF Hub キャッシュ (models--org--name)     … vLLM / SGLang / llama.cpp / FreeToken / Basalt
-  * <data>/models/<org>--<name> (model_data)  … FreeToken (fork) の Freetoken-data
-  * Strata-data/models・packs                 … Strata / Strata (fork) (純正 setup.py の置き場)
-  * Maya-data/models                          … Project Maya
+  * data/hf/hub (models--org--name)           … vLLM / SGLang / llama.cpp / FreeToken / Basalt
+  * data/Freetoken-data/models/<org>--<name>  … FreeToken (fork) (model_data)
+  * data/Strata-data/models・packs            … Strata / Strata (fork) (純正 setup.py の置き場)
+  * data/Maya-data/models                     … Project Maya
+
+いずれもリポジトリの data/ (gitignore 済み) 配下。旧置き場 (clone 隣接の
+*-data / 既定 HF キャッシュ) からの移行は datadir.migrate_data_layout。
 
 このモジュールはそれらを 1 つの棚卸し (inventory) に束ね、各エントリに
 「どのバックエンドが読める形か」「どのプロファイルが参照しているか」「稼働中か」
@@ -503,7 +506,8 @@ def profile_cache_misses(root: Path, profiles: list[dict[str, Any]],
 def strata_data_dir(root: Path) -> Path | None:
     """Strata のデータフォルダ (純正 setup.py の load_settings と同じ解決)。
     表の読み出し (strata_setup.load_options) は 60s キャッシュ済み subprocess なので
-    棚卸しのたびに叩いても安い。未 clone / 失敗時は module 隣接の Strata-data を見る。"""
+    棚卸しのたびに叩いても安い。未 clone / 失敗時は data/Strata-data (launcher の
+    置き場) を先に見て、旧 module 隣接の残骸もフォールバックで拾う。"""
     mod = root / "module/strata"
     try:
         opts = strata_setup.load_options(mod)
@@ -512,15 +516,17 @@ def strata_data_dir(root: Path) -> Path | None:
             return Path(dd)
     except Exception:  # noqa: BLE001 — 表が読めなくても棚卸し全体は止めない
         pass
-    for cand in (mod.parent / "Strata-data", root / "module/Strata-data"):
+    for cand in (root / "data/Strata-data", mod.parent / "Strata-data",
+                 root / "module/Strata-data"):
         if cand.is_dir():
             return cand
     return None
 
 
 def maya_data_dir(root: Path) -> Path:
-    """Maya のデータフォルダ (maya.sh の既定 = clone 隣接の Maya-data)。"""
-    return (root / "module/maya").parent / "Maya-data"
+    """Maya のデータフォルダ (launcher の置き場 = data/Maya-data。
+    maya.py へは --models-dir で渡す。旧 clone 隣接からの移行は datadir)。"""
+    return root / "data" / "Maya-data"
 
 
 def model_data_roots(root: Path) -> list[tuple[str, Path]]:
