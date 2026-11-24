@@ -774,7 +774,8 @@ class PiTool:
 # 自動選択: bwrap が「実際に動く」なら bwrap、駄目なら docker、どちらも駄目なら
 # サンドボックス ON の実行を拒否する (OFF 明示時のみ隔離なしで実行)。
 
-SANDBOX_IMAGE_DEFAULT = "python:3.12-slim"   # glibc + python3 (生成アプリの preview 用)
+SANDBOX_IMAGE_DEFAULT = "llm-launcher/coding-sandbox:1"   # python3 + curl + git + procps
+SANDBOX_IMAGE_FALLBACK = "python:3.12-slim"               # 未ビルド時のフォールバック (python3 は在る)
 CONTAINER_PREFIX = "llmcb-"
 _probe_cache: dict[str, Any] = {}
 
@@ -822,6 +823,20 @@ def sandbox_image(settings: dict[str, Any] | None = None) -> str:
                or "").strip() or SANDBOX_IMAGE_DEFAULT
 
 
+def effective_sandbox_image(settings: dict[str, Any] | None = None) -> str:
+    """実際に使うイメージ。既定 (coding-sandbox) が未ビルドなら python:3.12-slim へ
+    フォールバックする (pi の mount はパッケージ単体なので python3 は消えない)。
+    明示指定 (coding.sandbox_image) が無ければ従来どおり未取得 = 起動拒否 + hint。"""
+    img = sandbox_image(settings)
+    if docker_image_present(img):
+        return img
+    explicit = str(((settings or {}).get("coding") or {}).get("sandbox_image")
+                   or "").strip()
+    if not explicit and docker_image_present(SANDBOX_IMAGE_FALLBACK):
+        return SANDBOX_IMAGE_FALLBACK
+    return img
+
+
 def docker_image_present(image: str) -> bool:
     key = f"image:{image}"
     if key not in _probe_cache:
@@ -838,23 +853,28 @@ def sandbox_backend(settings: dict[str, Any] | None = None) -> str:
     """使えるサンドバックエンドを自動選択 ("bwrap" | "docker" | "")。"""
     if bwrap_works():
         return "bwrap"
-    if docker_works() and docker_image_present(sandbox_image(settings)):
+    if docker_works() and docker_image_present(effective_sandbox_image(settings)):
         return "docker"
     return ""
 
 
 def sandbox_info(settings: dict[str, Any] | None = None) -> dict[str, Any]:
     backend = sandbox_backend(settings)
-    img = sandbox_image(settings)
+    img = effective_sandbox_image(settings)
     hint = ""
     if not backend:
         if docker_works() and not docker_image_present(img):
-            hint = f"docker pull {img}"
+            hint = (f"./scripts/coding-sandbox-build.sh で {SANDBOX_IMAGE_DEFAULT} を"
+                    f"ビルドするか docker pull {img}")
         elif bwrap_available() and not bwrap_works():
             hint = ("bwrap は userns 制限で動作しません。Docker を導入するか "
-                    f"docker pull {img} でイメージを取得してください")
+                    f"./scripts/coding-sandbox-build.sh で {SANDBOX_IMAGE_DEFAULT} を"
+                    "ビルドしてください")
         else:
             hint = "sudo apt install bubblewrap / Docker のいずれかを導入してください"
+    elif img == SANDBOX_IMAGE_FALLBACK:
+        hint = (f"{SANDBOX_IMAGE_DEFAULT} 未ビルドのため {SANDBOX_IMAGE_FALLBACK} で実行中"
+                " (curl / git は入りません)。./scripts/coding-sandbox-build.sh でビルドできます")
     return {"bwrap": bwrap_available(), "bwrap_ok": bwrap_works(),
             "docker": docker_available(), "docker_ok": docker_works(),
             "backend": backend, "image": img,
@@ -896,21 +916,28 @@ def sandbox_argv(run_dir: Path, cwd: Path, *, ro_binds: list[Path] | None = None
 def pi_runtime_mounts(pi_cmd: str) -> list[Path]:
     """docker に読み取り専用で渡す pi 実行環境のパス。
 
-    pi.dev インストーラの standalone 配置 (~/.local/bin/pi/ 一式) はディレクトリごと、
-    npm グローバル (/usr/local/bin/pi → node_modules) は /usr/local ごと bind する。"""
+    pi.dev インストーラの standalone 配置 (~/.local/bin/pi/ 一式) はディレクトリごと。
+    npm グローバル等は **パッケージ本体だけ** を bind する。/usr/local ごと bind すると
+    イメージの /usr/local が上書きされ、python:3.12-slim の python3
+    (/usr/local/bin/python3) が消えて「サンドボックスに Python が無い」になる
+    (2026-11-24 のベンチで両モデルとも python3 を見つけられなかった実害)。
+    node はホストバイナリをファイル mount する (bookworm glibc と互換)。
+    ランチャ symlink は mount しない: ファイル mount だと cli.js がパッケージ外に
+    単体配置され、ESM の相対 import (./chunks/...) が解決できなくなる。
+    代わりに docker 側は解決済み実パス (パッケージ mount 内) を実行する。"""
     p = Path(pi_cmd).resolve()
     if p.parent.name == "pi" and (p.parent / "package.json").exists():
         return [p.parent]
     mounts: list[Path] = []
-    if str(p).startswith("/usr/local/"):
-        mounts.append(Path("/usr/local"))
-    else:
-        mounts.append(p.parent)
+    pkg = p.parent
+    while pkg != pkg.parent and not (pkg / "package.json").exists():
+        pkg = pkg.parent
+    mounts.append(pkg if (pkg / "package.json").exists() else p.parent)
     node = shutil.which("node")
     if node:
-        np = Path(node).resolve()
-        if not str(np).startswith("/usr/local/") and np.parent not in mounts:
-            mounts.append(np.parent)
+        np = Path(node)
+        if not any(np == m or np.is_relative_to(m) for m in mounts if m.is_dir()):
+            mounts.append(np)
     return mounts
 
 
@@ -1608,8 +1635,11 @@ class CodingManager:
         backend = sandbox_backend(self.pi.settings.load())
         if backend == "docker":
             name = f"{CONTAINER_PREFIX}{run['id']}-{phase}"
+            # ランチャ symlink (/usr/local/bin/pi 等) はコンテナに無い。パッケージ
+            # mount 内の解決済み実パスを実行する (ESM 相対 import はパッケージ構造が要る)
+            inner = [str(Path(pi_cmd).resolve()), *inner[1:]]
             argv = docker_argv(rd, ws, ro_binds=ro_binds, env=env,
-                               image=sandbox_image(self.pi.settings.load()), name=name,
+                               image=effective_sandbox_image(self.pi.settings.load()), name=name,
                                pi_mounts=pi_runtime_mounts(pi_cmd)) + inner
             return argv, dict(os.environ), name
         # bwrap (動くことは start() で確認済み)
@@ -1892,7 +1922,7 @@ class CodingManager:
         if backend == "docker":
             container = f"{CONTAINER_PREFIX}pv-{rid}"
             docker_rm(container)                      # 前回の残骸があれば消す
-            argv = docker_argv(rd, ws, env=env, image=sandbox_image(settings),
+            argv = docker_argv(rd, ws, env=env, image=effective_sandbox_image(settings),
                                name=container) + cmd_argv
             cli_env = dict(os.environ)
         elif backend == "bwrap":

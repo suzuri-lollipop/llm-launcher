@@ -274,12 +274,19 @@ pi と生成アプリのプレビューはサンドボックス内で実行し�
    制限されている環境ではバイナリがあっても動かないため、実際に namespace を作れるか
    起動時にプローブして判定します。
 2. **Docker** — bwrap が使えない環境向け (pi 公式もコンテナ化を推奨)。
-   `python:3.12-slim` イメージ (glibc + python3) に実行ディレクトリを rw ボリューム、
-   スキルフォルダ / pi 実行環境を ro ボリュームで渡し、`--network host` で
-   127.0.0.1 のモデルサーバー / プレビューポートへ届くようにします。
+   既定イメージは **`llm-launcher/coding-sandbox:1`** (`python:3.12-slim` に
+   curl / git / procps を足した標準的な Linux 環境。`./scripts/coding-sandbox-build.sh`
+   でビルド)。未ビルドなら `python:3.12-slim` へフォールバック (python3 は在る)。
+   実行ディレクトリを rw ボリューム、スキルフォルダ / pi 実行環境を ro ボリュームで渡し、
+   `--network host` で 127.0.0.1 のモデルサーバー / プレビューポートへ届くようにします。
+   **pi の mount はパッケージ単体 + node バイナリのファイル mount** です
+   (`/usr/local` ごと bind するとイメージの `/usr/local/bin/python3` が上書きされて
+   「サンドボックスに Python が無い」になるため。2026-11-24 のベンチで両モデルとも
+   python3 を見つけられず、検証が迂回した実害)。コンテナ内では pi をパッケージ内の
+   解決済み実パスで実行します (ESM 相対 import がパッケージ構造を要求するため)。
    `--user` で launcher と同じ uid、`--init` でシグナル転送、コンテナ名は `llmcb-` 接頭辞
    (中断時は `docker rm -f`、launcher 再起動時は残骸を一掃)。
-   イメージは `docker pull python:3.12-slim` で取得 (settings.json の `coding.sandbox_image` で変更可)。
+   イメージは settings.json の `coding.sandbox_image` で変更可 (明示指定はフォールバックしない)。
    **注意**: docker daemon が `/tmp` を共有しない構成 (systemd `PrivateTmp` 等) では
    `/tmp` 配下のデータディレクトリを bind できません。launcher のデータは通常
    ホーム配下 (`data/`) なので問題になりません。

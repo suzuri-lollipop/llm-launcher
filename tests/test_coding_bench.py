@@ -444,6 +444,53 @@ def test_docker_argv_and_pi_mounts(tmp_path):
     assert "--init" in argv and "--user" in argv
 
 
+def test_pi_mounts_npm_global_keeps_image_python(tmp_path, monkeypatch):
+    """npm グローバル pi はパッケージ単体 + node のファイル mount。
+    /usr/local ごと bind するとイメージの python3 (/usr/local/bin/python3) が
+    上書きされて消えるため、ディレクトリごと渡さない (2026-11-24 ベンチ実害)。
+    ランチャ symlink のファイル mount もしない (cli.js がパッケージ外へ単体配置され
+    ESM 相対 import が壊れる)。docker 側は解決済み実パスを実行する。"""
+    pkg = tmp_path / "usr" / "local" / "lib" / "node_modules" / "@e" / "pi-coding-agent"
+    (pkg / "dist" / "bundle").mkdir(parents=True)
+    (pkg / "package.json").write_text("{}")
+    exe = pkg / "dist" / "bundle" / "cli.js"
+    exe.write_text("#!/usr/bin/env node\n")
+    bin_dir = tmp_path / "usr" / "local" / "bin"
+    bin_dir.mkdir(parents=True)
+    launcher = bin_dir / "pi"
+    launcher.symlink_to(exe)
+    node = bin_dir / "node"
+    node.write_text("x")
+    monkeypatch.setattr(coding_mod.shutil, "which",
+                        lambda name: str(node) if name == "node" else None)
+    mounts = coding_mod.pi_runtime_mounts(str(launcher))
+    assert mounts == [pkg, node]
+    assert Path(tmp_path / "usr" / "local") not in mounts
+    rd = tmp_path / "run"
+    ws = rd / "workspace"
+    ws.mkdir(parents=True)
+    argv = coding_mod.docker_argv(rd, ws, image="python:3.12-slim",
+                                  name="llmcb-x-backend", pi_mounts=mounts)
+    assert f"{pkg}:{pkg}:ro" in argv
+    assert f"{node}:{node}:ro" in argv
+    assert f"{launcher}:{launcher}:ro" not in argv
+    assert f"{tmp_path / 'usr' / 'local'}:{tmp_path / 'usr' / 'local'}:ro" not in argv
+
+
+def test_effective_sandbox_image_fallback(monkeypatch):
+    present = {coding_mod.SANDBOX_IMAGE_FALLBACK}
+    monkeypatch.setattr(coding_mod, "docker_image_present", lambda img: img in present)
+    # 既定 (coding-sandbox) 未ビルド → slim へフォールバック
+    assert coding_mod.effective_sandbox_image({}) == coding_mod.SANDBOX_IMAGE_FALLBACK
+    present.add(coding_mod.SANDBOX_IMAGE_DEFAULT)
+    assert coding_mod.effective_sandbox_image({}) == coding_mod.SANDBOX_IMAGE_DEFAULT
+    # 明示指定は黙ってフォールバックしない (未取得 = 起動拒否 + hint の従来動作)
+    s = {"coding": {"sandbox_image": "custom:1"}}
+    assert coding_mod.effective_sandbox_image(s) == "custom:1"
+    present.add("custom:1")
+    assert coding_mod.effective_sandbox_image(s) == "custom:1"
+
+
 def test_pi_failure_marks_run_failed(tmp_path, server):
     _, port = server
     mgr = _manager(tmp_path, _FakeManager(port), _write_fake_pi(tmp_path))
