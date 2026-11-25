@@ -64,38 +64,72 @@ PREVIEW_READY_TIMEOUT = 20.0
 # ------------------------------------------------------------------ デフォルト資材
 
 DEFAULT_BACKEND_PROMPT = """\
-タスク管理アプリのバックエンドを backend/ ディレクトリに作成してください。
+\
+プロジェクトとタスクを管理する API のバックエンドを backend/ ディレクトリに作成してください。
+単純な CRUD ではなく、ビジネスルール・検索/ページング・集計・競合制御を正しく実装することが課題です。
 
 要件:
 - Python 3 の標準ライブラリのみ (外部パッケージ・pip install・ネットワークアクセス禁止)
-- エントリポイントは backend/server.py。127.0.0.1 で listen し、ポートは環境変数 PORT (既定 8000)
-- REST API (JSON):
-  - GET /api/tasks → タスク一覧
-  - POST /api/tasks {"title": "..."} → 作成 (id, title, done, created_at を持つ)
-  - PATCH /api/tasks/{id} {"title"?, "done"?} → 更新
+- エントリポイントは backend/server.py。127.0.0.1 で listen、ポートは環境変数 PORT (既定 8000)
+- データは backend/data.json に永続化。複数スレッド/同時リクエストで壊れないよう
+  ロック + アトミック書き込み (tempfile + os.replace) を行う
+
+リソースとエンドポイント (JSON):
+- プロジェクト
+  - GET /api/projects → 一覧 (各 {id, name, created_at})
+  - POST /api/projects {"name"} → 作成 (name 必須・1〜100 文字、超過/空は 400)
+  - DELETE /api/projects/{id} → 削除。紐づくタスクも全て削除する (cascade)
+- タスク (必ずどれかのプロジェクトに属する)
+  - GET /api/tasks?project_id=&done=&q=&sort=&limit=&offset=
+      project_id で絞り込み / done=true|false / q は title の部分一致 (大文字小文字無視) /
+      sort=created_at|title|priority (既定 created_at 昇順、先頭 "-" で降順) /
+      limit・offset でページング (limit 既定 20・最大 100、不正値は 400)。
+      応答は {"items":[...], "total": 絞り込み後の総件数, "limit", "offset"}
+  - POST /api/tasks {"project_id","title","priority"?,"due_date"?} → 作成。
+      存在しない project_id は 404。title 必須 1〜200 文字。priority は low|medium|high (既定 medium)。
+      due_date は任意の YYYY-MM-DD (不正形式は 400)。
+      {id, project_id, title, done, priority, due_date, version, created_at} を返す (version 初期 1)
+  - GET /api/tasks/{id} → 1 件 (無ければ 404)
+  - PATCH /api/tasks/{id} {"title"?,"done"?,"priority"?,"due_date"?,"version"} → 更新。
+      version は必須。現在の version と一致しなければ 409 (楽観的ロック)。成功で version+1。
+      空 title / 不正 priority / 不正 due_date は 400
   - DELETE /api/tasks/{id} → 削除
-  - GET /api/health → {"ok": true}
-- データは backend/data.json に永続化 (複数リクエストで壊れないように)
-- 静的ファイルも配信する: / は ../frontend/index.html、/style.css 等は ../frontend/ から
-  (正しい Content-Type で。パストラバーサル対策を入れる)
+- 集計
+  - GET /api/stats → {"projects":[{"project_id","name","total","done"}...], "total", "done"}
+- GET /api/health → {"ok": true}
+
+共通:
+- 不正 JSON / 必須欠落 / 型違いは 400、存在しない id は 404、version 不一致は 409。
+  エラー本文は {"error": "..."} 形式
+- 静的ファイルも配信: / は ../frontend/index.html、/style.css 等は ../frontend/ から
+  (正しい Content-Type・パストラバーサル対策を入れる)
 - アプリ内の URL はすべて先頭スラッシュ無しの相対パス (URL プレフィックス付きで配信される可能性がある)
-- 完成したら自分で動作確認 (サーバー起動 → curl か python で API 確認 → 停止) してから終える
+- 完成したら自分で動作確認 (起動 → 正常系 AND 異常系 [400/404/409・ページング・集計・cascade] を
+  確認 → 停止) してから終える
 """
 
 DEFAULT_FRONTEND_PROMPT = """\
-タスク管理アプリのフロントエンドを frontend/ ディレクトリに作成してください。
+\
+プロジェクト & タスク管理のフロントエンドを frontend/ ディレクトリに作成してください。
 バックエンド (backend/server.py) は実装済みで、frontend/ を静的配信します。
 
 要件:
 - index.html / style.css / app.js (vanilla JS。フレームワーク・外部 CDN 禁止)
 - fetch やリンクはすべて先頭スラッシュ無しの相対パス (例: fetch("api/tasks"))
-- 機能: タスク一覧表示、追加フォーム、完了トグル (チェックボックス)、削除ボタン、残り件数表示
-- 読みやすく綺麗な UI (CSS 変数、レスポンシブ。ダークモード対応があると望ましい)
-- fetch 失敗時は画面にエラーメッセージを出す
+- 画面構成: 左にプロジェクト一覧 (作成・削除・選択)、右に選択中プロジェクトのタスク一覧
+- タスク操作: 追加 (title + priority + due_date)、完了トグル、削除。
+  更新は version を送って競合 (409) をハンドリングする
+- 絞り込み: 全て/未完了/完了 のフィルタ + タイトル検索 (入力はデバウンスして API の q に渡す)
+- サーバー側ページング (limit/offset) を使う「もっと見る」またはページャ。総件数 (total) を表示
+- 各プロジェクトのタスク数 / 完了数 (api/stats) を表示
+- fetch 失敗・409 競合は画面にメッセージ表示 (競合時は再取得して最新を表示)
+- 読みやすく綺麗な UI (CSS 変数・レスポンシブ。ダークモード対応があると望ましい)。
+  ボタンはキーボード操作可能で aria-label を付ける
 - 完成したら自分でバックエンドを起動して画面と API の連携を確認 (確認後は停止) してから終える
 """
 
 DEFAULT_AGENTS_MD = """\
+\
 # AGENTS.md — コーディングベンチマーク ワークスペースルール
 
 ## レイアウト
@@ -108,19 +142,38 @@ DEFAULT_AGENTS_MD = """\
 - サーバーは 127.0.0.1 で listen。ポートは環境変数 PORT (既定 8000)
 - データは workspace 内のファイルに永続化する
 - workspace の外にファイルを作らない・変更しない
-- 完了前に自分で動作確認をする (サーバー起動 → 確認 → 停止)
+- 依存関係を増やさない。標準ライブラリと vanilla JS で完結させる
+
+## 作業ルーティン (この順で進める)
+1. **読む**: この AGENTS.md・タスクプロンプト・関連スキルを読み、workspace を `ls` して
+   現状を確認する。推測で書き始めない。
+2. **計画する**: データモデル → API → 永続化 → 静的配信 → フロント の順にタスクを分解し、
+   ファイル構成とエッジケース (400/404/409・ページング・cascade・競合) を先に洗い出す。
+3. **小さく実装する**: 一度に一つずつ、読みやすく書く。制約 (標準ライブラリのみ・相対パス等)
+   を都度守る。大きいファイルは一気に書かず、意味のある単位で書く。
+4. **書いた都度確認する**: 意味のある区切りで実際に動かして確かめる。未検証のコードを
+   積み上げない。
+5. **完了前に自己検証する**: 空きポートでサーバーを起動し、正常系だけでなく異常系
+   (不正入力→400 / 不在→404 / version 不一致→409 / トラバーサル拒否 / 集計・ページングの
+   正しさ) も叩いて期待どおりか確認する。サーバーログにエラーが無いか見る。
+6. **直して再検証する**: 失敗したら根本原因を直して 5 をやり直す。確認せず完了としない。
+7. **片付ける**: サーバーを必ず停止し、テストで作ったデータや一時ファイルを消して
+   workspace を綺麗にする (永続データにテストゴミを残さない)。
+8. **報告する**: 何を作り、どう検証したかを簡潔に述べて終える。
 
 ## 品質
 - シンプルで読みやすいコード。コメントは日本語でよい
-- エラーハンドリング (不正入力 → 400、存在しない → 404)
-- 依存関係を増やさない。標準ライブラリと vanilla JS で完結させる
+- エラーハンドリング (不正入力 → 400、存在しない → 404、競合 → 409)
+- 同時リクエストでデータが壊れない (ロック + アトミック書き込み)
+- 「動いた」だけでなく「エッジケースが正しい」ことを確認してから完了とする
 """
 
 DEFAULT_SKILLS: dict[str, str] = {
     "python-stdlib-backend": """\
+\
 ---
 name: python-stdlib-backend
-description: Python 標準ライブラリだけで JSON REST API と静的ファイル配信サーバーを作る。バックエンド実装・server.py・http.server・JSON 永続化のときに使う。
+description: Python 標準ライブラリだけで JSON REST API と静的ファイル配信サーバーを作る。バックエンド実装・server.py・http.server・JSON 永続化・クエリ解析・楽観的ロックのときに使う。
 ---
 
 # Python 標準ライブラリ バックエンド
@@ -137,9 +190,24 @@ description: Python 標準ライブラリだけで JSON REST API と静的ファ
 - 読み込み: `int(self.headers.get("Content-Length", 0))` 分だけ `self.rfile.read`
 - 応答: `self.send_response(code)` → `Content-Type: application/json; charset=utf-8` →
   `Content-Length` → `end_headers()` → `self.wfile.write(json.dumps(...).encode())`
-- 不正 JSON / 必須欠落は 400、存在しない id は 404
+- 不正 JSON / 必須欠落は 400、存在しない id は 404、競合は 409
 - データ永続化は `threading.Lock` で囲んで JSON ファイルへ `json.dump`
   (書き込みは tempfile + os.replace でアトミックに)
+
+## クエリ解析 (検索/ページング/ソート)
+- `urllib.parse.parse_qs(urlsplit(self.path).query)` でクエリを取る
+- limit/offset は int 変換し、範囲外・非数は 400。limit は上限を clamp
+- 絞り込み (project_id / done / q) → ソート → ページング の順で適用し、
+  total は「絞り込み後・ページング前」の件数を返す
+- sort の先頭 "-" で降順。存在しないキーは 400 か既定に落とす (仕様合わせる)
+
+## 楽観的ロック (version)
+- 更新系はボディの version と保存済み version を比較し、不一致なら 409
+- 成功時に version を +1 して保存。比較と更新は同じロック内で原子に行う
+
+## リレーション / cascade
+- 削除時は紐づく子レコードも同じロック内で削除する (取り残しを作らない)
+- 存在しない親を参照する作成は 404 (または仕様により 400)
 
 ## 静的配信
 - `mimetypes.guess_type` で Content-Type を決める (不明は application/octet-stream)
@@ -150,9 +218,10 @@ description: Python 標準ライブラリだけで JSON REST API と静的ファ
 - `PORT=<空きポート> python3 backend/server.py &` で起動し、curl か urllib で確認したら必ず kill
 """,
     "vanilla-frontend": """\
+\
 ---
 name: vanilla-frontend
-description: フレームワーク無しの HTML/CSS/JS でフロントエンドを作る。index.html・fetch・相対パス・レスポンシブ UI のときに使う。
+description: フレームワーク無しの HTML/CSS/JS でフロントエンドを作る。index.html・fetch・相対パス・レスポンシブ UI・デバウンス検索・ページングのときに使う。
 ---
 
 # Vanilla フロントエンド
@@ -168,6 +237,12 @@ description: フレームワーク無しの HTML/CSS/JS でフロントエンド
 - fetch も相対パス: `fetch("api/tasks")`、`fetch("api/tasks/" + id, {method: "PATCH", ...})`
 - ラッパーを 1 つ作る: 応答 !ok のとき本文を読んで Error を投げ、画面にメッセージ表示
 - 送信系は `Content-Type: application/json` を付ける
+- クエリは `URLSearchParams` で組む (例: project_id / done / q / limit / offset)
+
+## 検索 / ページング / 競合
+- 検索入力はデバウンス (例: 300ms) してから API の q に渡す (毎打鍵 fetch しない)
+- 「もっと見る」は offset を limit ずつ進めて取得し、既存一覧に追加描画。total で残数を判定
+- 更新は version を送る。409 が返ったら再取得して最新を表示し、競合があった旨を伝える
 
 ## UI
 - セマンティック HTML (header/main/ul/form/button)
@@ -177,23 +252,31 @@ description: フレームワーク無しの HTML/CSS/JS でフロントエンド
 - 状態変更 (追加/完了/削除) 後は一覧を再取得して描画し直す (単純に保つ)
 """,
     "self-check": """\
+\
 ---
 name: self-check
-description: 実装の完了前に自分で動作確認をする手順。サーバー起動・API 確認・静的配信確認・停止までの自己検証に使う。
+description: 実装の完了前に自分で動作確認をする手順。サーバー起動・正常系/異常系 API 確認・静的配信確認・停止までの自己検証に使う。
 ---
 
 # 自己検証チェックリスト
 
-完了を宣言する前に必ず実施する。
+完了を宣言する前に必ず実施する。「動いた」だけでなく「エッジケースが正しい」ことを確かめる。
 
 1. 空きポートを探す: `python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'`
 2. サーバー起動: `PORT=<ポート> python3 backend/server.py > /tmp/server.log 2>&1 &`
    (サンドボックス内では /tmp が使える)
 3. 起動待ち (最大 10 秒): health エンドポイントを urllib でポーリング
-4. API 確認: 作成 → 一覧 → 更新 → 削除 の順に curl か python で叩き、期待レスポンスか確認
-5. 静的配信確認: / が HTML を返すか、Content-Type が正しいか、`/../` が拒否されるか
-6. サーバーを必ず kill する (`kill %1` または pid 指定)。ログにエラーが無いか確認
-7. 失敗したら修正して 1 からやり直す。確認せずに完了としない
+4. 正常系: プロジェクト作成 → タスク作成 → 一覧 → 更新 → 削除 の順に叩き、期待レスポンスか確認
+5. 異常系 (必ず実施):
+   - 不正 JSON / 必須欠落 / 不正 priority・due_date → 400
+   - 存在しない id / 存在しない project_id → 404
+   - PATCH で古い version を送る → 409、正しい version なら成功し version+1
+   - プロジェクト削除で紐づくタスクも消える (cascade)
+6. クエリ確認: q 検索 / done フィルタ / sort / limit・offset が効き、total が絞り込み後件数と一致
+7. 集計確認: /api/stats の total・done が実データと一致
+8. 静的配信確認: / が HTML を返すか、Content-Type が正しいか、`/../` が拒否されるか
+9. サーバーを必ず kill する (`kill %1` または pid 指定)。ログにエラーが無いか確認
+10. テストで作ったデータ/一時ファイルを消す。失敗したら修正して 1 からやり直す。確認せずに完了としない
 """,
 }
 
